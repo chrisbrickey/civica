@@ -1,0 +1,14 @@
+# python
+__pycache__/
+.venv/
+
+# raw and normalized source data
+data/
+
+# IDE
+.idea/
+.DS_Store
+
+# AI
+.claude/
+CLAUDE.md
