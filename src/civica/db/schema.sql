@@ -1,0 +1,1 @@
+-- Schema for Civica. Step 1: empty. Later steps append idempotent CREATE statements.

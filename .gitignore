@@ -12,3 +12,6 @@ data/
 # AI
 .claude/
 CLAUDE.md
+
+# Environment
+.env

@@ -21,7 +21,7 @@ See `docs/mvp-overview.md` for full scope.
 - **HTML fixtures:** one small `<html>` file per capture-test scenario (minimal, real-shaped enough to exercise the normalizer). Store under `tests/fixtures/html/`.
 - **Question fixtures:** small hand-written multiple-choice questions in French (2–3 total) with an obviously fake correct-answer index. Never copy real ministry questions into tests.
 - **Learner fixtures:** synthetic `user_id`s like `test-user-alex`, `test-user-jordan`. Never use real names.
-- **DB fixtures:** all tests that touch Postgres use a per-test schema created and dropped by a `conftest.py` fixture against a local test database. External tests (marked `@pytest.mark.external`) may hit real Anthropic/OpenAI endpoints; default `pytest` skips them.
+- **DB fixtures:** the test DB is a dedicated `civica_test` database (separate from `civica`), reached via `TEST_DATABASE_URL`. Tests that write to real tables use a function-scoped, opt-in `db_schema` fixture defined in `tests/conftest.py`. It creates a fresh Postgres schema per test (e.g. `test_<uuid>`), sets it as the connection's `search_path`, applies `schema.sql` into it, and drops the schema on teardown. Tests that only need a live connection (e.g. Step 1's pool tests) do not request the fixture and pay no isolation cost. The fixture itself is built in Step 4, when the first table (`content_chunks`) makes isolation necessary. External tests (marked `@pytest.mark.external`) may hit real Anthropic/OpenAI endpoints; default `pytest` skips them.
 
 ## Schema convention
 
@@ -36,7 +36,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 ---
 
-## Step 1: Project scaffolding + Postgres
+## ✅ Step 1: Project scaffolding + Postgres
 
 **Goal:** Empty project → runnable `uv`-managed Python project with a local Postgres+pgvector container and a shared connection pool.
 
@@ -56,8 +56,9 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Add dev dependencies (`uv add --dev`): `pytest`, `pytest-cov`, `mypy`.
 
 - Environment variables:
-  - Create `.env.example` with `DATABASE_URL=`, `ANTHROPIC_API_KEY=`, `OPENAI_API_KEY=`.
-  - Create `.env` by copying `env.example` and filling in the values; e.g., `DATABASE_URL=postgresql://civica:civica@localhost:5432/civica`
+  - Create `.env.example` with `DATABASE_URL=`, `TEST_DATABASE_URL=`, `ANTHROPIC_API_KEY=`, `OPENAI_API_KEY=`.
+  - Create `.env` by copying `.env.example` and filling in the values; e.g., `DATABASE_URL=postgresql://civica:civica@localhost:5432/civica`
+  - Also set `TEST_DATABASE_URL=postgresql://civica:civica@localhost:5432/civica_test` in both `.env.example` and `.env`. Tests require a separate database to prevent corruption of development data.
   - Add `.env` to `.gitignore` with header `#Environment`.
 
 - **Check In:** Stop and confirm with user that scaffolding and `.env` handling are satisfactory before continuing.
@@ -91,13 +92,15 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
     - Add Technology table within the **Architecture** section: 
   >   ### Technology
   >
-  >  | Dependency             | Purpose                                      |
-  >  |------------------------|----------------------------------------------|
-  >  | `uv`                   | Python package + venv manager                |
-  >  | `python` (3.12)        | Runtime                                      |
-  >  | `pytest`, `mypy`       | Tests and type checking                      |
-  >  | `pgvector` (extension) | Vector similarity search in Postgres         |
-  >  | `psycopg[binary,pool]` | Postgres driver + connection pool            | 
+  > | Dependency             | Purpose                                       |
+  > |------------------------|-----------------------------------------------|
+  > | `uv`                   | Python package + venv manager                 |
+  > | `python` (3.12)        | Runtime                                       |
+  > | `docker`               | Container runtime for local Postgres+pgvector |
+  > | `pgvector` (extension) | Vector similarity search in Postgres          |
+  > | `psycopg[binary,pool]` | Postgres driver + connection pool             |
+  > | `pytest`, `mypy`       | Tests and type checking                       |
+
 
     - Add the following instructions under **Setup** section:
 
@@ -118,7 +121,6 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
     >   Copy `.env.example` to `.env` and fill in `DATABASE_URL`, `ANTHROPIC_API_KEY`, and `OPENAI_API_KEY`.
     >
     >   ### 4. Start Postgres (with pgvector)
-    >
     >   ```
     >   docker compose up -d
     >   ```
@@ -153,6 +155,12 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
     ```
 
 - **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+  - Added test that runs mypy as part of the standard test suite to avoid regressions. 
+  - Added autoflake dependency to detect unused imports and variables. Added a test to run it as part of standard test suite.
+  - Updated `src/civica/db/pool.py` to pass `open=True` explicitly to `psycopg_pool.ConnectionPool(...)` to enforce strictness, which addressed the psycopg_pool 4.x deprecation warning about the default changing to `False`.
+  - Added init script (`docker/postgres/init/01-create-test-db.sql`) to create test database (`civica_test`) on first boot of Postgres database container.
+  - Deferred per-test schema isolation fixture (`db_schema` in `tests/conftest.py`) to Step 4 becuase nothing built in step 1 exercises this fixture.
+  - Made various improvements to setup and development instructions in `README.md`.
 
 ---
 
@@ -240,8 +248,12 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 - **Check In:** Stop and confirm with user that implementation is satisfactory.
 
+- Extend `tests/conftest.py` with the per-test schema fixture (see [Test fixture conventions](#test-fixture-conventions)):
+  - `db_schema` fixture: function-scoped, opt-in. On setup: opens a connection outside the shared pool, creates schema `test_<uuid>`, sets `search_path` to it, calls `apply_schema()`, yields the connection. On teardown: `DROP SCHEMA ... CASCADE` and closes the connection.
+  - Any test that inserts into tables requests `db_schema` and uses its yielded connection instead of `get_pool()`. This keeps the shared pool's connections at `search_path = public` so parallel/other tests do not see the transient schema.
 - **Tests:** 
     - `tests/ingest/test_repository.py`
+      - Uses the `db_schema` fixture.
       - Integration test with fake embeddings (fixed vectors), real Postgres schema. Insert then re-insert same content_hash - assert exactly one row exists.
       - Assert `theme` filter query works.
     - `tests/ingest/test_embedder_external.py`: one `@pytest.mark.external` test that embeds a real string and asserts the returned vector length equals 3072
