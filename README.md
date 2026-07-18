@@ -25,19 +25,6 @@ _MVP uses embeddings of the official study materials in conjunction with an LLM 
 
 ## Architecture
 
-### Technology
-
-| Dependency             | Purpose                                        |
-|------------------------|------------------------------------------------|
-| `uv`                   | Python package + venv manager                  |
-| `python` (3.12)        | Runtime                                        |
-| `docker` (compose v2)  | Container runtime for local databases          |
-| `pgvector`             | Vector similarity search extension of Postgres |
-| `psycopg[binary,pool]` | Postgres driver + connection pool              |
-| `pytest`, `mypy`       | Test suite including linter and type checking  |
-| `autoflake`            | Detects unused imports and variables           |
-
-
 ### Pipelines (anticipated)
 ```
                                         ┌────────┐
@@ -61,6 +48,19 @@ _MVP uses embeddings of the official study materials in conjunction with an LLM 
                                       │    LLM    │
                                       └───────────┘
 ```
+
+### Technology
+
+| Dependency           | Purpose                                        |
+|----------------------|------------------------------------------------|
+| uv                   | Python package + venv manager                  |
+| python (3.12)        | Runtime                                        |
+| docker (compose v2)  | Container runtime for local databases          |
+| pgvector             | Vector similarity search extension of Postgres |
+| psycopg[binary,pool] | Postgres driver + connection pool              |
+| pytest, mypy         | Test suite including linter and type checking  |
+| autoflake            | Detects unused imports and variables           |
+
 
 ## Setup
 
@@ -201,9 +201,11 @@ civica/
   │
   ├── src/civica/               # application package
   │
-  └── tests/                    # unit + integration tests*
+  └── tests/                    
+      └── integration/          # integration tests*
+      └── unit/                 # dependency-free tests that are confined to a single class
 ```
-_*Tests that make real network calls are tagged with `@pytest.mark.external` annotation and are excluded from the default run._
+_*Any tests that make a network call (e.g., to confirm service contracts) are tagged with `@pytest.mark.external` annotation and are excluded from the default run._
 
 
 ### Reference Material
