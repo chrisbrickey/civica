@@ -5,6 +5,8 @@ description = "Memory-aware LLM agent; Learning coach for the French naturalisat
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "httpx>=0.28.1",
     "pgvector>=0.5.0",
     "psycopg[binary,pool]>=3.3.4",
     "python-dotenv>=1.2.2",
