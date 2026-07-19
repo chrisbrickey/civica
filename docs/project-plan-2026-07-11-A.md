@@ -154,7 +154,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
       └── tests/                    # unit + integration tests
     ```
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
   - Added test that runs mypy as part of the standard test suite to avoid regressions. 
   - Added autoflake dependency to detect unused imports and variables. Added a test to run it as part of standard test suite.
   - Updated `src/civica/db/pool.py` to pass `open=True` explicitly to `psycopg_pool.ConnectionPool(...)` to enforce strictness, which addressed the psycopg_pool 4.x deprecation warning about the default changing to `False`.
@@ -164,7 +164,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 ---
 
-## Step 2: Capture ministry thematic sheets (`data/raw/`)
+## ✅ Step 2: Capture ministry thematic sheets (`data/raw/`)
 
 **Goal:** One-shot crawl of `formation-civique.interieur.gouv.fr/fiches-par-thematiques/` that persists every visited page as HTML under `data/raw/thematic_sheets/<slug>/index.html`.
 
@@ -184,13 +184,18 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 - **README:** 
   - Add to project structure diagram: `├── scripts/                  # one-shot ingestion scripts`
   - Add to **Setup** section:
-  > ### 6. Capture and ingest the corpus (one-time, manual)
+  > ### 7. Capture and ingest the corpus (one-time, manual)
   > Because `data/` is git-ignored, each developer must rebuild the corpus locally.
   > ```
   > uv run python -m civica.scripts.capture_thematic_sheets     # Ministry HTML → data/raw/
   > ```
   
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+  - Bifurcated the test suite into `unit/` and `integration/` directories.
+  - Added proper logging. Replaced print statements on the migrate script (added in Step 1).
+  - Discovered that the top-level website provides a sitemap so that was incorporated into the script. Implemented a hybrid approach: 
+    - The script's first pass uses the sitemap as the source of truth, but silently misses pages if the sitemap is stale.
+    - The script's second pass searches all encountered links to catch new pages that may not be listed in the sitemap. A small amount of additional complexity to gain a comprehensive result.
 
 ---
 
@@ -214,7 +219,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Add the `normalize_thematic_sheets` command to the **Setup → 6. Capture and ingest** flow: `uv run python -m civica.scripts.normalize_thematic_sheets   # HTML → data/corpus/`
   - Add `data/corpus/thematic_sheets/` to the project structure diagram (with inline comment).
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -272,7 +277,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Add `ingest_corpus` to **Setup → 6**: `uv run python -m civica.scripts.ingest_corpus               # chunk + embed → pgvector`
   - Add `src/civica/ingest/` to the project structure diagram.
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -292,7 +297,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 - **README:** Consider if anything should be added based on the changes in this section.
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -329,7 +334,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Add to technology table: | `bcrypt`               | Local-secret hashing for username auth       |
   - No new dirs in the project structure diagram (`src/civica/users/` is a sub-package).
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -386,7 +391,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Add `src/civica/memory/` and `src/civica/progress/` to the project structure.
   - Add to technology table: | `langgraph`            | Graph orchestration, checkpointer, store     |
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -410,7 +415,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 - **README:**
   - Add to technology table: | `langchain-anthropic`  | Claude LLM client                            |
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -432,7 +437,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 - **README:** Consider if anything should be added based on the changes in this section.
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -464,7 +469,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 - **README:** Add `src/civica/graph/` to the project structure diagram.
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -498,7 +503,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   > Sign in with a username and local secret (created on first use), then pick a mode: **Teach**, **Quiz**, or **Mock Exam**.
   
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any divertions from the plan.
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 

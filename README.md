@@ -51,15 +51,14 @@ _MVP uses embeddings of the official study materials in conjunction with an LLM 
 
 ### Technology
 
-| Dependency           | Purpose                                        |
+| Major Dependencies   | Purpose                                        |
 |----------------------|------------------------------------------------|
 | uv                   | Python package + venv manager                  |
 | python (3.12)        | Runtime                                        |
 | docker (compose v2)  | Container runtime for local databases          |
 | pgvector             | Vector similarity search extension of Postgres |
 | psycopg[binary,pool] | Postgres driver + connection pool              |
-| pytest, mypy         | Test suite including linter and type checking  |
-| autoflake            | Detects unused imports and variables           |
+| pytest               | Test suite                                     |
 
 
 ## Setup
@@ -111,6 +110,18 @@ On first boot (if the database files are empty), it also runs the init script, w
 - Every statement in `schema.sql` should be idempotent (`CREATE ... IF NOT EXISTS`) so that this command is safe to run at any time.
   As long as the schema statements are idempotent, running the migration command will make sure that the tables exist and will create them only if they do not exist. It will not drop columns or reset state. 
 - This command does not migrate the test database, which is migrated as a side effect of running the test suite.
+
+### 7. Capture the official study corpus
+`data/` is git-ignored so every developer must ingest the corpus.
+
+```
+  uv run python -m civica.scripts.capture_thematic_sheets
+```
+- Scrapes the ministry's [Fiches par thématiques](https://formation-civique.interieur.gouv.fr/fiches-par-thematiques/) using the site's sitemap as source of truth (~257 pages).
+- Executes a second phase that searches all encountered links to catch discrepancies in the actual structure vs the sitemap (in case the sitemap is stale).
+- Rate-limited to ~1 request/second. Expect the full run to take 5-10 minutes. Logs print to terminal for progress monitoring.
+- Persists each page verbatim to `data/raw/thematic_sheets/<theme>/<subtheme>/<sheet>/index.html`, mirroring the URL hierarchy. 
+- Idempotent: Safe to rerun any time to refresh. Pages whose bytes have not changed on the server are not rewritten. _NB: The sessionID is often captured in the HTML, which will trigger a rewrite of the captured HTML even if the french content is unchanged._
 
 
 ## Usage
@@ -202,8 +213,8 @@ civica/
   ├── src/civica/               # application package
   │
   └── tests/                    
-      └── integration/          # integration tests*
-      └── unit/                 # dependency-free tests that are confined to a single class
+        ├── integration/        # integration tests*
+        └── unit/               # dependency-free tests that are confined to a single class
 ```
 _*Any tests that make a network call (e.g., to confirm service contracts) are tagged with `@pytest.mark.external` annotation and are excluded from the default run._
 

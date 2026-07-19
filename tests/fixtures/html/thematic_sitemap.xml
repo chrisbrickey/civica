@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <!-- localhost quirk mirrors real site; host must be rewritten to production -->
+  <url>
+    <loc>http://localhost:8383/fiches-par-thematiques/</loc>
+  </url>
+  <url>
+    <loc>http://localhost:8383/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-sample-alpha/</loc>
+  </url>
+  <url>
+    <loc>http://localhost:8383/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-sample-beta/</loc>
+  </url>
+  <!-- unreferenced: in sitemap but no page links to it (drives unreferenced_in_sitemap warning) -->
+  <url>
+    <loc>http://localhost:8383/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-sample-orphan/</loc>
+  </url>
+  <!-- out-of-scope: must be filtered before fetching -->
+  <url>
+    <loc>http://localhost:8383/mentions-legales/</loc>
+  </url>
+</urlset>

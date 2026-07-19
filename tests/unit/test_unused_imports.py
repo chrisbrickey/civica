@@ -1,11 +1,11 @@
 import subprocess
-from pathlib import Path
 
-_REPO_ROOT = Path(__file__).parent.parent
+import pytest
+
 _TARGETS = ["src", "tests"]
 
 
-def test_no_unused_imports_or_variables() -> None:
+def test_no_unused_imports_or_variables(pytestconfig: pytest.Config) -> None:
     result = subprocess.run(
         [
             "uv", "run", "autoflake",
@@ -16,7 +16,7 @@ def test_no_unused_imports_or_variables() -> None:
             "--ignore-init-module-imports",
             *_TARGETS,
         ],
-        cwd=_REPO_ROOT,
+        cwd=pytestconfig.rootpath,
         capture_output=True,
         text=True,
     )
