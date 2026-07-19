@@ -1,0 +1,29 @@
+{
+  "theme": "principes-et-valeurs-de-la-republique",
+  "slug": "laicite__histoire-de-la-laicite",
+  "title": "Fiche Sample Leaf",
+  "source_url": "https://formation-civique.interieur.gouv.fr/fiches-par-thematiques/principes-et-valeurs-de-la-republique/laicite/histoire-de-la-laicite/",
+  "description": "Dans cette fiche sample vous allez decouvrir un contenu de test.",
+  "sections": [
+    {
+      "id": "objectif-de-la-fiche",
+      "heading": "Objectif de la fiche :",
+      "text": "Comprendre le fonctionnement du test."
+    },
+    {
+      "id": "premiere-section",
+      "heading": "Premiere section",
+      "text": "Ceci est le premier paragraphe de la premiere section. Un deuxieme paragraphe suit dans la meme section."
+    },
+    {
+      "id": "deuxieme-section",
+      "heading": "Deuxieme section",
+      "text": "Deuxieme section : premier item de liste ; deuxieme item de liste."
+    },
+    {
+      "id": "troisieme-section-avec-image",
+      "heading": "Troisieme section avec image",
+      "text": "Bloc image et texte. Un paragraphe de contenu accompagnant une image. lien de reference ."
+    }
+  ]
+}

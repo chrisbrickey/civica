@@ -199,7 +199,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 ---
 
-## Step 3: Normalize captured HTML → `data/corpus/`
+## ✅ Step 3: Normalize captured HTML → `data/corpus/`
 
 **Goal:** Turn each `data/raw/thematic_sheets/<slug>/index.html` into a clean JSON record (`{theme, slug, title, sections: [...]}`) at `data/corpus/thematic_sheets/<theme-slug>/<page-slug>.json`.
 
@@ -220,6 +220,9 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Add `data/corpus/thematic_sheets/` to the project structure diagram (with inline comment).
 
 - **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+  - Added an additional verification phase (`verify_corpus_coverage.py`) that cross-checks the normalized json against the raw html to ensure no critical information was dropped.
+  - Transformed official themes into pydantic model for easier validation and extension (additional properties will be required for subsequent steps).
+  - README: Added detail bullets about the scripts. Added civica package directories to the project structure.
 
 ---
 

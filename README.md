@@ -58,6 +58,7 @@ _MVP uses embeddings of the official study materials in conjunction with an LLM 
 | docker (compose v2)  | Container runtime for local databases          |
 | pgvector             | Vector similarity search extension of Postgres |
 | psycopg[binary,pool] | Postgres driver + connection pool              |
+| pydantic             | Data validation                                |
 | pytest               | Test suite                                     |
 
 
@@ -90,38 +91,48 @@ Copy `.env.example` to `.env` and insert your API keys.
 
 _DATABASE_URL and TEST_DATABASE_URL variables are already present and correct for the default docker setup._
 
-### 5. Create container and databases
+### 5. Stand up database
 
+**A. Create container and databases**
 ```
   docker compose up -d
 ```
-This command starts the Postgres container by reading the recipe (`docker-compose.yml`). 
-It launches pgvector/pgvector:pg16 (Postgres 16 with the vector DB extension pre-installed) as a background container named `civica-postgres`.
-It exposes the container at `localhost:5432`.
+- Starts the Postgres container by reading the recipe (`docker-compose.yml`). 
+- Launches pgvector/pgvector:pg16 (Postgres 16 with the vector DB extension pre-installed) as a background container named `civica-postgres`.
+- Exposes the container at `localhost:5432`. 
+- On first boot (if the database files are empty), it also runs the init script, which creates two new databases: `civica` (development DB) and `civica_test` (test DB).
 
-On first boot (if the database files are empty), it also runs the init script, which creates two new databases: `civica` (development DB) and `civica_test` (test DB).
-
-### 6. Apply the database schema
-
+**B. Apply the database schema**
 ```
   uv run python -m civica.scripts.migrate
 ```
-- This command enables the vector extension of Postgres and executes the SQL migrations (`src/civica/db/schema.sql`) against the development database.
+- Enables the vector extension of Postgres and executes the SQL migrations (`src/civica/db/schema.sql`) against the development database.
 - Every statement in `schema.sql` should be idempotent (`CREATE ... IF NOT EXISTS`) so that this command is safe to run at any time.
   As long as the schema statements are idempotent, running the migration command will make sure that the tables exist and will create them only if they do not exist. It will not drop columns or reset state. 
 - This command does not migrate the test database, which is migrated as a side effect of running the test suite.
 
-### 7. Capture the official study corpus
-`data/` is git-ignored so every developer must ingest the corpus.
+### 6. Ingest the corpus
+`data/` is git-ignored so every developer must ingest and normalize the corpus.
 
+**A. Capture the official study materials**
 ```
-  uv run python -m civica.scripts.capture_thematic_sheets
+  uv run python -m civica.scripts.capture_thematic_sheets     # persists HTML to data/raw/thematic_sheets/
 ```
-- Scrapes the ministry's [Fiches par thématiques](https://formation-civique.interieur.gouv.fr/fiches-par-thematiques/) using the site's sitemap as source of truth (~257 pages).
+- Scrapes the ministry's [Fiches par thématiques](https://formation-civique.interieur.gouv.fr/fiches-par-thematiques/) using the site's sitemap as source of truth (250+ pages).
 - Executes a second phase that searches all encountered links to catch discrepancies in the actual structure vs the sitemap (in case the sitemap is stale).
 - Rate-limited to ~1 request/second. Expect the full run to take 5-10 minutes. Logs print to terminal for progress monitoring.
-- Persists each page verbatim to `data/raw/thematic_sheets/<theme>/<subtheme>/<sheet>/index.html`, mirroring the URL hierarchy. 
 - Idempotent: Safe to rerun any time to refresh. Pages whose bytes have not changed on the server are not rewritten. _NB: The sessionID is often captured in the HTML, which will trigger a rewrite of the captured HTML even if the french content is unchanged._
+
+
+**B. Transform the corpus (raw HTML -> normalized JSON)**
+```
+  uv run python -m civica.scripts.normalize_thematic_sheets   # persists JSON to data/corpus/thematic_sheets/
+```
+- Skips and logs intermediate index/listing pages (theme roots, subtheme card listings).
+- Flattens nested subtheme paths into the page slug with `__` (e.g., `laicite/histoire-de-la-laicite` -> `laicite__histoire-de-la-laicite`).
+- Theme directory names are ASCII-normalized (the on-disk `vivre-dans-la-societe-française` maps to the canonical slug `vivre-dans-la-societe-francaise`).
+- Output is deterministic (stable key order, UTF-8, no BOM, trailing newline) so re-running produces byte-identical files. Idempotent: Safe to rerun on newly ingested raw HTML.
+- Cross-checks the resulting JSON against the raw HTML to ensure no critical information is dropped.
 
 
 ## Usage
@@ -204,13 +215,19 @@ So the data itself survives the `docker compose down` command and will still be 
 
 ```
 civica/
-  ├── data/                     # git-ignored; raw + normalized corpus
-  ├── docker/postgres/init/     # SQL migration scripts, run on Postgres during first boot
-  ├── docker-compose.yml        # local Postgres+pgvector container recipe
+  ├── data/                     # git-ignored
+  │     ├── raw/                # captured HTML from the ministry site
+  │     └── corpus/             # normalized JSON ready for ingestion
+  │
+  ├── docker/postgres/init/     # SQL migration scripts
+  ├── docker-compose.yml        # Postgres+pgvector container recipe
   │
   ├── docs/                     # design docs and plans
   │
   ├── src/civica/               # application package
+  │     ├── db/                 # connection pool and schema migration
+  │     ├── domain/             # pure business logic, no I/O
+  │     └── scripts/            # offline operations intended for single use
   │
   └── tests/                    
         ├── integration/        # integration tests*
