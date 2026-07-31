@@ -3,7 +3,8 @@
 Civica is a learning coach whose initial focus is helping the user study for the [civics exam required for French naturalization](https://www.immigration.interieur.gouv.fr/documentation/guides-textes-et-brochures/lexamen-civique-pour-demande-de-naturalisation-ou-de-reintegration-dans-nationalite-francaise.html).
 Civica includes a bespoke ingestion pipeline to ground guidance in the study materials published by the French government instead of relying on freeform LLM knowledge.
 
-My primary reason for building Civica is to work on **memory-aware agents** that adapt to human users and improve over time.
+My primary reason for building Civica is to work on **memory-aware agents** that adapt to human users and improve over time,
+as opposed to optimization of chunk embedding and retrieval. See [Luminary RAG app](https://github.com/chrisbrickey/luminary) for optimization techniques including a custom evaluation harness.
 
 ## MVP Features (anticipated)
 
@@ -11,8 +12,6 @@ My primary reason for building Civica is to work on **memory-aware agents** that
 - **Guided study by theme:** the five official themes
 - **Quiz mode:** LLM-generated questions using the official French thematic content as source with explanations grounded in the official study material
 - **Mock exam mode:** mirrors the official format (40 Q, 45-min timer, 80% pass, per-theme weighting) and reports pass/fail plus per-theme scores
-
-_MVP uses embeddings of the official study materials in conjunction with an LLM to develop questions and answers. Use of the official `liste des questions de connaissance` (list of knowledge questions) is deferred to post-MVP due to lack of an official answer key._
 
 ### Examples
 
@@ -22,6 +21,7 @@ _MVP uses embeddings of the official study materials in conjunction with an LLM 
 | "Give me a quiz"                       | an LLM-generated multiple-choice question drawn from the theme most in need of review                        |
 | "Start a mock exam"                    | a 40-question, 45-minute mock mirroring the official theme weighting; reports pass/fail and per-theme scores |
 
+_NB: MVP uses embeddings of the official study materials in conjunction with an LLM to develop questions and answers. Use of the official `liste des questions de connaissance` (list of knowledge questions) is deferred to post-MVP due to lack of an official answer key._
 
 ## Architecture
 
@@ -58,6 +58,7 @@ _MVP uses embeddings of the official study materials in conjunction with an LLM 
 | docker (compose v2)  | Container runtime for local databases          |
 | pgvector             | Vector similarity search extension of Postgres |
 | psycopg[binary,pool] | Postgres driver + connection pool              |
+| langchain-openai     | Corpus embedding                               |
 | pydantic             | Data validation                                |
 | pytest               | Test suite                                     |
 
@@ -135,6 +136,16 @@ _DATABASE_URL and TEST_DATABASE_URL variables are already present and correct fo
 - Cross-checks the resulting JSON against the raw HTML to ensure no critical information is dropped.
 
 
+**C. Chunk and embed the corpus (normalized JSON -> pgvector)**
+```
+  uv run python -m civica.scripts.ingest_corpus               # chunk + embed -> content_chunks table
+```
+- Splits each section into chunks of roughly 800 characters each (100 character overlap), prefixed with the page title and section heading so short chunks keep their retrieval context.
+- Embeds chunks with OpenAI `text-embedding-3-large` (3072 dimensions) and upserts them into the `content_chunks` table, keyed by a sha256 hash of the chunk text.
+- Idempotent and incremental: Chunks already present in the table are skipped so re-running embeds only new or changed content. It also prunes rows whose source disappeared compared to previous ingestion.
+- Requires `OPENAI_API_KEY` in `.env`. As of 2026, it costs less than 1 USD to perform a full embedding run of the entire corpus from scratch.
+
+
 ## Usage
 TBD
 
@@ -175,7 +186,7 @@ The local postgres databases (development and test) are hosted via a docker cont
 ```
   docker --version                                                  # Which docker version?
   docker compose ps                                                 # Is postgres running?
-  docker compose exec postgres psql -U civica -d civica -c '\dx'    # Is vector extension installed?
+  docker compose exec postgres psql -U civica -d civica -c '\dx'    # Which extensions installed (to confirm vector extension is installed)?
   docker compose exec postgres psql -U civica -d civica -c '\dt'    # Which tables exist?
 ```
 
@@ -227,6 +238,7 @@ civica/
   ├── src/civica/               # application package
   │     ├── db/                 # connection pool and schema migration
   │     ├── domain/             # pure business logic, no I/O
+  │     ├── ingest/             # corpus chunking, embedding, and persistence
   │     └── scripts/            # offline operations intended for single use
   │
   └── tests/                    

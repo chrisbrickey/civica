@@ -226,9 +226,15 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 ---
 
-## Step 4: Chunk + embed + ingest corpus into pgvector
+## ✅ Step 4: Chunk + embed + ingest corpus into pgvector
 
-**Goal:** Read `data/corpus/thematic_sheets/**/*.json`, chunk each section into ~800-character passages, embed with OpenAI `text-embedding-3-large`, and upsert into a `content_chunks` table with a pgvector index. Re-running is a no-op unless the source changed.
+**Goals:**
+- Read `data/corpus/thematic_sheets/**/*.json`. 
+- Chunk each section into ~800-character passages.
+- Embed with OpenAI `text-embedding-3-large`.
+- Upsert into a `content_chunks` table with a pgvector index. 
+- Re-running is a no-op unless the source changed.
+- If source pages or the chunk text format changed, re-embedding will be triggered selectively. If rows disappeared from the corpus, old chunks will be pruned to avoid accumulation of stale chunks. After pruning, `content_chunks` is an exact mirror of the current `data/corpus/`.
 
 - Add dependency: `langchain-openai`.
 - Extend `src/civica/db/schema.sql` (see [Schema convention](#schema-convention); developers apply with `uv run python -m civica.scripts.migrate`):
@@ -256,15 +262,15 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 - **Check In:** Stop and confirm with user that implementation is satisfactory.
 
-- Extend `tests/conftest.py` with the per-test schema fixture (see [Test fixture conventions](#test-fixture-conventions)):
-  - `db_schema` fixture: function-scoped, opt-in. On setup: opens a connection outside the shared pool, creates schema `test_<uuid>`, sets `search_path` to it, calls `apply_schema()`, yields the connection. On teardown: `DROP SCHEMA ... CASCADE` and closes the connection.
-  - Any test that inserts into tables requests `db_schema` and uses its yielded connection instead of `get_pool()`. This keeps the shared pool's connections at `search_path = public` so parallel/other tests do not see the transient schema.
 - **Tests:** 
-    - `tests/ingest/test_repository.py`
-      - Uses the `db_schema` fixture.
-      - Integration test with fake embeddings (fixed vectors), real Postgres schema. Insert then re-insert same content_hash - assert exactly one row exists.
-      - Assert `theme` filter query works.
-    - `tests/ingest/test_embedder_external.py`: one `@pytest.mark.external` test that embeds a real string and asserts the returned vector length equals 3072
+  - Extend `tests/conftest.py` with the per-test schema fixture (see [Test fixture conventions](#test-fixture-conventions)):
+    - `db_schema` fixture: function-scoped, opt-in. On setup: opens a connection outside the shared pool, creates schema `test_<uuid>`, sets `search_path` to it, calls `apply_schema()`, yields the connection. On teardown: `DROP SCHEMA ... CASCADE` and closes the connection.
+    - Any test that inserts into tables requests `db_schema` and uses its yielded connection instead of `get_pool()`. This keeps the shared pool's connections at `search_path = public` so parallel/other tests do not see the transient schema.
+  - `tests/ingest/test_repository.py`
+    - Uses the `db_schema` fixture.
+    - Integration test with fake embeddings (fixed vectors), real Postgres schema. Insert then re-insert same content_hash - assert exactly one row exists.
+    - Assert `theme` filter query works.
+  - `tests/ingest/test_embedder_external.py`: one `@pytest.mark.external` test that embeds a real string and asserts the returned vector length equals 3072
 
 - Create `src/civica/ingest/embedder.py` and `src/civica/ingest/repository.py`:
   - `embedder.embed(texts: list[str]) -> list[list[float]]` - thin wrapper around `OpenAIEmbeddings(model="text-embedding-3-large")`.
@@ -273,7 +279,50 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 - Create `src/civica/scripts/ingest_corpus.py`:
   - Entrypoint reads all JSON under `data/corpus/thematic_sheets/`, chunks, embeds (batched), upserts.
 
-- **Check In:** Stop and confirm with user that implementation is satisfactory and that end-to-end ingestion works against a real corpus sample before going forward.
+- **Check In:** 
+  - Stop and confirm with user that implementation is satisfactory and that end-to-end ingestion works against a real corpus sample before going forward.
+  - Ask the user run the following query after running the ingestion script to confirm that the chunks are embedded as expected.
+  ```
+  docker compose exec postgres psql -U civica -d civica -c "
+  SELECT theme,
+         COUNT(*)                    AS chunks,
+         COUNT(DISTINCT page_slug)   AS pages,
+         MIN(vector_dims(embedding)) AS min_dims,
+         MAX(vector_dims(embedding)) AS max_dims,
+         ROUND(AVG(vector_norm(embedding))::numeric, 4) AS avg_norm
+  FROM content_chunks
+  GROUP BY ROLLUP(theme)
+  ORDER BY theme NULLS LAST;"
+  ```
+
+- **Test:** extend `tests/integration/ingest/test_repository.py` (uses the `db_schema` fixture):
+  - Upsert three rows, then call `delete_chunks_not_in` keeping two of the three hashes - assert exactly those two rows remain and the returned deleted-count is 1.
+  - Call `delete_chunks_not_in` keeping all existing hashes - assert no rows are deleted and the returned count is 0.
+  - Call `delete_chunks_not_in` with an empty keep-set - assert it raises `ValueError` and deletes nothing (a full wipe must never happen implicitly; resetting the table is a manual operation).
+  
+- Extend `src/civica/ingest/repository.py`:
+  - `delete_chunks_not_in(keep_hashes: Collection[str], conn: psycopg.Connection | None = None) -> int` - deletes every `content_chunks` row whose `content_hash` is not in `keep_hashes` and returns the number of rows deleted. Raises `ValueError` on an empty `keep_hashes`. Same connection convention as `upsert_chunks` (pool by default, explicit connection in tests).
+  
+- Extend `src/civica/scripts/ingest_corpus.py`:
+  - After the embed/upsert phase, call `delete_chunks_not_in` with the hashes of ALL chunks in the current corpus (not just the newly embedded ones) and log the deleted count.
+  - Safety guard: if the corpus yields zero chunks (e.g. `data/corpus/` missing or empty), skip pruning and log a warning instead of emptying the table.
+  - Because the prune keys on `content_hash`, it also removes obsolete rows when the chunk text format evolves (e.g. a change to the title/heading prefix), since reformatted chunks re-ingest under new hashes.
+
+- **Check In:** Stop and confirm with user that pruning is correct: modify or remove one corpus JSON locally, re-run `ingest_corpus`, and verify the stale rows disappear while the row count matches the current corpus.
+  ```
+  # 1. Row count before
+  docker compose exec postgres psql -U civica -d civica -c "SELECT COUNT(*) FROM content_chunks;"
+
+  # 2. Temporarily remove one corpus page (pick any)
+  mv data/corpus/thematic_sheets/droits-et-devoirs/<some-page>.json /tmp/
+
+  # 3. Re-run ingestion: expect "Pruned N stale row(s)" and 0 new embeddings (no API cost)
+  uv run python -m civica.scripts.ingest_corpus
+
+  # 4. Row count should have dropped by exactly N; then restore and re-run
+  mv /tmp/<some-page>.json data/corpus/thematic_sheets/droits-et-devoirs/
+  uv run python -m civica.scripts.ingest_corpus   # re-embeds just that page's chunks, prunes 0
+  ```
 
 - **README:** 
   - Add to technology table: | `langchain-openai`     | Embeddings client (`text-embedding-3-large`) |
@@ -281,7 +330,12 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Add `src/civica/ingest/` to the project structure diagram.
 
 - **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
-
+  - pgvector's HNSW index caps the `vector` type at 2000 dimensions so I built the index on a `halfvec(3072)` cast which is half-precision and indexable up to 4000 dimensions. Step 5 was updated so retrieval queries use the same cast to hit the index.
+  - Added `chunk_index` column so overlapping chunks within a section have a stable positional identity for citations and re-ingest diffs.
+  - Added a `<page title> - <section heading>` prefix (part of the hashed text) to each chunk prior to embedding so that chunk retrieval stays anchored to the official topic. How? Adding the prefix encourages a co-location of chunks which come from the same topic in the official study materials within the vector DB. The goal is to minimize the chance that responses stray from the official material when studying a given topic. I would not have enforced this kind of categorization on a more general LLM applicationm, but it's appropriate for this narrowly focused exam prep app.
+  - Used NFC-normalized UTF-8 on `content_hash` so that accent-encoding drift will not duplicate rows.
+  - Nested the `db_schema` fixture within `tests/integration/conftest.py` following the logic of the unit/integration test suite split. `apply_schema()` accepts an optional connection so tests can target a per-test schema that is not visible to concurrent tests.
+  
 ---
 
 ## Step 5: Content retriever
@@ -294,6 +348,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 - Create `src/civica/retrieval/content.py`:
   - `search(query: str, theme: Theme | None, k: int = 5) -> list[ContentChunk]`.
   - Embeds the query with the same embedder as ingestion, runs cosine similarity via pgvector, optionally filters by `theme`.
+  - The similarity query must order by `embedding::halfvec(3072) <=> <query>::halfvec(3072)`: the HNSW index is built on that cast (see Step 4 notes), so a plain `embedding <=> <query>` would fall back to a sequential scan. Verify with `EXPLAIN` that the index is used.
   - `ContentChunk` is a small dataclass exposing `text`, `theme`, `page_slug`, `section_id`, `similarity`.
 
 - **Check In:** Stop and confirm with user that implementation is satisfactory and that retrieval quality on a small manual query before continuing.
