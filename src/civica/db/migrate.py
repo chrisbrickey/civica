@@ -3,7 +3,7 @@ from pathlib import Path
 import psycopg
 
 from civica.db.pool import enable_pgvector, get_pool
-from civica.ingest.embedder import EMBEDDING_DIMENSIONS
+from civica.embeddings.embedder import EMBEDDING_DIMENSIONS
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 

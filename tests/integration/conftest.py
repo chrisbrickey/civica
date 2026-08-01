@@ -26,6 +26,29 @@ def _redirect_database_url_to_test_db() -> None:
 
 _redirect_database_url_to_test_db()
 
+_DB_REACHABILITY_TIMEOUT_SECONDS = 2
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _require_reachable_test_db() -> None:
+    """Fail the integration tier fast when the test database is unreachable.
+
+    Without this check, an unreachable database (e.g. the Docker container is
+    not running) wastes the 30 second pool-checkout timeout in every single test.
+    When this smoke test fails, the test file fails fast.
+    """
+    test_database_url = os.environ["TEST_DATABASE_URL"]
+    try:
+        psycopg.connect(
+            test_database_url, connect_timeout=_DB_REACHABILITY_TIMEOUT_SECONDS
+        ).close()
+    except psycopg.OperationalError as error:
+        pytest.fail(
+            f"Cannot reach the test database at TEST_DATABASE_URL: {error}. "
+            "Is Postgres running? Try: docker compose up -d",
+            pytrace=False,
+        )
+
 
 @pytest.fixture()
 def db_schema() -> Generator[psycopg.Connection[psycopg.rows.TupleRow], None, None]:

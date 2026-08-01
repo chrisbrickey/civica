@@ -1,5 +1,6 @@
 """
-Thin wrapper around the OpenAI embeddings client for corpus ingestion.
+Thin wrapper around the OpenAI embeddings client, shared by corpus
+ingestion and content retrieval so both use the same model and dimensions.
 
 The client is instantiated lazily on first call so importing this module
 never requires OPENAI_API_KEY to be set.
@@ -23,3 +24,8 @@ def _get_client() -> OpenAIEmbeddings:
 def embed(texts: list[str]) -> list[list[float]]:
     """Embed a batch of texts, returning one vector per input text."""
     return _get_client().embed_documents(texts)
+
+
+def embed_query(text: str) -> list[float]:
+    """Embed a single retrieval query with the same model used for ingestion."""
+    return _get_client().embed_query(text)
