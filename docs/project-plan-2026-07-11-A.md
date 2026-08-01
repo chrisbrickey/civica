@@ -342,20 +342,45 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 **Goal:** Semantic-search API used by `teach` and `evaluate` nodes.
 
-- **Test:** `tests/retrieval/test_content.py`
-  - Integration test: seed the DB with a few chunks whose embeddings are hand-picked fake vectors, then assert `search` returns them in the expected order for a stubbed query embedding.
+- **Move `embedder.py` to a neutral package** (so retrieval never grows a dependency on `ingest/`):
+  - Move `src/civica/ingest/embedder.py` → `src/civica/embeddings/embedder.py` (create `src/civica/embeddings/__init__.py`). No behavior change.
+  - Rationale: ingestion and retrieval must share one embedder (model + dimensions) to be correct. Doing the move before `retrieval/` exists means retrieval imports the neutral package from day one instead of importing `ingest.embedder` and unwinding it later.
+  - Update all imports: `db/migrate.py` (imports `EMBEDDING_DIMENSIONS`), `scripts/ingest_corpus.py`, and `tests/integration/ingest/test_embedder_external.py` (relocate to `tests/integration/embeddings/test_embedder_external.py` to mirror the source tree).
+  - Verification: full suite green (`uv run pytest`), mypy strict green
+
+- Extend `src/civica/embeddings/embedder.py`:
+  - `embed_query(text: str) -> list[float]`: one-line wrapper around the client's `embed_query` so retrieval uses the same embedder as ingestion without awkward `embed([query])[0]` calls.
+
+- **Check In:** Stop and confirm with user that implementation is satisfactory.
+
+- **Test:** `tests/integration/retrieval/test_content.py` (integration test becuase it seeds real DB rows)
+  - Seed the DB with a few chunks whose embeddings are hand-picked fake vectors, then assert `search` returns them for a stubbed query embedding, ordered by descending `similarity`.
+  - Stub the query embedding by monkeypatching the embed-function reference inside `civica.retrieval.content` (no network; this must not become an `external` test).
+  - Pass the fixture's yielded connection via the `conn` parameter (see below): the fixture's per-test schema is only on that private connection's `search_path`, so a pool-based read would not see the seeded rows.
   - Assert `theme` filter narrows results.
-- Create `src/civica/retrieval/content.py`:
-  - `search(query: str, theme: Theme | None, k: int = 5) -> list[ContentChunk]`.
-  - Embeds the query with the same embedder as ingestion, runs cosine similarity via pgvector, optionally filters by `theme`.
-  - The similarity query must order by `embedding::halfvec(3072) <=> <query>::halfvec(3072)`: the HNSW index is built on that cast (see Step 4 notes), so a plain `embedding <=> <query>` would fall back to a sequential scan. Verify with `EXPLAIN` that the index is used.
-  - `ContentChunk` is a small dataclass exposing `text`, `theme`, `page_slug`, `section_id`, `similarity`.
+  - Assert `similarity` is `1 - cosine_distance` (seed with vectors whose expected distances are hand-computable, e.g. orthogonal unit vectors).
 
-- **Check In:** Stop and confirm with user that implementation is satisfactory and that retrieval quality on a small manual query before continuing.
+- Create `src/civica/retrieval/__init__.py` and `src/civica/retrieval/content.py`:
+  - `search(query: str, theme: Theme | None = None, k: int = 5, conn: psycopg.Connection | None = None) -> list[ContentChunk]`: the optional-connection convention matches `upsert_chunks` and `apply_schema` (pool by default, explicit connection in tests).
+  - Embeds the query with `embedder.embed_query`, runs cosine similarity via pgvector, optionally filters by `theme` (compare the `theme` column against `theme.slug`; `Theme` is a pydantic model per the Step 3 diversion, not an enum).
+  - The similarity query must order by `embedding::halfvec(N) <=> <query>::halfvec(N)`: the HNSW index is built on that cast (see Step 4 notes), so a plain `embedding <=> <query>` would fall back to a sequential scan. Build `N` into the SQL from `embedder.EMBEDDING_DIMENSIONS` (same constant `migrate.py` templates into `schema.sql`); never hardcode 3072.
+  - Call `register_vector(conn)` before passing the query vector as a parameter, same as `repository.py` does.
+  - `<=>` returns cosine *distance*; expose `similarity = 1 - distance` so the field means what its name says.
+  - `ContentChunk` is a small dataclass exposing `text`, `theme: Theme` (hydrated via `Theme.from_slug`), `page_slug`, `section_id`, `chunk_index`, `content_hash`, `similarity`. `chunk_index` and `content_hash` give citations a stable identity (the reason `chunk_index` was added in Step 4).
+  - NB: Chunks were embedded with the `<page title> - <section heading>` prefix but queries are embedded raw without a standard prefix. This asymmetry is acceptable for now. 
+        The order of the two elements in the prefix should be neglible in terms of embedding location.
+        Subsequent steps have been updated to prefix queries as appropriate when the category is known (e.g. tutoring or quizzing within an official topic).
 
-- **README:** Consider if anything should be added based on the changes in this section.
+- **Check In:** Stop and confirm with user that implementation is satisfactory and retrieval quality on a small manual query before continuing. 
+  - Instruct user to perform manual verification: Verify the HNSW index is *usable* with `EXPLAIN` after `SET enable_seqscan = off`. At MVP corpus size the planner may correctly prefer a sequential scan with seqscan enabled, so an automated index-usage assertion would be flaky by design.
+  - NB: With a `theme` filter, HNSW gathers candidates first and post-filters. So filtered searches may return fewer than `k` rows on larger corpora (pgvector 0.8's iterative scans address this). Not worth engineering around at MVP size.
+
+- **README:** Consider if anything should be added based on the changes in this section. Suggestions:
+  - Add `src/civica/retrieval/` and `src/civica/embeddings/` to the project structure diagram
+  - Update any text that references `ingest/embedder.py`.
 
 - **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+  - Added smoke test to ensure database container is up before running subsequent database tests (that will all fail after wasting 30 seconds of timeout).
 
 ---
 
@@ -375,7 +400,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   );
   ```
 
-- **Test:** `tests/users/test_service.py`
+- **Test:** `tests/integration/users/test_service.py` (integration: writes real `users` rows; use the `db_schema` fixture and pass its connection)
   - Register → verify: happy path returns a `UserId`.
   - Register duplicate username → raises `UsernameTaken`.
   - Verify with wrong secret → returns `None`.
@@ -416,7 +441,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   CREATE INDEX IF NOT EXISTS quiz_answers_user_theme_idx ON quiz_answers(user_id, theme);
   ```
 
-- **Test:** `tests/memory/test_checkpointer.py`
+- **Test:** `tests/integration/memory/test_checkpointer.py` (integration: exercises real `PostgresSaver` tables. Note: LangGraph's `setup()` creates its own tables outside `schema.sql`, so the `db_schema` fixture does not isolate them; these tests run against the test DB's public schema and must clean up the threads they create.)
   - A checkpoint saved for thread `t1` can be restored; unrelated threads return `None`.
 - Create `src/civica/memory/__init__.py`, `src/civica/memory/checkpointer.py`, and `src/civica/memory/store.py`:
   - `checkpointer.get_saver() -> PostgresSaver` - singleton bound to the shared connection pool. Calls `setup()` once.
@@ -424,19 +449,21 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 - **Check In:** Stop and confirm with user that the implemenation is satisfactory.
 
-- **Test:** `tests/memory/test_writer.py`
+- **Test:** `tests/integration/memory/test_writer.py` (integration: exercises the real `PostgresStore`; same public-schema caveat as the checkpointer tests - use unique per-test `user_id`s so runs do not collide)
   - `writer.put` with an allowed kind succeeds and is readable back via `writer.get`.
   - `writer.put` with a disallowed kind raises `MemoryNotAllowed`.
   - Reads/writes are scoped per `user_id` - a value written for `alex` is not returned for `jordan`.
+  - A `MistakeEpisode` written with source references (`page_slug`/`section_id` pairs) reads back with those references intact.
 - Create `src/civica/memory/records.py` and `src/civica/memory/writer.py`:
   - `records.py` - typed dataclasses for the four record types: `LearnerProfile`, `TopicMastery`, `MistakeEpisode`, `SessionSummary`. Each has an obvious `Theme`-typed field where relevant. No hidden state.
+  - `MistakeEpisode` must capture the source context of the missed question, not just the theme: `theme`, `question_id`, and `sources` - a list of `(page_slug, section_id)` references to the corpus passages the question was generated from (a question may draw on several). This is what lets Step 10's mistake-driven review reconstruct a corpus-prefix-style retrieval query and re-teach the exact passages the learner missed. Step 9's `Question` records carry their source chunk references forward for this purpose.
   - `writer.MEMORY_WRITE_ALLOWLIST: set[str] = {"learner_profile", "topic_mastery", "mistake_episode", "session_summary"}`.
   - `writer.put(user_id: UserId, namespace_kind: str, key: str, value: Mapping[str, object]) -> None` - raises `MemoryNotAllowed` if `namespace_kind` is not in the allowlist; otherwise calls `store.put(("<kind>", str(user_id)), key, value)`.
   - `writer.get(user_id, namespace_kind, key) -> Mapping[str, object] | None` - thin read passthrough (no allowlist on reads).
 
 - **Check In:** Stop and confirm with user that the implemenation is satisfactory.
 
-- **Test:** `tests/progress/test_quiz_log.py`
+- **Test:** `tests/integration/progress/test_quiz_log.py` (integration: writes real `quiz_answers` rows; use the `db_schema` fixture, which also provides the `users` table for the FK)
   - Log 5 answers, `recent_mistakes(user_id, limit=3)` returns the 3 most recent incorrect ones in reverse-chronological order.
   - `recent_mistakes` for a fresh user returns an empty list.
 - Create `src/civica/progress/quiz_log.py`:
@@ -458,15 +485,16 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 **Goal:** Given a theme and a learner question, produce a concise English explanation (with French vocabulary) grounded in retrieved French corpus chunks.
 
 - Add dependency: `langchain-anthropic`.
-- **Test:** `tests/explain/test_engine.py`
-  - Unit test with a fake retriever (returns fixed chunks) and a fake `ChatAnthropic` (records the prompt, returns a canned response). Assert:
+- **Test:** `tests/unit/explain/test_engine.py`
+  - Unit test (no DB, no network) with a fake retriever (returns fixed chunks) and a fake `ChatAnthropic` (records the prompt, returns a canned response). Assert:
     - The final prompt contains all retrieved passages verbatim.
     - The system message forbids drawing on outside knowledge (assert the exact substring is present).
     - Returned `Explanation.citations` matches the fake retriever's output.
 - Create `src/civica/explain/engine.py`:
   - `explain(user_question: str, theme: Theme) -> Explanation` - calls `retrieval.content.search`, packs top-k passages into a Claude prompt with a fixed system message that mandates using only the provided passages and translating French → English, calls `ChatAnthropic(model="claude-...")`, returns an `Explanation` dataclass with `text`, `citations: list[ContentChunk]`.
+  - Query construction: pass the learner's question to `search` raw, scoped by the hard `theme` filter. Do not prepend theme context to the query here: a natural user question exists, the filter already scopes the theme deterministically, and prefix tokens would dilute the question's own signal. (Contrast with Step 9, where no natural question exists and the query is manufactured from context.)
   - Prompt lives in a `PROMPTS` dict at module top so it can be tested without invoking the LLM.
-- **Test:** `tests/explain/test_engine_external.py` - one `@pytest.mark.external` test that calls Claude with a tiny stub context and asserts a non-empty response.
+- **Test:** `tests/integration/explain/test_engine_external.py` - one `@pytest.mark.external` test that calls Claude with a tiny stub context and asserts a non-empty response (external tests live under `integration/` with the `_external` suffix, matching `test_embedder_external.py`).
 
 - **Check In:** Stop and confirm the implementation with the user. Eyeball the explanation quality on a real theme before moving on.
 
@@ -481,14 +509,16 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 **Goal:** Assemble quiz batches and mock exams that mirror the official structure.
 
-- **Test:** `tests/assessment/test_engine.py`
-  - Fake Claude client returns a deterministic JSON payload of MCQ items. Assert:
+- **Test:** `tests/unit/assessment/test_engine.py`
+  - Unit test (no DB, no network): fake retriever + fake Claude client returning a deterministic JSON payload of MCQ items. Assert:
     - `generate_quiz` returns exactly `n` well-typed questions from the requested theme.
     - `generate_mock_exam` returns exactly 40 questions with the required per-theme counts.
     - `MockExamResult.passed` reflects the 80% threshold at boundaries (31 = fail, 32 = pass, 40 = pass).
+    - The fake retriever records the query it was called with; assert the query is constructed from the theme's `display_name_fr` (never an empty string), per the query-construction rule below.
 - Create `src/civica/assessment/engine.py`:
-  - `generate_quiz(user_id: UserId, theme: Theme, n: int = 5) -> list[Question]` - retrieves corpus passages for the theme, prompts Claude to produce `n` MCQ questions in French (4 options, exactly one correct), returns typed `Question` records.
-  - `generate_mock_exam(user_id: UserId) -> MockExam` - produces exactly 40 questions in the fixed theme distribution (11, 11, 8, 6, 4), also mirroring 28 knowledge + 12 scenario if separable via prompt. `MockExam` exposes `questions`, `time_limit_seconds = 45 * 60`, and a `score(answers) -> MockExamResult` method.
+  - `generate_quiz(user_id: UserId, theme: Theme, n: int = 5) -> list[Question]` - retrieves corpus passages for the theme, prompts Claude to produce `n` MCQ questions in French (4 options, exactly one correct), returns typed `Question` records. Each `Question` carries `sources: list[(page_slug, section_id)]` taken from the retrieved `ContentChunk`s it was generated from, so a wrong answer can be logged as a `MistakeEpisode` (Step 7) with enough context for targeted re-teaching (Step 10).
+  - Query construction: no natural user question exists here, so manufacture the retrieval query from context in the same style as the corpus chunk prefix (`<page title> - <section heading>`, see Step 4 notes): at minimum `theme.display_name_fr`, or `<theme display_name_fr> - <page title>` when targeting a specific page. Combined with the hard `theme` filter, this pulls the query embedding toward that topic's chunk cluster without any corpus change. Vary the targeted page/section across the `n` questions so a quiz batch draws on more than one passage cluster.
+  - `generate_mock_exam(user_id: UserId) -> MockExam` - produces exactly 40 questions in the fixed theme distribution (11, 11, 8, 6, 4), also mirroring 28 knowledge + 12 scenario if separable via prompt. `MockExam` exposes `questions`, `time_limit_seconds = 45 * 60`, and a `score(answers) -> MockExamResult` method. Retrieval per theme follows the same query-construction rule as `generate_quiz`.
   - `MockExamResult` exposes `total_correct`, `passed` (>= 32/40), and `per_theme_scores: dict[Theme, int]`.
 
 - **Check In:** Stop and confirm with user that the question quality is appropriate on a small manual run of `generate_quiz`.
@@ -503,7 +533,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 **Goal:** Deterministic priority router + a single LangGraph that terminates in `teach`, `quiz`, or `mock_exam` and always runs `memory_writer` at the end.
 
-- **Test:** `tests/graph/test_router.py`
+- **Test:** `tests/unit/graph/test_router.py` (unit: stub `memory.writer.get` to return synthetic mastery/mistake values; the router's logic is pure once reads are stubbed)
   - Given synthetic mastery values and no mistakes, assert the router picks the highest-priority theme.
   - With ties, assert the theme with an active mistake episode wins.
 - Create `src/civica/graph/router.py`:
@@ -511,14 +541,15 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 - **Check In:** Stop and confirm with user that the implementation is satisfactory.
 
-- **Test:** `tests/graph/test_graph.py`
-  - Integration test using real `explain`/`assessment` code but fake Claude + fake retriever. Run the graph through the `quiz` mode end-to-end for a test user and assert:
+- **Test:** `tests/integration/graph/test_graph.py`
+  - Integration test using real `explain`/`assessment` code but fake Claude + fake retriever (no network; writes real `quiz_answers` and store rows). Run the graph through the `quiz` mode end-to-end for a test user and assert:
     - A quiz answer written through the graph appears in the raw `quiz_answers` table.
     - `topic_mastery` for the answered theme is updated (via `memory_writer_node`, respecting the allowlist).
     - The mock exam mode produces 40 questions and reports pass/fail.
 - Create `src/civica/graph/nodes.py`:
   - `retrieve_content_node`, `teach_node`, `evaluate_node`, `quiz_node`, `retrieve_question_node`, `mock_exam_node`, `update_mastery_node`, `save_session_summary_node`, `memory_writer_node`.
   - Each node is a plain function `(state) -> state_update`. Business logic lives in `explain`, `assessment`, `memory`; nodes only orchestrate.
+  - Mistake-driven review: when the router selected the theme because of an active `mistake_episode`, `retrieve_content_node` reconstructs the retrieval query from the source context recorded on the episode (theme at minimum; `page_slug`/`section_id` when recorded) in the corpus prefix style, so re-teaching pulls the exact passages the learner missed rather than a generic theme sample. `ContentChunk.chunk_index`/`content_hash` (Step 5) give those citations stable identity across sessions. The needed source context flows from Step 9 (`Question.sources`) into Step 7's `MistakeEpisode.sources`.
 - Create `src/civica/graph/graph.py`:
   - `build_graph() -> CompiledGraph` - compiles the graph with the shared `PostgresSaver` as checkpointer and the shared `PostgresStore` as store.
   - Terminal modes: `teach`, `quiz`, `mock_exam`. `memory_writer` is a required edge before any terminal write.
@@ -535,7 +566,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 **Goal:** A single Streamlit app that handles login, mode selection, and the chat/quiz/mock-exam interactions by driving the compiled LangGraph.
 
-- **Test:** `tests/ui/test_chat_ui.py`
+- **Test:** `tests/integration/ui/test_chat_ui.py` (integration: register/login run through the real `users.service` against the test DB, even though the compiled graph is faked)
   - Use `streamlit.testing.v1.AppTest` to render the app, simulate register + login, select **Teach**, submit a prompt (with the compiled graph replaced by a fake), and assert the response appears in the rendered output.
   - Assert an unauthenticated user cannot access the mode picker.
 - Create `chat_ui.py` at the repo root:

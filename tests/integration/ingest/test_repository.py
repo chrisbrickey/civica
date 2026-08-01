@@ -11,7 +11,7 @@ import psycopg
 import psycopg.rows
 import pytest
 
-from civica.ingest.embedder import EMBEDDING_DIMENSIONS
+from civica.embeddings.embedder import EMBEDDING_DIMENSIONS
 from civica.ingest.repository import ChunkRow, delete_chunks_not_in, upsert_chunks
 
 # ---------------------------------------------------------------------------

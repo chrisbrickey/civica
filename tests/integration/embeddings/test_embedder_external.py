@@ -1,5 +1,5 @@
 """
-External test for civica.ingest.embedder.
+External test for civica.embeddings.embedder.
 
 Makes a real call to the OpenAI embeddings API, so it is marked @pytest.mark.external
 and excluded from the default `uv run pytest` run.
@@ -9,7 +9,7 @@ Run explicitly with `uv run pytest -m external`.
 
 import pytest
 
-from civica.ingest.embedder import EMBEDDING_DIMENSIONS, embed
+from civica.embeddings.embedder import EMBEDDING_DIMENSIONS, embed
 
 
 @pytest.mark.external
