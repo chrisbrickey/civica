@@ -26,9 +26,9 @@ from dotenv import load_dotenv
 
 from civica.db.pool import get_pool
 from civica.domain.themes import Theme
-from civica.ingest.chunker import chunk_section
+from civica.ingestion.chunker import chunk_section
 from civica.embeddings.embedder import embed
-from civica.ingest.repository import ChunkRow, delete_chunks_not_in, upsert_chunks
+from civica.ingestion.repository import ChunkRow, delete_chunks_not_in, upsert_chunks
 from civica.scripts.normalize_thematic_sheets import NormalizedPage
 
 logger = logging.getLogger(__name__)
