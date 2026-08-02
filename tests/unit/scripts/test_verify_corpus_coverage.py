@@ -8,6 +8,7 @@ Fixtures are inlined so each test is self-contained.
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -93,25 +94,6 @@ def _write_corpus(corpus_root: Path, theme: str, slug: str, payload: dict[str, A
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return dest
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def raw_root(tmp_path: Path) -> Path:
-    root = tmp_path / "raw"
-    root.mkdir()
-    return root
-
-
-@pytest.fixture()
-def corpus_root(tmp_path: Path) -> Path:
-    root = tmp_path / "corpus"
-    root.mkdir()
-    return root
 
 
 # ---------------------------------------------------------------------------
@@ -283,15 +265,18 @@ class TestVerificationReportDefaults:
 class TestLogReport:
     """log_report emits INFO summaries on a clean report and WARNINGs when there are findings."""
 
-    def test_clean_report_emits_info_records_only(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    @pytest.fixture(autouse=True)
+    def _capture_verify_logs(self, caplog: pytest.LogCaptureFixture) -> None:
         caplog.set_level(logging.INFO, logger="civica.scripts.verify_corpus_coverage")
 
+    def test_clean_report_emits_info_records_only(
+        self, caplog: pytest.LogCaptureFixture, warning_text: Callable[[], str]
+    ) -> None:
         log_report(VerificationReport())
 
-        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert warnings == [], f"Clean report should emit no WARNINGs; got: {warnings!r}"
+        assert warning_text() == "", (
+            f"Clean report should emit no WARNINGs; got: {warning_text()!r}"
+        )
         text = "\n".join(r.getMessage() for r in caplog.records)
         assert "Unknown cmsfr-block-* classes" in text
         assert "Leaf pages with NO corresponding JSON" in text
@@ -301,8 +286,6 @@ class TestLogReport:
     def test_clean_report_emits_pass_summary_line(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        caplog.set_level(logging.INFO, logger="civica.scripts.verify_corpus_coverage")
-
         log_report(VerificationReport())
 
         text = "\n".join(r.getMessage() for r in caplog.records)
@@ -310,10 +293,8 @@ class TestLogReport:
         assert "no issues found" in text
 
     def test_report_with_findings_emits_warnings_for_each_category(
-        self, caplog: pytest.LogCaptureFixture
+        self, warning_text: Callable[[], str]
     ) -> None:
-        caplog.set_level(logging.INFO, logger="civica.scripts.verify_corpus_coverage")
-
         report = VerificationReport(
             unknown_classes={"cmsfr-block-carousel"},
             leaf_missing_json=[Path("/tmp/raw/foo/index.html")],
@@ -324,9 +305,7 @@ class TestLogReport:
 
         log_report(report)
 
-        warnings_text = "\n".join(
-            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
-        )
+        warnings_text = warning_text()
         assert "cmsfr-block-carousel" in warnings_text
         assert "/tmp/raw/foo/index.html" in warnings_text
         assert "missing-heading-x" in warnings_text
@@ -334,10 +313,8 @@ class TestLogReport:
         assert "theme resolution failed" in warnings_text
 
     def test_report_with_findings_emits_fail_summary_line(
-        self, caplog: pytest.LogCaptureFixture
+        self, warning_text: Callable[[], str]
     ) -> None:
-        caplog.set_level(logging.INFO, logger="civica.scripts.verify_corpus_coverage")
-
         report = VerificationReport(
             leaf_missing_json=[Path("/tmp/raw/foo/index.html")],
             problems=["theme resolution failed"],
@@ -345,9 +322,7 @@ class TestLogReport:
 
         log_report(report)
 
-        warnings_text = "\n".join(
-            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
-        )
+        warnings_text = warning_text()
         assert "RESULT: FAIL" in warnings_text
         assert "2 issue(s) found" in warnings_text
 

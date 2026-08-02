@@ -19,21 +19,15 @@ from civica.domain.themes import (
 KNOWN_SLUG = "droits-et-devoirs"
 UNKNOWN_SLUG = "not-a-real-theme"
 
-EXPECTED_SLUGS = [
-    "principes-et-valeurs-de-la-republique",
-    "droits-et-devoirs",
-    "histoire-geographie-et-culture",
-    "systeme-institutionnel-et-politique",
-    "vivre-dans-la-societe-francaise",
-]
-
-EXPECTED_CONSTANTS = [
-    ("principes-et-valeurs-de-la-republique", PRINCIPES_ET_VALEURS_DE_LA_REPUBLIQUE),
-    ("droits-et-devoirs", DROITS_ET_DEVOIRS),
-    ("histoire-geographie-et-culture", HISTOIRE_GEOGRAPHIE_ET_CULTURE),
-    ("systeme-institutionnel-et-politique", SYSTEME_INSTITUTIONNEL_ET_POLITIQUE),
-    ("vivre-dans-la-societe-francaise", VIVRE_DANS_LA_SOCIETE_FRANCAISE),
-]
+# Slug -> module constant for the five official themes; each slug string is
+# defined here exactly once and every test derives from this mapping.
+EXPECTED_CONSTANTS_BY_SLUG = {
+    "principes-et-valeurs-de-la-republique": PRINCIPES_ET_VALEURS_DE_LA_REPUBLIQUE,
+    "droits-et-devoirs": DROITS_ET_DEVOIRS,
+    "histoire-geographie-et-culture": HISTOIRE_GEOGRAPHIE_ET_CULTURE,
+    "systeme-institutionnel-et-politique": SYSTEME_INSTITUTIONNEL_ET_POLITIQUE,
+    "vivre-dans-la-societe-francaise": VIVRE_DANS_LA_SOCIETE_FRANCAISE,
+}
 
 # ---------------------------------------------------------------------------
 # Theme.from_slug - happy path
@@ -63,8 +57,8 @@ def test_from_slug_unknown_slug_raises_value_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_themes_by_slug_has_exactly_five_entries() -> None:
-    assert len(THEMES_BY_SLUG) == 5
+def test_themes_by_slug_contains_exactly_the_five_official_slugs() -> None:
+    assert set(THEMES_BY_SLUG) == set(EXPECTED_CONSTANTS_BY_SLUG)
 
 
 def test_themes_by_slug_keys_match_value_slug_fields() -> None:
@@ -78,7 +72,7 @@ def test_themes_by_slug_keys_match_value_slug_fields() -> None:
 
 
 def test_all_module_constants_in_themes_by_slug() -> None:
-    for slug, constant in EXPECTED_CONSTANTS:
+    for slug, constant in EXPECTED_CONSTANTS_BY_SLUG.items():
         assert THEMES_BY_SLUG[slug] is constant
 
 

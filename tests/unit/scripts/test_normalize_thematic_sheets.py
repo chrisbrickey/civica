@@ -20,7 +20,6 @@ _KNOWN_THEME = "principes-et-valeurs-de-la-republique"
 _UNKNOWN_THEME = "some-invalid-theme-slug"
 
 _LEAF_SUBPATH = Path("laicite/histoire-de-la-laicite")
-_NESTED_LEAF_SUBPATH = Path("laicite/histoire-de-la-laicite")
 _FLAT_LEAF_SUBPATH = Path("la-langue-de-la-republique")
 
 _EXPECTED_LEAF_SLUG = "laicite__histoire-de-la-laicite"
@@ -46,23 +45,20 @@ def expected_leaf_json(html_fixtures_dir: Path) -> bytes:
     return (html_fixtures_dir / "normalize_leaf_page.expected.json").read_bytes()
 
 
-@pytest.fixture()
-def raw_root(tmp_path: Path) -> Path:
-    root = tmp_path / "raw"
-    root.mkdir()
-    return root
-
-
-@pytest.fixture()
-def corpus_root(tmp_path: Path) -> Path:
-    return tmp_path / "corpus"
-
-
 def _write_page(raw_root: Path, relative_dir: Path, html: bytes) -> Path:
     dest = raw_root / relative_dir / "index.html"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(html)
     return dest
+
+
+def _produced_json(corpus_root: Path, slug: str) -> Path:
+    """Location normalize_all writes a leaf page's JSON to."""
+    return corpus_root / _KNOWN_THEME / f"{slug}.json"
+
+
+def _assert_no_json_written(corpus_root: Path, message: str) -> None:
+    assert not any(corpus_root.rglob("*.json")), message
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +80,7 @@ class TestHappyPath:
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
 
-        produced = corpus_root / _KNOWN_THEME / f"{_EXPECTED_LEAF_SLUG}.json"
+        produced = _produced_json(corpus_root, _EXPECTED_LEAF_SLUG)
         assert produced.exists(), f"Expected {produced} to be written"
         assert produced.read_bytes() == expected_leaf_json, (
             "Produced JSON does not match expected fixture byte-for-byte.\n"
@@ -118,8 +114,8 @@ class TestUnknownTheme:
         with pytest.raises(ValueError):
             normalize_all(raw_root=raw_root, corpus_root=corpus_root)
 
-        assert not corpus_root.exists() or not any(corpus_root.rglob("*.json")), (
-            "No JSON should be written when the theme is unknown."
+        _assert_no_json_written(
+            corpus_root, "No JSON should be written when the theme is unknown."
         )
 
 
@@ -136,8 +132,8 @@ class TestListingPagesAreSkipped:
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
 
-        assert not corpus_root.exists() or not any(corpus_root.rglob("*.json")), (
-            "Listing page should not produce any JSON output."
+        _assert_no_json_written(
+            corpus_root, "Listing page should not produce any JSON output."
         )
 
     def test_subtheme_index_is_not_written(
@@ -156,12 +152,12 @@ class TestListingPagesAreSkipped:
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
 
-        subtheme_output = corpus_root / _KNOWN_THEME / "laicite.json"
+        subtheme_output = _produced_json(corpus_root, "laicite")
         assert not subtheme_output.exists(), (
             "Subtheme index page should be skipped, but a JSON was written."
         )
 
-        leaf_output = corpus_root / _KNOWN_THEME / f"{_EXPECTED_LEAF_SLUG}.json"
+        leaf_output = _produced_json(corpus_root, _EXPECTED_LEAF_SLUG)
         assert leaf_output.exists(), (
             "The nested leaf page should still be normalized."
         )
@@ -180,7 +176,7 @@ class TestSlugFlattening:
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
 
-        produced = corpus_root / _KNOWN_THEME / f"{_EXPECTED_FLAT_LEAF_SLUG}.json"
+        produced = _produced_json(corpus_root, _EXPECTED_FLAT_LEAF_SLUG)
         assert produced.exists(), f"Expected {produced} to be written for a two-level leaf"
 
     def test_three_level_leaf_uses_double_underscore_slug(
@@ -189,11 +185,11 @@ class TestSlugFlattening:
         corpus_root: Path,
         leaf_html: bytes,
     ) -> None:
-        _write_page(raw_root, Path(_KNOWN_THEME) / _NESTED_LEAF_SUBPATH, leaf_html)
+        _write_page(raw_root, Path(_KNOWN_THEME) / _LEAF_SUBPATH, leaf_html)
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
 
-        produced = corpus_root / _KNOWN_THEME / f"{_EXPECTED_LEAF_SLUG}.json"
+        produced = _produced_json(corpus_root, _EXPECTED_LEAF_SLUG)
         assert produced.exists(), (
             f"Expected {produced} (flattened subtheme + page) to be written"
         )
@@ -236,10 +232,10 @@ class TestDeterministicOutput:
         _write_page(raw_root, Path(_KNOWN_THEME) / _LEAF_SUBPATH, leaf_html)
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
-        first = (corpus_root / _KNOWN_THEME / f"{_EXPECTED_LEAF_SLUG}.json").read_bytes()
+        first = _produced_json(corpus_root, _EXPECTED_LEAF_SLUG).read_bytes()
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
-        second = (corpus_root / _KNOWN_THEME / f"{_EXPECTED_LEAF_SLUG}.json").read_bytes()
+        second = _produced_json(corpus_root, _EXPECTED_LEAF_SLUG).read_bytes()
 
         assert first == second
 
@@ -261,11 +257,7 @@ class TestSlugNormalization:
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
 
-        produced = (
-            corpus_root
-            / _KNOWN_THEME
-            / "un-systeme-aerien-au-coeur-du-reseau-mondial.json"
-        )
+        produced = _produced_json(corpus_root, "un-systeme-aerien-au-coeur-du-reseau-mondial")
         assert produced.exists(), (
             f"Ligature 'œ' should fold to 'oe' in the slug; expected {produced}"
         )
@@ -284,7 +276,7 @@ class TestSlugNormalization:
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
 
-        produced = corpus_root / _KNOWN_THEME / "some-page-with-double-dash.json"
+        produced = _produced_json(corpus_root, "some-page-with-double-dash")
         assert produced.exists(), (
             f"Consecutive dashes in a segment should collapse; expected {produced}"
         )
@@ -303,7 +295,7 @@ class TestJsonIsValid:
 
         normalize_all(raw_root=raw_root, corpus_root=corpus_root)
 
-        produced = corpus_root / _KNOWN_THEME / f"{_EXPECTED_LEAF_SLUG}.json"
+        produced = _produced_json(corpus_root, _EXPECTED_LEAF_SLUG)
         parsed = json.loads(produced.read_text())
 
         assert set(parsed) == {

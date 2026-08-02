@@ -1,8 +1,8 @@
 """
-Unit tests for civica.ingest.chunker.
+Unit tests for civica.ingestion.chunker.
 """
 
-from civica.ingest.chunker import chunk_section
+from civica.ingestion.chunker import chunk_section
 
 # ---------------------------------------------------------------------------
 # Constants

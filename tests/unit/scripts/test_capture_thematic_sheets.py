@@ -23,15 +23,12 @@ _ALPHA_PATH = "/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-sample
 _BETA_PATH = "/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-sample-beta/"
 _ORPHAN_PATH = "/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-sample-orphan/"
 _UNLISTED_EXTRA_PATH = "/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-unlisted-extra/"
-_OUT_OF_SCOPE_PATH = "/mentions-legales/"
-_EXTERNAL_URL = "https://external-site.example.com/page"
 
 _BASE_URL = "https://formation-civique.interieur.gouv.fr"
 
 # Mirrored on-disk relative paths (strip /fiches-par-thematiques/ prefix)
 _ALPHA_REL_PATH = Path("theme-sample/subtheme-sample/fiche-sample-alpha")
 _BETA_REL_PATH = Path("theme-sample/subtheme-sample/fiche-sample-beta")
-_ORPHAN_REL_PATH = Path("theme-sample/subtheme-sample/fiche-sample-orphan")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,14 +37,19 @@ _ORPHAN_REL_PATH = Path("theme-sample/subtheme-sample/fiche-sample-orphan")
 
 def _make_transport(
     responses: dict[str, bytes],
+    fetched_urls: list[str] | None = None,
 ) -> httpx.MockTransport:
     """Build an httpx.MockTransport that returns the given bytes per path.
 
     Returns 404 for any path not in the responses dict so accidental fetches
     of out-of-scope URLs are detectable via test assertions on written files.
+    When fetched_urls is given, every requested URL is appended to it so tests
+    can assert on exactly what was fetched and in which order.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if fetched_urls is not None:
+            fetched_urls.append(str(request.url))
         path = request.url.path
         if path in responses:
             return httpx.Response(200, content=responses[path])
@@ -62,6 +64,11 @@ def _make_client(transport: httpx.MockTransport) -> httpx.Client:
 
 def _no_sleep(seconds: float) -> None:
     """Drop-in replacement for time.sleep that does nothing."""
+
+
+def _written_file(out_dir: Path, rel_path: Path) -> Path:
+    """On-disk location capture() mirrors an in-scope page to."""
+    return out_dir / rel_path / "index.html"
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +143,27 @@ def standard_responses(
     }
 
 
+@pytest.fixture()
+def run_capture(tmp_path: Path) -> Callable[..., None]:
+    """Run capture() against a mocked transport, writing into tmp_path.
+
+    Accepts the response map plus optional fetched_urls (to record requests)
+    and sleep_fn (defaults to the no-op sleep).
+    """
+
+    def _run(
+        responses: dict[str, bytes],
+        *,
+        fetched_urls: list[str] | None = None,
+        sleep_fn: Callable[[float], None] = _no_sleep,
+    ) -> None:
+        transport = _make_transport(responses, fetched_urls)
+        with _make_client(transport) as client:
+            capture(client=client, out_dir=tmp_path, sleep_fn=sleep_fn)
+
+    return _run
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -148,18 +176,17 @@ class TestHappyPath:
         self,
         tmp_path: Path,
         standard_responses: dict[str, bytes],
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   Crawling via a stubbed sitemap with alpha and beta pages.
                     Each page should be written at out_dir/<relative-path>/index.html,
                     mirroring the URL hierarchy under /fiches-par-thematiques/.
         """
-        transport = _make_transport(standard_responses)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses)
 
-        alpha_file = tmp_path / _ALPHA_REL_PATH / "index.html"
-        beta_file = tmp_path / _BETA_REL_PATH / "index.html"
+        alpha_file = _written_file(tmp_path, _ALPHA_REL_PATH)
+        beta_file = _written_file(tmp_path, _BETA_REL_PATH)
         assert alpha_file.exists(), f"Expected {alpha_file} to be written"
         assert beta_file.exists(), f"Expected {beta_file} to be written"
 
@@ -167,14 +194,13 @@ class TestHappyPath:
         self,
         tmp_path: Path,
         standard_responses: dict[str, bytes],
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   The thematic index URL itself is in the sitemap.
                     It should land at out_dir/index.html (not in a subdirectory).
         """
-        transport = _make_transport(standard_responses)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses)
 
         index_file = tmp_path / "index.html"
         assert index_file.exists(), f"Expected {index_file} to be written"
@@ -183,21 +209,18 @@ class TestHappyPath:
         self,
         tmp_path: Path,
         standard_responses: dict[str, bytes],
-        alpha_bytes: bytes,
-        beta_bytes: bytes,
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   File contents are verbatim HTTP response bodies.
                     Each written file should contain exactly the bytes from the HTTP response.
         """
-        transport = _make_transport(standard_responses)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses)
 
-        alpha_file = tmp_path / _ALPHA_REL_PATH / "index.html"
-        beta_file = tmp_path / _BETA_REL_PATH / "index.html"
-        assert alpha_file.read_bytes() == alpha_bytes
-        assert beta_file.read_bytes() == beta_bytes
+        alpha_file = _written_file(tmp_path, _ALPHA_REL_PATH)
+        beta_file = _written_file(tmp_path, _BETA_REL_PATH)
+        assert alpha_file.read_bytes() == standard_responses[_ALPHA_PATH]
+        assert beta_file.read_bytes() == standard_responses[_BETA_PATH]
 
 
 class TestScopeEnforcement:
@@ -207,6 +230,7 @@ class TestScopeEnforcement:
         self,
         tmp_path: Path,
         standard_responses: dict[str, bytes],
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   An HTML page links to an external domain.
@@ -215,16 +239,7 @@ class TestScopeEnforcement:
         """
         fetched_urls: list[str] = []
 
-        def tracking_handler(request: httpx.Request) -> httpx.Response:
-            fetched_urls.append(str(request.url))
-            path = request.url.path
-            if path in standard_responses:
-                return httpx.Response(200, content=standard_responses[path])
-            return httpx.Response(404, content=b"Not Found")
-
-        transport = httpx.MockTransport(tracking_handler)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses, fetched_urls=fetched_urls)
 
         assert not any(
             "external-site.example.com" in url for url in fetched_urls
@@ -239,6 +254,7 @@ class TestScopeEnforcement:
         self,
         tmp_path: Path,
         standard_responses: dict[str, bytes],
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   The sitemap contains an out-of-scope entry (/mentions-legales/).
@@ -247,16 +263,7 @@ class TestScopeEnforcement:
         """
         fetched_urls: list[str] = []
 
-        def tracking_handler(request: httpx.Request) -> httpx.Response:
-            fetched_urls.append(str(request.url))
-            path = request.url.path
-            if path in standard_responses:
-                return httpx.Response(200, content=standard_responses[path])
-            return httpx.Response(404, content=b"Not Found")
-
-        transport = httpx.MockTransport(tracking_handler)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses, fetched_urls=fetched_urls)
 
         assert not any(
             "mentions-legales" in url for url in fetched_urls
@@ -275,21 +282,19 @@ class TestIdempotency:
         self,
         tmp_path: Path,
         standard_responses: dict[str, bytes],
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   Running capture() twice with identical responses.
                     The on-disk file mtime must not change on the second run.
         """
-        transport = _make_transport(standard_responses)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses)
 
-        alpha_file = tmp_path / _ALPHA_REL_PATH / "index.html"
+        alpha_file = _written_file(tmp_path, _ALPHA_REL_PATH)
         content_after_first_run = alpha_file.read_bytes()
         stat_before = alpha_file.stat()
 
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses)
 
         stat_after = alpha_file.stat()
 
@@ -304,32 +309,18 @@ class TestIdempotency:
         tmp_path: Path,
         standard_responses: dict[str, bytes],
         alpha_v2_bytes: bytes,
-        sitemap_bytes: bytes,
-        index_bytes: bytes,
-        beta_bytes: bytes,
-        orphan_bytes: bytes,
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   Running capture() twice when a page's content has changed.
                     The on-disk file for alpha should be updated to the new bytes.
         """
-        transport_v1 = _make_transport(standard_responses)
-        with _make_client(transport_v1) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses)
 
-        alpha_file = tmp_path / _ALPHA_REL_PATH / "index.html"
+        alpha_file = _written_file(tmp_path, _ALPHA_REL_PATH)
         assert alpha_file.read_bytes() == standard_responses[_ALPHA_PATH]
 
-        responses_v2 = {
-            _SITEMAP_PATH: sitemap_bytes,
-            _INDEX_PATH: index_bytes,
-            _ALPHA_PATH: alpha_v2_bytes,
-            _BETA_PATH: beta_bytes,
-            _ORPHAN_PATH: orphan_bytes,
-        }
-        transport_v2 = _make_transport(responses_v2)
-        with _make_client(transport_v2) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture({**standard_responses, _ALPHA_PATH: alpha_v2_bytes})
 
         assert alpha_file.read_bytes() == alpha_v2_bytes, (
             "File was not updated even though the remote content changed."
@@ -341,19 +332,17 @@ class TestRateLimit:
 
     def test_sleep_is_called_between_requests(
         self,
-        tmp_path: Path,
         standard_responses: dict[str, bytes],
         sleep_calls: list[float],
         recording_sleep: Callable[[float], None],
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   Rate-limiting between HTTP requests driven by the sitemap.
                     Given a sitemap with N in-scope URLs, sleep is called at least N-1 times
                     with a delay >= 1.0 second between each fetch.
         """
-        transport = _make_transport(standard_responses)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=recording_sleep)
+        run_capture(standard_responses, sleep_fn=recording_sleep)
 
         # sitemap has 4 in-scope URLs (index + alpha + beta + orphan); expect >= 3 sleeps
         assert len(sleep_calls) >= len(standard_responses) - 2, (
@@ -370,8 +359,8 @@ class TestSitemapParsing:
 
     def test_localhost_urls_are_rewritten_to_production_host(
         self,
-        tmp_path: Path,
         standard_responses: dict[str, bytes],
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   Sitemap <loc> values use http://localhost:8383/ as the host.
@@ -380,16 +369,7 @@ class TestSitemapParsing:
         """
         fetched_urls: list[str] = []
 
-        def tracking_handler(request: httpx.Request) -> httpx.Response:
-            fetched_urls.append(str(request.url))
-            path = request.url.path
-            if path in standard_responses:
-                return httpx.Response(200, content=standard_responses[path])
-            return httpx.Response(404, content=b"Not Found")
-
-        transport = httpx.MockTransport(tracking_handler)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses, fetched_urls=fetched_urls)
 
         assert not any(
             "localhost" in url for url in fetched_urls
@@ -406,6 +386,7 @@ class TestSitemapParsing:
         self,
         tmp_path: Path,
         standard_responses: dict[str, bytes],
+        run_capture: Callable[..., None],
     ) -> None:
         """
         Scenario:   Sitemap contains /mentions-legales/ (out-of-scope path).
@@ -414,16 +395,7 @@ class TestSitemapParsing:
         """
         fetched_urls: list[str] = []
 
-        def tracking_handler(request: httpx.Request) -> httpx.Response:
-            fetched_urls.append(str(request.url))
-            path = request.url.path
-            if path in standard_responses:
-                return httpx.Response(200, content=standard_responses[path])
-            return httpx.Response(404, content=b"Not Found")
-
-        transport = httpx.MockTransport(tracking_handler)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses, fetched_urls=fetched_urls)
 
         assert not any(
             "mentions-legales" in url for url in fetched_urls
@@ -452,13 +424,10 @@ class TestBFSCrossCheck:
 
     def test_warns_about_link_found_in_page_but_absent_from_sitemap(
         self,
-        tmp_path: Path,
-        sitemap_bytes: bytes,
-        index_bytes: bytes,
-        alpha_bytes: bytes,
-        beta_bytes: bytes,
-        orphan_bytes: bytes,
+        standard_responses: dict[str, bytes],
         unlisted_extra_bytes: bytes,
+        run_capture: Callable[..., None],
+        warning_text: Callable[[], str],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """
@@ -467,29 +436,19 @@ class TestBFSCrossCheck:
         """
         caplog.set_level(logging.INFO)
         # Replace alpha with a page that links to an unlisted URL
-        responses = {
-            _SITEMAP_PATH: sitemap_bytes,
-            _INDEX_PATH: index_bytes,
-            _ALPHA_PATH: unlisted_extra_bytes,
-            _BETA_PATH: beta_bytes,
-            _ORPHAN_PATH: orphan_bytes,
-        }
-        transport = _make_transport(responses)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture({**standard_responses, _ALPHA_PATH: unlisted_extra_bytes})
 
-        warnings_text = "\n".join(
-            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
-        )
-        assert warnings_text, f"Expected WARNING records; got: {caplog.text!r}"
-        assert _UNLISTED_EXTRA_PATH in warnings_text or "fiche-unlisted-extra" in warnings_text, (
-            f"Expected unlisted URL to appear in WARNING records; got: {warnings_text!r}"
+        warnings = warning_text()
+        assert warnings, f"Expected WARNING records; got: {caplog.text!r}"
+        assert _UNLISTED_EXTRA_PATH in warnings or "fiche-unlisted-extra" in warnings, (
+            f"Expected unlisted URL to appear in WARNING records; got: {warnings!r}"
         )
 
     def test_warns_about_sitemap_url_not_linked_from_any_page(
         self,
-        tmp_path: Path,
         standard_responses: dict[str, bytes],
+        run_capture: Callable[..., None],
+        warning_text: Callable[[], str],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """
@@ -497,16 +456,12 @@ class TestBFSCrossCheck:
                     capture() must log a WARNING record naming that URL (unreferenced_in_sitemap).
         """
         caplog.set_level(logging.INFO)
-        transport = _make_transport(standard_responses)
-        with _make_client(transport) as client:
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
+        run_capture(standard_responses)
 
-        warnings_text = "\n".join(
-            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
-        )
-        assert warnings_text, f"Expected WARNING records for orphan URL; got: {caplog.text!r}"
-        assert "fiche-sample-orphan" in warnings_text, (
-            f"Expected orphan URL to appear in WARNING records; got: {warnings_text!r}"
+        warnings = warning_text()
+        assert warnings, f"Expected WARNING records for orphan URL; got: {caplog.text!r}"
+        assert "fiche-sample-orphan" in warnings, (
+            f"Expected orphan URL to appear in WARNING records; got: {warnings!r}"
         )
 
 
@@ -517,6 +472,8 @@ class TestFetchFailureHandling:
         self,
         tmp_path: Path,
         standard_responses: dict[str, bytes],
+        run_capture: Callable[..., None],
+        warning_text: Callable[[], str],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """
@@ -525,33 +482,23 @@ class TestFetchFailureHandling:
                     and capture() returns normally without raising.
         """
         caplog.set_level(logging.INFO)
-        failing_path = _BETA_PATH
+        # Dropping beta from the response map makes the transport 404 it while
+        # the sitemap still lists it.
+        responses = {path: body for path, body in standard_responses.items() if path != _BETA_PATH}
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            path = request.url.path
-            if path == failing_path:
-                return httpx.Response(404, content=b"Not Found")
-            if path in standard_responses:
-                return httpx.Response(200, content=standard_responses[path])
-            return httpx.Response(404, content=b"Not Found")
+        # Must not raise
+        run_capture(responses)
 
-        transport = httpx.MockTransport(handler)
-        with _make_client(transport) as client:
-            # Must not raise
-            capture(client=client, out_dir=tmp_path, sleep_fn=_no_sleep)
-
-        warnings_text = "\n".join(
-            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
-        )
-        assert warnings_text, f"Expected WARNING records for failing URL; got: {caplog.text!r}"
-        assert "fiche-sample-beta" in warnings_text, (
-            f"Expected failing URL to appear in WARNING records; got: {warnings_text!r}"
+        warnings = warning_text()
+        assert warnings, f"Expected WARNING records for failing URL; got: {caplog.text!r}"
+        assert "fiche-sample-beta" in warnings, (
+            f"Expected failing URL to appear in WARNING records; got: {warnings!r}"
         )
 
         # Alpha still written despite beta failure
-        alpha_file = tmp_path / _ALPHA_REL_PATH / "index.html"
+        alpha_file = _written_file(tmp_path, _ALPHA_REL_PATH)
         assert alpha_file.exists(), f"Alpha file should still be written; not found at {alpha_file}"
 
         # Beta must not be written
-        beta_file = tmp_path / _BETA_REL_PATH / "index.html"
-        assert not beta_file.exists(), f"Beta file should NOT be written after a 404"
+        beta_file = _written_file(tmp_path, _BETA_REL_PATH)
+        assert not beta_file.exists(), "Beta file should NOT be written after a 404"

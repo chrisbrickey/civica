@@ -8,13 +8,14 @@ run without any database dependency.
 
 import os
 import uuid
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 
 import psycopg
 import psycopg.rows
 import pytest
 
 from civica.db.migrate import apply_schema
+from civica.ingestion.repository import ChunkRow
 
 
 def _redirect_database_url_to_test_db() -> None:
@@ -76,3 +77,35 @@ def db_schema() -> Generator[psycopg.Connection[psycopg.rows.TupleRow], None, No
     finally:
         conn.execute(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE")
         conn.close()
+
+
+@pytest.fixture()
+def make_chunk_row() -> Callable[..., ChunkRow]:
+    """Factory for ChunkRow test rows with generic defaults.
+
+    Shared by the repository and retrieval test modules so the boilerplate
+    fields (page_slug, section_id, chunk_index, text) are defined once;
+    tests pass only the fields their assertions care about.
+    """
+
+    def _make(
+        *,
+        theme: str,
+        embedding: list[float],
+        content_hash: str,
+        text: str = "sample-text",
+        page_slug: str = "sample-page",
+        section_id: str = "section-001",
+        chunk_index: int = 0,
+    ) -> ChunkRow:
+        return ChunkRow(
+            theme=theme,
+            page_slug=page_slug,
+            section_id=section_id,
+            chunk_index=chunk_index,
+            content_hash=content_hash,
+            text=text,
+            embedding=embedding,
+        )
+
+    return _make

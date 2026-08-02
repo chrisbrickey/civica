@@ -338,7 +338,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   
 ---
 
-## Step 5: Content retriever
+## ✅ Step 5: Content retriever
 
 **Goal:** Semantic-search API used by `teach` and `evaluate` nodes.
 
@@ -380,7 +380,82 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Update any text that references `ingest/embedder.py`.
 
 - **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
-  - Added smoke test to ensure database container is up before running subsequent database tests (that will all fail after wasting 30 seconds of timeout).
+  - Similarity assertions in the integration tests use a 1e-2 tolerance (instead of exact floats) because the distances are computed through the `halfvec` cast (half precision) to hit the HNSW index. Using equivalency to an exact float would be flaky.
+  - Beyond the planned cases, tests also cover the `k` limit and full `ContentChunk` field round-trip (theme hydrated as a `Theme` instance for citation identity).
+  - Added smoke test to ensure database container is up before running subsequent database tests (that will all fail after wasting 30 seconds of timeout). I also DRYed a few of the existing test files that had a lot of hard-coded repetition.
+  - Renamed `ingest/` to `ingestion/` to align with best practices. Modules are named for the thing or subsystem they contain (nouns). Functions are named for actions (verbs).
+
+---
+
+## Step 5B: Extract a validated `Chunk` domain model (refactor)
+
+**Goals:** 
+- Extract the shared core of a `Chunk` that is used by both ingestion and retreival. It represents the data persisted in the vector database.
+- Enforce field invariants at the ingestion boundary to prevent inappropriate values from being persisted.
+- No impact to behavior. So all existing tests must still pass at the step boundary (updated only where validation or field access changes).
+
+**Rationale:**
+- `ChunkRow` and `ContentChunk` share six persistent fields (`theme`, `page_slug`, `section_id`, `chunk_index`, `content_hash`, `text`) but each carries one field that the other must not: `ChunkRow.embedding` and `ContentChunk.similarity` which should not be shared.
+- Composition (as opposed to merger) is desireable: a shared core `Chunk` pydantic model plus a thin write wrapper pydantic model (for ingestion) and a thin read wrapper pydantic model (for retrieval). All three are pydantic so validation and the frozen-model convention are uniform across the chunk types.
+- Use pydantic (as opposed to dataclasses) aligning with the existing `Theme` precedent.
+  - The benefit is fail-fast invariant enforcement during ingestion when parsed/derived data is persisted. On the read path (retreival) the DB schema already guarantees these values (no need for additional validation at that boundary).
+  - NB: With raw psycopg, pydantic validates on construction. It sits beside the SQL mapping. It is not the DB (de)serializer.
+- It is NOT desireable to merge these two models into one flat model because that would force `embedding` and `similarity` to be optional fields. The result would be loss of the type-level guarantee of which is populated.
+- It is NOT desirable to introduce an ORM (e.g. SQLAlchemy), which would only map persisted columns. It would not own the derived `similarity` (a separate scored-result type is still required) and it would fight the hand-tuned `embedding::halfvec(N) <=> ...::halfvec(N)` cast the HNSW index depends.
+
+**Guardrails (apply to all parts):**
+- `Chunk` is corpus-side. It must never be JSON-serialized into the LangGraph memory store (the strict corpus/memory separation rule). This composition is for the retrieval/ingest paths only.
+- Each new `BaseModel` (`Chunk`, `EmbeddedChunk`, `ContentChunk`) inherits the `# type: ignore[explicit-any]` mypy-strict workaround already used on `Theme`. Expected cost, not a surprise.
+- Run `uv run pytest` (unit + integration + mypy strict) green at the step boundary; this is a refactor, so no behavior regresses.
+
+**Part 1: Shared core `Chunk` domain model.** A neutral, pydantic model so ingestion and retrieval both depend on it, not on each other.
+
+- **Test:** `tests/unit/domain/test_chunk.py` (new; unit, no DB)
+  - Constructing a `Chunk` with an empty `text`, `page_slug`, `section_id`, or `content_hash`, or a negative `chunk_index`, raises `ValidationError`.
+  - A valid `Chunk` is frozen: assigning to any field after construction raises.
+  - `theme` accepts a `Theme` instance and round-trips unchanged (guards against a slug string sneaking in).
+- Create `src/civica/domain/chunk.py`:
+  - `Chunk` (pydantic `BaseModel`, `model_config = ConfigDict(frozen=True)`) with fields:
+    - `theme: Theme` (the domain object, not a slug string)
+    - `page_slug: str = Field(min_length=1)`
+    - `section_id: str = Field(min_length=1)`
+    - `chunk_index: int = Field(ge=0)`
+    - `content_hash: str = Field(min_length=1)`
+    - `text: str = Field(min_length=1)`
+  - Imports only `domain/themes.py` (no embeddings/db imports), keeping the domain layer dependency-light.
+- **Check In:** Stop and confirm the core model's fields and validation rules. Check in with the user before going forward. 
+
+**Part 2: Write wrapper + `theme` unification (ingestion).** 
+This closes the existing inconsistency where the write model typed `theme` as a slug string while the read model typed it as `Theme`. 
+The result should be that both carry `Theme` and the slug appears only at the SQL boundary. No bare theme-slug strings should live on either model.
+
+- **Test:** extend `tests/integration/ingestion/test_repository.py` (uses the `db_schema` fixture)
+  - Constructing an `EmbeddedChunk` whose `embedding` length != `EMBEDDING_DIMENSIONS` raises `ValidationError` before any DB write.
+  - A correctly sized `EmbeddedChunk` upserts as before; existing idempotency and `theme`-filter assertions stay green.
+- Extend `src/civica/ingestion/repository.py`:
+  - Replace the `ChunkRow` dataclass with `EmbeddedChunk` (pydantic `BaseModel`, `model_config = ConfigDict(frozen=True)`): `chunk: Chunk`, `embedding: list[float]`.
+  - Validate the embedding dimension with a pydantic `Field` (the single most valuable guard): `embedding: list[float] = Field(min_length=EMBEDDING_DIMENSIONS, max_length=EMBEDDING_DIMENSIONS)`. Import `EMBEDDING_DIMENSIONS` from `embeddings/embedder` (the same constant `migrate.py` templates into `schema.sql`; never hardcode 3072). This catches a silent, nasty class of ingest bug before it reaches Postgres. Keep this coupling in the ingestion layer (it already imports the embedder); do not push it down into `domain/`.
+  - Update `_upsert_on_connection` / `upsert_chunks` to accept `Iterable[EmbeddedChunk]` and build the SQL params from `row.chunk.theme.slug`, `row.chunk.page_slug`, `row.chunk.section_id`, `row.chunk.chunk_index`, `row.chunk.content_hash`, `row.chunk.text`, `row.embedding` (serialize the slug here, at the SQL boundary only).
+- Extend `src/civica/scripts/ingest_corpus.py`:
+  - Build each row as `EmbeddedChunk(chunk=Chunk(theme=Theme.from_slug(<source slug>), page_slug=..., section_id=..., chunk_index=..., content_hash=..., text=...), embedding=embedding)` instead of the flat `ChunkRow(...)`.
+- **Check In:** Stop and confirm the ingestion path and the embedding-dimension guard. Check in with the user before going forward.
+
+**Part 3: Read wrapper (retrieval).**
+
+- **Test:** update `tests/integration/retrieval/test_content.py`
+  - Adjust for the composed `ContentChunk` shape. The field round-trip still asserts `theme` is hydrated as a `Theme`; `similarity` is still `1 - cosine_distance` (existing 1e-2 tolerance from the Step 5 notes preserved).
+  - Existing `theme`-filter and `k`-limit assertions stay green.
+- Update `src/civica/retrieval/content.py`:
+  - `ContentChunk` becomes a pydantic `BaseModel` (`model_config = ConfigDict(frozen=True)`) composing the core plus the score: `chunk: Chunk`, `similarity: float`. Keep the name `ContentChunk` to limit downstream churn (Steps 8-10 reference it).
+  - Construction still hydrates `theme` via `Theme.from_slug(row[...])` (retrieval already does this) and computes `similarity = 1 - distance`.
+  - Decision to confirm at the check-in: nest (`result.chunk.text`) vs. flatten (re-expose `text`, `page_slug`, ... as passthrough properties so call sites keep `result.text`). Nesting is simpler but touches every call site and the citation access in Steps 8/9/10; flattening preserves the current surface at the cost of a little boilerplate. Recommend flattening the read wrapper's most-used fields so Step 8/9/10 code stays unchanged.
+- **Check In:** Stop and confirm the retrieval shape and the nest-vs-flatten decision. Check in with the user before going forward.
+
+- **README:** Consider if anything should be added based on the changes in this section.
+
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -485,16 +560,16 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 **Goal:** Given a theme and a learner question, produce a concise English explanation (with French vocabulary) grounded in retrieved French corpus chunks.
 
 - Add dependency: `langchain-anthropic`.
-- **Test:** `tests/unit/explain/test_engine.py`
+- **Test:** `tests/unit/explanation/test_engine.py`
   - Unit test (no DB, no network) with a fake retriever (returns fixed chunks) and a fake `ChatAnthropic` (records the prompt, returns a canned response). Assert:
     - The final prompt contains all retrieved passages verbatim.
     - The system message forbids drawing on outside knowledge (assert the exact substring is present).
     - Returned `Explanation.citations` matches the fake retriever's output.
-- Create `src/civica/explain/engine.py`:
+- Create `src/civica/explanation/engine.py` (noun-named package per the Step 5 naming convention; the public function stays the verb `explain`):
   - `explain(user_question: str, theme: Theme) -> Explanation` - calls `retrieval.content.search`, packs top-k passages into a Claude prompt with a fixed system message that mandates using only the provided passages and translating French → English, calls `ChatAnthropic(model="claude-...")`, returns an `Explanation` dataclass with `text`, `citations: list[ContentChunk]`.
   - Query construction: pass the learner's question to `search` raw, scoped by the hard `theme` filter. Do not prepend theme context to the query here: a natural user question exists, the filter already scopes the theme deterministically, and prefix tokens would dilute the question's own signal. (Contrast with Step 9, where no natural question exists and the query is manufactured from context.)
   - Prompt lives in a `PROMPTS` dict at module top so it can be tested without invoking the LLM.
-- **Test:** `tests/integration/explain/test_engine_external.py` - one `@pytest.mark.external` test that calls Claude with a tiny stub context and asserts a non-empty response (external tests live under `integration/` with the `_external` suffix, matching `test_embedder_external.py`).
+- **Test:** `tests/integration/explanation/test_engine_external.py` - one `@pytest.mark.external` test that calls Claude with a tiny stub context and asserts a non-empty response (external tests live under `integration/` with the `_external` suffix, matching `test_embedder_external.py`).
 
 - **Check In:** Stop and confirm the implementation with the user. Eyeball the explanation quality on a real theme before moving on.
 
@@ -542,13 +617,13 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 - **Check In:** Stop and confirm with user that the implementation is satisfactory.
 
 - **Test:** `tests/integration/graph/test_graph.py`
-  - Integration test using real `explain`/`assessment` code but fake Claude + fake retriever (no network; writes real `quiz_answers` and store rows). Run the graph through the `quiz` mode end-to-end for a test user and assert:
+  - Integration test using real `explanation`/`assessment` code but fake Claude + fake retriever (no network; writes real `quiz_answers` and store rows). Run the graph through the `quiz` mode end-to-end for a test user and assert:
     - A quiz answer written through the graph appears in the raw `quiz_answers` table.
     - `topic_mastery` for the answered theme is updated (via `memory_writer_node`, respecting the allowlist).
     - The mock exam mode produces 40 questions and reports pass/fail.
 - Create `src/civica/graph/nodes.py`:
   - `retrieve_content_node`, `teach_node`, `evaluate_node`, `quiz_node`, `retrieve_question_node`, `mock_exam_node`, `update_mastery_node`, `save_session_summary_node`, `memory_writer_node`.
-  - Each node is a plain function `(state) -> state_update`. Business logic lives in `explain`, `assessment`, `memory`; nodes only orchestrate.
+  - Each node is a plain function `(state) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate.
   - Mistake-driven review: when the router selected the theme because of an active `mistake_episode`, `retrieve_content_node` reconstructs the retrieval query from the source context recorded on the episode (theme at minimum; `page_slug`/`section_id` when recorded) in the corpus prefix style, so re-teaching pulls the exact passages the learner missed rather than a generic theme sample. `ContentChunk.chunk_index`/`content_hash` (Step 5) give those citations stable identity across sessions. The needed source context flows from Step 9 (`Question.sources`) into Step 7's `MistakeEpisode.sources`.
 - Create `src/civica/graph/graph.py`:
   - `build_graph() -> CompiledGraph` - compiles the graph with the shared `PostgresSaver` as checkpointer and the shared `PostgresStore` as store.

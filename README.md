@@ -238,7 +238,9 @@ civica/
   ├── src/civica/               # application package
   │     ├── db/                 # connection pool and schema migration
   │     ├── domain/             # pure business logic, no I/O
-  │     ├── ingest/             # corpus chunking, embedding, and persistence
+  │     ├── embeddings/         # embedding client shared by ingestion and retrieval
+  │     ├── ingestion/          # corpus chunking and persistence into pgvector
+  │     ├── retrieval/          # semantic search over the embedded corpus
   │     └── scripts/            # offline operations intended for single use
   │
   └── tests/                    
