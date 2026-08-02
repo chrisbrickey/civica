@@ -6,12 +6,14 @@ Upserts on content_hash so re-ingesting unchanged source material never duplicat
 """
 
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
 
 import psycopg
 from pgvector.psycopg import register_vector
+from pydantic import BaseModel, ConfigDict, Field
 
 from civica.db.pool import get_pool
+from civica.domain.chunk import Chunk
+from civica.embeddings.embedder import EMBEDDING_DIMENSIONS
 
 _UPSERT_SQL = """
 INSERT INTO content_chunks (
@@ -30,31 +32,27 @@ ON CONFLICT (content_hash) DO UPDATE SET
 _DELETE_NOT_IN_SQL = "DELETE FROM content_chunks WHERE content_hash != ALL(%s)"
 
 
-@dataclass(frozen=True)
-class ChunkRow:
-    """A single embedded corpus chunk ready to be persisted."""
+class EmbeddedChunk(BaseModel):  # type: ignore[explicit-any]
+    """A Chunk plus its embedding vector, ready to persist."""
 
-    theme: str
-    page_slug: str
-    section_id: str
-    chunk_index: int
-    content_hash: str
-    text: str
-    embedding: list[float]
+    model_config = ConfigDict(frozen=True)
+
+    chunk: Chunk
+    embedding: list[float] = Field(min_length=EMBEDDING_DIMENSIONS, max_length=EMBEDDING_DIMENSIONS)
 
 
 def _upsert_on_connection(
-    rows: Iterable[ChunkRow], conn: psycopg.Connection[psycopg.rows.TupleRow]
+    rows: Iterable[EmbeddedChunk], conn: psycopg.Connection[psycopg.rows.TupleRow]
 ) -> None:
     register_vector(conn)
     params = [
         (
-            row.content_hash,
-            row.theme,
-            row.page_slug,
-            row.section_id,
-            row.chunk_index,
-            row.text,
+            row.chunk.content_hash,
+            row.chunk.theme.slug,
+            row.chunk.page_slug,
+            row.chunk.section_id,
+            row.chunk.chunk_index,
+            row.chunk.text,
             row.embedding,
         )
         for row in rows
@@ -66,7 +64,7 @@ def _upsert_on_connection(
 
 
 def upsert_chunks(
-    rows: Iterable[ChunkRow], conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None
+    rows: Iterable[EmbeddedChunk], conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None
 ) -> None:
     """Insert or update content chunks, keyed by content_hash.
 

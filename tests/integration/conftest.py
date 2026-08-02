@@ -15,7 +15,9 @@ import psycopg.rows
 import pytest
 
 from civica.db.migrate import apply_schema
-from civica.ingestion.repository import ChunkRow
+from civica.domain.chunk import Chunk
+from civica.domain.themes import Theme
+from civica.ingestion.repository import EmbeddedChunk
 
 
 def _redirect_database_url_to_test_db() -> None:
@@ -80,31 +82,35 @@ def db_schema() -> Generator[psycopg.Connection[psycopg.rows.TupleRow], None, No
 
 
 @pytest.fixture()
-def make_chunk_row() -> Callable[..., ChunkRow]:
-    """Factory for ChunkRow test rows with generic defaults.
+def make_chunk_row() -> Callable[..., EmbeddedChunk]:
+    """Factory for EmbeddedChunk test rows with generic defaults.
 
-    Shared by the repository and retrieval test modules so the boilerplate
-    fields (page_slug, section_id, chunk_index, text) are defined once;
-    tests pass only the fields their assertions care about.
+    Defines boilerplate fields (page_slug, section_id, chunk_index, text)
+    in one place so that tests pass only the fields relevant to their assertions.
+
+    `theme` is a Theme domain object, mirroring the production model: slug
+    strings live only at the SQL boundary, never on the chunk models.
     """
 
     def _make(
         *,
-        theme: str,
+        theme: Theme,
         embedding: list[float],
         content_hash: str,
         text: str = "sample-text",
         page_slug: str = "sample-page",
         section_id: str = "section-001",
         chunk_index: int = 0,
-    ) -> ChunkRow:
-        return ChunkRow(
-            theme=theme,
-            page_slug=page_slug,
-            section_id=section_id,
-            chunk_index=chunk_index,
-            content_hash=content_hash,
-            text=text,
+    ) -> EmbeddedChunk:
+        return EmbeddedChunk(
+            chunk=Chunk(
+                theme=theme,
+                page_slug=page_slug,
+                section_id=section_id,
+                chunk_index=chunk_index,
+                content_hash=content_hash,
+                text=text,
+            ),
             embedding=embedding,
         )
 

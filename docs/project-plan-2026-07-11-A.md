@@ -387,7 +387,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 
 ---
 
-## Step 5B: Extract a validated `Chunk` domain model (refactor)
+## ✅ Step 5B: Extract a validated `Chunk` domain model (refactor)
 
 **Goals:** 
 - Extract the shared core of a `Chunk` that is used by both ingestion and retreival. It represents the data persisted in the vector database.
@@ -400,6 +400,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 - Use pydantic (as opposed to dataclasses) aligning with the existing `Theme` precedent.
   - The benefit is fail-fast invariant enforcement during ingestion when parsed/derived data is persisted. On the read path (retreival) the DB schema already guarantees these values (no need for additional validation at that boundary).
   - NB: With raw psycopg, pydantic validates on construction. It sits beside the SQL mapping. It is not the DB (de)serializer.
+  - Most of the new pydantic models added in this section will not be shared broadly so it is not justifiable at this time to co-locate them (for example, in a `schemas` file or directory).
 - It is NOT desireable to merge these two models into one flat model because that would force `embedding` and `similarity` to be optional fields. The result would be loss of the type-level guarantee of which is populated.
 - It is NOT desirable to introduce an ORM (e.g. SQLAlchemy), which would only map persisted columns. It would not own the derived `similarity` (a separate scored-result type is still required) and it would fight the hand-tuned `embedding::halfvec(N) <=> ...::halfvec(N)` cast the HNSW index depends.
 
@@ -426,6 +427,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
 - **Check In:** Stop and confirm the core model's fields and validation rules. Check in with the user before going forward. 
 
 **Part 2: Write wrapper + `theme` unification (ingestion).** 
+
 This closes the existing inconsistency where the write model typed `theme` as a slug string while the read model typed it as `Theme`. 
 The result should be that both carry `Theme` and the slug appears only at the SQL boundary. No bare theme-slug strings should live on either model.
 
@@ -451,11 +453,36 @@ The result should be that both carry `Theme` and the slug appears only at the SQ
   - Decision to confirm at the check-in: nest (`result.chunk.text`) vs. flatten (re-expose `text`, `page_slug`, ... as passthrough properties so call sites keep `result.text`). Nesting is simpler but touches every call site and the citation access in Steps 8/9/10; flattening preserves the current surface at the cost of a little boilerplate. Recommend flattening the read wrapper's most-used fields so Step 8/9/10 code stays unchanged.
 - **Check In:** Stop and confirm the retrieval shape and the nest-vs-flatten decision. Check in with the user before going forward.
 
+**Part 4: Fold embedding-model identity into `content_hash` (for safer model migration).**
+
+This addresses a silent failure mode that I discovered while implementing this step:
+- `content_hash = sha256(text)` will change if the model dimensions are changed. But it does not encode which embedding model produced the stored vector.
+- If in the future I swap the `EMBEDDING_MODEL` (to another model of the same dimension), the incremental aspect of the ingestion pipeline, which skips a chunk if the hash is unchanged, would keep stale vectors from the old embedding model.
+- The result would be the retreival/query pipeline performaing similarity search of stale (old model) vectors against a query embedded with the new model. 
+- No errors would surface but retrieval would degrade significantly because cosine distance across two model spaces is meaningless.
+
+- **Test:** `tests/unit/scripts/test_ingest_corpus.py` (new; unittest because no DB and no network calls)
+  - Chunks collected from identical corpus text under two different `EMBEDDING_MODEL` values produce different `content_hash` values (model identity participates in the hash). Drive this through the public `collect_pending_chunks` over a tiny corpus JSON written to `tmp_path`, toggling the model between the two runs.
+  - The same text under the same model is deterministic/stable across runs (idempotency preserved: unchanged corpus + unchanged model must not re-embed).
+  - To keep the model toggle testable, reference the constant via the module (`ingest_corpus`/`embedder`) rather than binding a bare local at import time. So a `monkeypatch.setattr` on the constant takes effect at call time.
+- Extend `src/civica/scripts/ingest_corpus.py`:
+  - Import `EMBEDDING_MODEL` from `embeddings/embedder` (alongside the existing `embed` import).
+  - Change `_content_hash` to hash the model identity together with the NFC-normalized text, using an unambiguous separator that cannot occur in a model name (e.g. a NUL byte `"\x00"`, not a hyphen or colon). Keep the NFC normalization so accent drift still never duplicates rows.
+  - No change to `collect_pending_chunks` / `ingest` control flow: the new hash flows through the existing dedup, skip, and prune logic unchanged.
+- **Check In:** Stop and confirm the hash composition (separator choice) and the one-time full-re-embed operational effect. Check in with the user before going forward.
+
 - **README:** Consider if anything should be added based on the changes in this section.
 
 - **Update this plan:** 
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+    -  The shared `make_chunk_row` test factory takes a `Theme` domain object as argument (instead of a slug string) to avoid callers using slugs to represent themes. Slugs should only be used at the SQL layer.
+    -  Improved the implementation of the read wrapper `ContentChunk` (and underlying mechanisms) to make it mirror the write wrapper `EmbeddedChunk` more closely.
+      - Nested the shared chunk properties within the read wrapper ContentChunk instead of flattening it because the write wrapper uses nesting. At this point the deserialized data was accessed by position index (`row[1]`, `row[6]`), which was extremely fragile. This implementation resulted in an invisible positional contract between the `SELECT` column order and the index literals. If the query was re-ordered, the wrong data would be asigned to the `ContentChunk` fields.
+      - Interim refactor: Switched the retrieval cursor to a `dict_row` row factory so that the `_search_on_connection` method read result columns by name (`row["theme"]`, `row["distance"]`) instead of by position index (`row[1]`, `row[6]`). This increased safety compared to the previous implementation but relied on untyped data structures (e.g., dict[str, Any]).
+      - Added a module-private `_SearchRow` pydantic model whose fields mirror the SELECT column list deserialized from the database. This improved the `_search_on_connection` method such that it opens the database cursor with `row_factory=psycopg.rows.class_row(_SearchRow)`, which means that `cursor.fetchall()` returns a typed list[_SearchRow] instead of raw tuples or a dict of untyped values. 
+      - Now the read and write paths (relevant to chunks) are much more aligned and safe because they both move data through typed pydantic models with attribute access. Additionally, the `Theme` to slug conversion sits at the SQL boundary for both the read and write processes. 
+      - The remaining inherent (and acceptable) asymmetry is directional: the read path needs a hydration step, whereas the write path's mirror-image step is just serializing `theme.slug` inline when building the SQL params.
 
 ---
 
@@ -493,6 +520,8 @@ The result should be that both carry `Theme` and the slug appears only at the SQ
   - No new dirs in the project structure diagram (`src/civica/users/` is a sub-package).
 
 - **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan. 
 
 ---
 
@@ -551,7 +580,9 @@ The result should be that both carry `Theme` and the slug appears only at the SQ
   - Add `src/civica/memory/` and `src/civica/progress/` to the project structure.
   - Add to technology table: | `langgraph`            | Graph orchestration, checkpointer, store     |
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -576,7 +607,9 @@ The result should be that both carry `Theme` and the slug appears only at the SQ
 - **README:**
   - Add to technology table: | `langchain-anthropic`  | Claude LLM client                            |
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -600,7 +633,9 @@ The result should be that both carry `Theme` and the slug appears only at the SQ
 
 - **README:** Consider if anything should be added based on the changes in this section.
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -633,7 +668,9 @@ The result should be that both carry `Theme` and the slug appears only at the SQ
 
 - **README:** Add `src/civica/graph/` to the project structure diagram.
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 
@@ -667,7 +704,9 @@ The result should be that both carry `Theme` and the slug appears only at the SQ
   > Sign in with a username and local secret (created on first use), then pick a mode: **Teach**, **Quiz**, or **Mock Exam**.
   
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
 
 ---
 

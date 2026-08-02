@@ -7,22 +7,24 @@ via the db_schema fixture. Embeddings are fixed, deterministic fake vectors
 contract of the content_chunks table.
 """
 
-import dataclasses
 from collections.abc import Callable
 
 import psycopg
 import psycopg.rows
 import pytest
+from pydantic import ValidationError
 
+from civica.domain.chunk import Chunk
+from civica.domain.themes import DROITS_ET_DEVOIRS, HISTOIRE_GEOGRAPHIE_ET_CULTURE
 from civica.embeddings.embedder import EMBEDDING_DIMENSIONS
-from civica.ingestion.repository import ChunkRow, delete_chunks_not_in, upsert_chunks
+from civica.ingestion.repository import EmbeddedChunk, delete_chunks_not_in, upsert_chunks
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_THEME_A = "droits-et-devoirs"
-_THEME_B = "histoire-geographie-et-culture"
+_THEME_A = DROITS_ET_DEVOIRS
+_THEME_B = HISTOIRE_GEOGRAPHIE_ET_CULTURE
 
 
 def _fake_embedding(seed: float) -> list[float]:
@@ -58,8 +60,8 @@ def _select_hashes(
 @pytest.fixture()
 def three_seeded_chunks(
     db_schema: psycopg.Connection[psycopg.rows.TupleRow],
-    make_chunk_row: Callable[..., ChunkRow],
-) -> list[ChunkRow]:
+    make_chunk_row: Callable[..., EmbeddedChunk],
+) -> list[EmbeddedChunk]:
     """Upsert three distinct chunk rows and return them in insertion order."""
     rows = [
         make_chunk_row(
@@ -86,7 +88,7 @@ class TestUpsertIdempotency:
     def test_upsert_with_same_hash_and_changed_text_updates_single_row(
         self,
         db_schema: psycopg.Connection[psycopg.rows.TupleRow],
-        make_chunk_row: Callable[..., ChunkRow],
+        make_chunk_row: Callable[..., EmbeddedChunk],
     ) -> None:
         original_row = make_chunk_row(
             theme=_THEME_A,
@@ -94,16 +96,17 @@ class TestUpsertIdempotency:
             text="sample-text-original",
             embedding=_fake_embedding(1.0),
         )
-        updated_row = dataclasses.replace(
-            original_row, text="sample-text-updated", embedding=_fake_embedding(2.0)
-        )
+        updated_row = original_row.model_copy(update={
+            "embedding": _fake_embedding(2.0),
+            "chunk": original_row.chunk.model_copy(update={"text": "sample-text-updated"}),
+        })
 
         upsert_chunks([original_row], conn=db_schema)
         upsert_chunks([updated_row], conn=db_schema)
 
         rows = _select_rows(db_schema)
         assert len(rows) == 1
-        assert rows[0] == (updated_row.content_hash, updated_row.text)
+        assert rows[0] == (updated_row.chunk.content_hash, updated_row.chunk.text)
 
 
 class TestMultiRowInsertAcrossThemes:
@@ -112,7 +115,7 @@ class TestMultiRowInsertAcrossThemes:
     def test_theme_filter_returns_only_matching_theme_rows(
         self,
         db_schema: psycopg.Connection[psycopg.rows.TupleRow],
-        make_chunk_row: Callable[..., ChunkRow],
+        make_chunk_row: Callable[..., EmbeddedChunk],
     ) -> None:
         rows_theme_a = [
             make_chunk_row(
@@ -133,11 +136,11 @@ class TestMultiRowInsertAcrossThemes:
 
         upsert_chunks(rows_theme_a + rows_theme_b, conn=db_schema)
 
-        assert _select_hashes(db_schema, _THEME_A) == {
-            row.content_hash for row in rows_theme_a
+        assert _select_hashes(db_schema, _THEME_A.slug) == {
+            row.chunk.content_hash for row in rows_theme_a
         }
-        assert _select_hashes(db_schema, _THEME_B) == {
-            row.content_hash for row in rows_theme_b
+        assert _select_hashes(db_schema, _THEME_B.slug) == {
+            row.chunk.content_hash for row in rows_theme_b
         }
 
 
@@ -147,25 +150,25 @@ class TestDeleteChunksNotIn:
     def test_deletes_rows_whose_hash_is_not_in_keep_set(
         self,
         db_schema: psycopg.Connection[psycopg.rows.TupleRow],
-        three_seeded_chunks: list[ChunkRow],
+        three_seeded_chunks: list[EmbeddedChunk],
     ) -> None:
         kept, dropped = three_seeded_chunks[:2], three_seeded_chunks[2]
 
         deleted_count = delete_chunks_not_in(
-            [row.content_hash for row in kept], conn=db_schema
+            [row.chunk.content_hash for row in kept], conn=db_schema
         )
 
         remaining_hashes = _select_hashes(db_schema)
         assert deleted_count == 1
-        assert remaining_hashes == {row.content_hash for row in kept}
-        assert dropped.content_hash not in remaining_hashes
+        assert remaining_hashes == {row.chunk.content_hash for row in kept}
+        assert dropped.chunk.content_hash not in remaining_hashes
 
     def test_deletes_nothing_when_keep_set_covers_all_existing_hashes(
         self,
         db_schema: psycopg.Connection[psycopg.rows.TupleRow],
-        three_seeded_chunks: list[ChunkRow],
+        three_seeded_chunks: list[EmbeddedChunk],
     ) -> None:
-        all_hashes = [row.content_hash for row in three_seeded_chunks]
+        all_hashes = [row.chunk.content_hash for row in three_seeded_chunks]
 
         deleted_count = delete_chunks_not_in(all_hashes, conn=db_schema)
 
@@ -175,11 +178,39 @@ class TestDeleteChunksNotIn:
     def test_raises_value_error_and_deletes_nothing_when_keep_set_is_empty(
         self,
         db_schema: psycopg.Connection[psycopg.rows.TupleRow],
-        three_seeded_chunks: list[ChunkRow],
+        three_seeded_chunks: list[EmbeddedChunk],
     ) -> None:
         with pytest.raises(ValueError):
             delete_chunks_not_in([], conn=db_schema)
 
         assert _select_hashes(db_schema) == {
-            row.content_hash for row in three_seeded_chunks
+            row.chunk.content_hash for row in three_seeded_chunks
         }
+
+
+class TestEmbeddingDimensionValidation:
+    """EmbeddedChunk rejects embeddings of the wrong length before any DB write."""
+
+    def _make_valid_chunk(self) -> Chunk:
+        return Chunk(
+            theme=_THEME_A,
+            page_slug="sample-page",
+            section_id="section-001",
+            chunk_index=0,
+            content_hash="hash-validation",
+            text="sample-text",
+        )
+
+    def test_raises_validation_error_when_embedding_is_too_short(self) -> None:
+        with pytest.raises(ValidationError):
+            EmbeddedChunk(
+                chunk=self._make_valid_chunk(),
+                embedding=[0.0] * (EMBEDDING_DIMENSIONS - 1),
+            )
+
+    def test_raises_validation_error_when_embedding_is_too_long(self) -> None:
+        with pytest.raises(ValidationError):
+            EmbeddedChunk(
+                chunk=self._make_valid_chunk(),
+                embedding=[0.0] * (EMBEDDING_DIMENSIONS + 1),
+            )

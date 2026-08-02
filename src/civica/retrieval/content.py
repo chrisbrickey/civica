@@ -1,12 +1,12 @@
 """Semantic-search API for the official exam corpus."""
 
-from dataclasses import dataclass
-
 import psycopg
 import psycopg.rows
 from pgvector.psycopg import register_vector
+from pydantic import BaseModel, ConfigDict
 
 from civica.db.pool import get_pool
+from civica.domain.chunk import Chunk
 from civica.domain.themes import Theme
 from civica.embeddings.embedder import EMBEDDING_DIMENSIONS, embed_query
 
@@ -29,17 +29,45 @@ LIMIT %s
 
 _THEME_WHERE_CLAUSE = "WHERE theme = %s"
 
-@dataclass(frozen=True)
-class ContentChunk:
-    """A single corpus chunk returned by search(), with its similarity to the query."""
+class ContentChunk(BaseModel):  # type: ignore[explicit-any]
+    """A single corpus Chunk returned by search(), with its similarity to the query."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunk: Chunk
+    similarity: float
+
+class _SearchRow(BaseModel):  # type: ignore[explicit-any]
+    """One raw content_chunks row as returned by the search query.
+
+    Columns map by name via psycopg class_row, so field access is typed rather
+    than positional. `theme` is the stored slug string and `distance` is cosine
+    distance, both DB-native; hydration into the domain shape (a Theme instance
+    and similarity = 1 - distance) happens in to_content_chunk.
+    """
+
+    model_config = ConfigDict(frozen=True)
 
     text: str
-    theme: Theme
+    theme: str
     page_slug: str
     section_id: str
     chunk_index: int
     content_hash: str
-    similarity: float
+    distance: float
+
+    def to_content_chunk(self) -> ContentChunk:
+        return ContentChunk(
+            chunk=Chunk(
+                theme=Theme.from_slug(self.theme),
+                page_slug=self.page_slug,
+                section_id=self.section_id,
+                chunk_index=self.chunk_index,
+                content_hash=self.content_hash,
+                text=self.text,
+            ),
+            similarity=1 - self.distance,
+        )
 
 def _search_on_connection(
     query: str,
@@ -58,22 +86,11 @@ def _search_on_connection(
         params.append(theme.slug)
     params.append(k)
 
-    with conn.cursor() as cursor:
+    with conn.cursor(row_factory=psycopg.rows.class_row(_SearchRow)) as cursor:
         cursor.execute(sql, params)
         rows = cursor.fetchall()
 
-    return [
-        ContentChunk(
-            text=row[0],
-            theme=Theme.from_slug(row[1]),
-            page_slug=row[2],
-            section_id=row[3],
-            chunk_index=row[4],
-            content_hash=row[5],
-            similarity=1 - row[6],
-        )
-        for row in rows
-    ]
+    return [row.to_content_chunk() for row in rows]
 
 def search(
     query: str,
