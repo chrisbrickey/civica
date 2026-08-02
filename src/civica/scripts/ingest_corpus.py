@@ -25,10 +25,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from civica.db.pool import get_pool
+from civica.domain.chunk import Chunk
 from civica.domain.themes import Theme
 from civica.ingestion.chunker import chunk_section
-from civica.embeddings.embedder import embed
-from civica.ingestion.repository import ChunkRow, delete_chunks_not_in, upsert_chunks
+from civica.embeddings.embedder import EMBEDDING_MODEL, embed
+from civica.ingestion.repository import EmbeddedChunk, delete_chunks_not_in, upsert_chunks
 from civica.scripts.normalize_thematic_sheets import NormalizedPage
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ CONTEXT_SEPARATOR = " - "
 
 @dataclass(frozen=True)
 class PendingChunk:
-    """A chunk that is ready to embed: a ChunkRow minus its embedding."""
+    """A chunk that is ready to embed: an EmbeddedChunk minus its embedding."""
 
     theme: str
     page_slug: str
@@ -56,10 +57,25 @@ def _contextualized(title: str, heading: str, chunk: str) -> str:
     return f"{prefix}\n\n{chunk}" if prefix else chunk
 
 
+# NUL cannot appear in an embedding-model name, so it unambiguously separates
+# the model identity from the text (no model name can spoof the boundary).
+_HASH_FIELD_SEPARATOR = "\x00"
+
+
 def _content_hash(text: str) -> str:
-    """sha256 over NFC-normalized UTF-8 so accent encoding drift never duplicates rows."""
+    """sha256 over the embedding model identity plus NFC-normalized UTF-8 text.
+
+    NFC normalization keeps accent-encoding drift from duplicating rows.
+
+    Folding EMBEDDING_MODEL into the hash means that swapping to a different
+    embedding model (with same dimensions) changes every hash. That is important
+    because the embedding step of the ingestion pipeline skips unchanged hashes
+    to reduce unnecessary cost. If the embedding model changes, we want the hash
+    to also change so that re-embedding is triggered.
+    """
     normalized = unicodedata.normalize("NFC", text)
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    payload = f"{EMBEDDING_MODEL}{_HASH_FIELD_SEPARATOR}{normalized}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _pending_chunks_for_page(page: NormalizedPage) -> list[PendingChunk]:
@@ -118,13 +134,15 @@ def ingest(corpus_root: Path) -> int:
         batch = new_chunks[start : start + EMBED_BATCH_SIZE]
         embeddings = embed([chunk.text for chunk in batch])
         rows = [
-            ChunkRow(
-                theme=chunk.theme,
-                page_slug=chunk.page_slug,
-                section_id=chunk.section_id,
-                chunk_index=chunk.chunk_index,
-                content_hash=chunk.content_hash,
-                text=chunk.text,
+            EmbeddedChunk(
+                chunk=Chunk(
+                    theme=Theme.from_slug(chunk.theme),
+                    page_slug=chunk.page_slug,
+                    section_id=chunk.section_id,
+                    chunk_index=chunk.chunk_index,
+                    content_hash=chunk.content_hash,
+                    text=chunk.text,
+                ),
                 embedding=embedding,
             )
             for chunk, embedding in zip(batch, embeddings, strict=True)

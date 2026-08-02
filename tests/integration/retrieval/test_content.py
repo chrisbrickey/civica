@@ -15,7 +15,7 @@ import pytest
 
 from civica.domain.themes import DROITS_ET_DEVOIRS, HISTOIRE_GEOGRAPHIE_ET_CULTURE, Theme
 from civica.embeddings.embedder import EMBEDDING_DIMENSIONS
-from civica.ingestion.repository import ChunkRow, upsert_chunks
+from civica.ingestion.repository import EmbeddedChunk, upsert_chunks
 from civica.retrieval import content
 
 # ---------------------------------------------------------------------------
@@ -89,10 +89,10 @@ def stub_query_embedding(
 @pytest.fixture()
 def seed(
     db_schema: psycopg.Connection[psycopg.rows.TupleRow],
-) -> Callable[[list[ChunkRow]], None]:
+) -> Callable[[list[EmbeddedChunk]], None]:
     """Upsert chunk rows on the per-test schema connection."""
 
-    def _seed(rows: list[ChunkRow]) -> None:
+    def _seed(rows: list[EmbeddedChunk]) -> None:
         upsert_chunks(rows, conn=db_schema)
 
     return _seed
@@ -125,8 +125,8 @@ class TestOrderingBySimilarity:
 
     def test_returns_chunks_ordered_by_descending_similarity(
         self,
-        make_chunk_row: Callable[..., ChunkRow],
-        seed: Callable[[list[ChunkRow]], None],
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
         run_search: Callable[..., list[content.ContentChunk]],
     ) -> None:
         # cosine similarity to the stubbed query vector:
@@ -134,15 +134,15 @@ class TestOrderingBySimilarity:
         #   partial_match:    query + orthogonal, unnormalized -> 1/sqrt(2) ~= 0.707
         #   orthogonal_match: no overlap with the query   -> 0.0
         exact_match = make_chunk_row(
-            theme=_THEME_A.slug, embedding=_matching_embedding(), content_hash="hash-exact"
+            theme=_THEME_A, embedding=_matching_embedding(), content_hash="hash-exact"
         )
         partial_match = make_chunk_row(
-            theme=_THEME_A.slug,
+            theme=_THEME_A,
             embedding=_combine_vectors(_matching_embedding(), _orthogonal_embedding()),
             content_hash="hash-partial",
         )
         orthogonal_match = make_chunk_row(
-            theme=_THEME_A.slug,
+            theme=_THEME_A,
             embedding=_orthogonal_embedding(),
             content_hash="hash-orthogonal",
         )
@@ -150,10 +150,10 @@ class TestOrderingBySimilarity:
 
         results = run_search(k=3)
 
-        assert [chunk.content_hash for chunk in results] == [
-            exact_match.content_hash,
-            partial_match.content_hash,
-            orthogonal_match.content_hash,
+        assert [result.chunk.content_hash for result in results] == [
+            exact_match.chunk.content_hash,
+            partial_match.chunk.content_hash,
+            orthogonal_match.chunk.content_hash,
         ]
         assert results[0].similarity > results[1].similarity > results[2].similarity
 
@@ -163,17 +163,17 @@ class TestThemeFilter:
 
     def test_theme_filter_excludes_more_similar_chunk_from_other_theme(
         self,
-        make_chunk_row: Callable[..., ChunkRow],
-        seed: Callable[[list[ChunkRow]], None],
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
         run_search: Callable[..., list[content.ContentChunk]],
     ) -> None:
         # The theme-A chunk is the closer match to the query, but the filter
         # requests theme B, so only the (less similar) theme-B chunk returns.
         more_similar_other_theme = make_chunk_row(
-            theme=_THEME_A.slug, embedding=_matching_embedding(), content_hash="hash-theme-a"
+            theme=_THEME_A, embedding=_matching_embedding(), content_hash="hash-theme-a"
         )
         less_similar_target_theme = make_chunk_row(
-            theme=_THEME_B.slug,
+            theme=_THEME_B,
             embedding=_orthogonal_embedding(),
             content_hash="hash-theme-b",
         )
@@ -181,10 +181,10 @@ class TestThemeFilter:
 
         results = run_search(theme=_THEME_B)
 
-        assert [chunk.content_hash for chunk in results] == [
-            less_similar_target_theme.content_hash
+        assert [result.chunk.content_hash for result in results] == [
+            less_similar_target_theme.chunk.content_hash
         ]
-        assert all(chunk.theme == _THEME_B for chunk in results)
+        assert all(result.chunk.theme == _THEME_B for result in results)
 
 
 class TestSimilarityComputation:
@@ -192,12 +192,12 @@ class TestSimilarityComputation:
 
     def test_orthogonal_vectors_have_zero_similarity(
         self,
-        make_chunk_row: Callable[..., ChunkRow],
-        seed: Callable[[list[ChunkRow]], None],
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
         run_search: Callable[..., list[content.ContentChunk]],
     ) -> None:
         chunk = make_chunk_row(
-            theme=_THEME_A.slug,
+            theme=_THEME_A,
             embedding=_orthogonal_embedding(),
             content_hash="hash-orthogonal",
         )
@@ -209,12 +209,12 @@ class TestSimilarityComputation:
 
     def test_identical_vectors_have_full_similarity(
         self,
-        make_chunk_row: Callable[..., ChunkRow],
-        seed: Callable[[list[ChunkRow]], None],
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
         run_search: Callable[..., list[content.ContentChunk]],
     ) -> None:
         chunk = make_chunk_row(
-            theme=_THEME_A.slug,
+            theme=_THEME_A,
             embedding=_matching_embedding(),
             content_hash="hash-identical",
         )
@@ -230,13 +230,13 @@ class TestResultLimit:
 
     def test_k_limits_number_of_results(
         self,
-        make_chunk_row: Callable[..., ChunkRow],
-        seed: Callable[[list[ChunkRow]], None],
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
         run_search: Callable[..., list[content.ContentChunk]],
     ) -> None:
         rows = [
             make_chunk_row(
-                theme=_THEME_A.slug,
+                theme=_THEME_A,
                 embedding=_unit_vector(axis),
                 content_hash=f"hash-{axis}",
             )
@@ -254,12 +254,12 @@ class TestFieldRoundTrip:
 
     def test_fields_round_trip_seeded_values(
         self,
-        make_chunk_row: Callable[..., ChunkRow],
-        seed: Callable[[list[ChunkRow]], None],
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
         run_search: Callable[..., list[content.ContentChunk]],
     ) -> None:
         seeded = make_chunk_row(
-            theme=_THEME_A.slug,
+            theme=_THEME_A,
             embedding=_matching_embedding(),
             content_hash="hash-round-trip",
             text="sample-text-round-trip",
@@ -272,11 +272,11 @@ class TestFieldRoundTrip:
         results = run_search(k=1)
 
         assert len(results) == 1
-        chunk = results[0]
-        assert chunk.text == seeded.text
-        assert isinstance(chunk.theme, Theme)
-        assert chunk.theme.slug == seeded.theme
-        assert chunk.page_slug == seeded.page_slug
-        assert chunk.section_id == seeded.section_id
-        assert chunk.chunk_index == seeded.chunk_index
-        assert chunk.content_hash == seeded.content_hash
+        result = results[0]
+        assert result.chunk.text == seeded.chunk.text
+        assert isinstance(result.chunk.theme, Theme)
+        assert result.chunk.theme.slug == seeded.chunk.theme.slug
+        assert result.chunk.page_slug == seeded.chunk.page_slug
+        assert result.chunk.section_id == seeded.chunk.section_id
+        assert result.chunk.chunk_index == seeded.chunk.chunk_index
+        assert result.chunk.content_hash == seeded.chunk.content_hash
