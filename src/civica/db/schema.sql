@@ -12,3 +12,10 @@ CREATE INDEX IF NOT EXISTS content_chunks_theme_idx ON content_chunks(theme);
 -- Queries must compare via the same cast (embedding::halfvec({embedding_dim})) to use this index.
 CREATE INDEX IF NOT EXISTS content_chunks_embedding_idx
   ON content_chunks USING hnsw ((embedding::halfvec({embedding_dim})) halfvec_cosine_ops);
+
+CREATE TABLE IF NOT EXISTS users (
+  user_id UUID PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  secret_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

@@ -5,7 +5,7 @@ import psycopg.rows
 from pgvector.psycopg import register_vector
 from pydantic import BaseModel, ConfigDict
 
-from civica.db.pool import get_pool
+from civica.db.session import run_on_connection
 from civica.domain.chunk import Chunk
 from civica.domain.themes import Theme
 from civica.embeddings.embedder import EMBEDDING_DIMENSIONS, embed_query
@@ -108,13 +108,7 @@ def search(
     to that theme only. This inserts some deterministic behavior, reducing the
     probability of responses diverging from official study material.
     NB: If a theme filter is applied, less than k chunks may be returned.
-
-    When conn is provided, the search runs on that connection directly.
-    When conn is None, a connection is checked out from the shared pool.
     """
-    if conn is not None:
-        return _search_on_connection(query, theme, k, conn)
-
-    pool = get_pool()
-    with pool.connection() as pool_conn:
-        return _search_on_connection(query, theme, k, pool_conn)
+    return run_on_connection(
+        lambda connection: _search_on_connection(query, theme, k, connection), conn
+    )

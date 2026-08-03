@@ -51,16 +51,17 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
 
 ### Technology
 
-| Major Dependencies   | Purpose                                        |
-|----------------------|------------------------------------------------|
-| uv                   | Python package + venv manager                  |
-| python (3.12)        | Runtime                                        |
-| docker (compose v2)  | Container runtime for local databases          |
-| pgvector             | Vector similarity search extension of Postgres |
-| psycopg[binary,pool] | Postgres driver + connection pool              |
-| langchain-openai     | Corpus embedding                               |
-| pydantic             | Data validation                                |
-| pytest               | Test suite                                     |
+| Major Dependencies   | Purpose                                       |
+|----------------------|-----------------------------------------------|
+| uv                   | Python package + venv manager                 |
+| python (3.12)        | Runtime                                       |
+| docker (compose v2)  | Container runtime for local databases         |
+| pgvector             | Vector similarity search (Postgres extension) |
+| psycopg[binary,pool] | Postgres driver + connection pool             |
+| langchain-openai     | Corpus embedding                              |
+| pydantic             | Data validation                               |
+| bcrypt               | User auth                                     |
+| pytest               | Test suite                                    |
 
 
 ## Setup
