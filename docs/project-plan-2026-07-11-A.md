@@ -486,9 +486,17 @@ This addresses a silent failure mode that I discovered while implementing this s
 
 ---
 
-## Step 6: Users + auth (username + local secret)
+## ✅ Step 6: Users + auth (username + local secret)
 
 **Goal:** A `users` table plus register/verify flows. Every subsequent memory/quiz-log call is namespaced by `user_id`.
+
+**Design decisions (from the pre-implementation review; see the rationale bullets inline):**
+- `UserId` lives in the domain layer, not the auth service. Step 7's `quiz_answers`, the memory layer, and later the graph all import `UserId`; anchoring it in `domain/` (beside `Chunk` and `Theme`) keeps those data layers from importing the auth service and avoids an import cycle.
+- The application owns the UUID. `register` generates `uuid4()` in Python and inserts it explicitly (no DB `DEFAULT`, no `RETURNING` roundtrip). This mirrors how `content_chunks` owns its own primary key (`content_hash` generated in Python) rather than delegating identity to the database.
+- `UsernameTaken` comes from the DB `UNIQUE` constraint, not a pre-check. `register` attempts the `INSERT` and catches `psycopg.errors.UniqueViolation`, translating it to `UsernameTaken`. A `SELECT`-then-`INSERT` would carry a time-of-check/time-of-use race; relying on the constraint is both correct and simpler.
+- Usernames are normalized at the service boundary (trim surrounding whitespace + `casefold()`) before hashing, insert, and lookup, so `Alex`, `alex`, and `alex ` resolve to one account. The stored column stays plain `TEXT UNIQUE` (no `CITEXT`, no functional index); normalization is a service-layer concern, keeping the schema simple.
+- `register` validates secret length to sidestep bcrypt's silent 72-byte truncation (two long secrets sharing a 72-byte prefix would otherwise verify as equal, and newer `bcrypt` releases raise on over-length input). Reject an over-long secret with a clear error rather than pre-hashing.
+- Service functions follow the established optional-connection convention (`conn: psycopg.Connection | None = None`; pool by default, explicit connection in tests), identical to `search`, `upsert_chunks`, and `apply_schema`.
 
 - Add dependency: `bcrypt`.
 
@@ -501,33 +509,49 @@ This addresses a silent failure mode that I discovered while implementing this s
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
   ```
+  - `user_id` has no `DEFAULT`: the application supplies the UUID (see design decisions). `username` stores the already-normalized value; `secret_hash` stores the bcrypt hash with its embedded salt (no separate salt column needed).
+
+- **Test:** `tests/unit/domain/test_user.py` (new unit test)
+  - `UserId` wraps a `UUID` and round-trips unchanged (a plain construction/identity check, mirroring the lightweight `Theme`/`Chunk` domain tests). This exists so the shared type has a home and a test before the service imports it.
+- Create `src/civica/domain/user.py`:
+  - `UserId = NewType("UserId", UUID)`. Imports only `uuid.UUID`; no db/service imports, keeping the domain layer dependency-light (same discipline as `domain/chunk.py`).
+
+- **Check In:** Stop and confirm with user that implementation is satisfactory.
 
 - **Test:** `tests/integration/users/test_service.py` (integration: writes real `users` rows; use the `db_schema` fixture and pass its connection)
-  - Register → verify: happy path returns a `UserId`.
+  - Register → verify: happy path returns a `UserId` (and `verify` with the same credentials returns the same `UserId`).
   - Register duplicate username → raises `UsernameTaken`.
+  - Register a username that differs only in case or surrounding whitespace from an existing one → raises `UsernameTaken` (normalization collapses them to one account).
+  - `verify` succeeds when the supplied username differs only in case/whitespace from the registered form (lookup normalizes identically).
   - Verify with wrong secret → returns `None`.
   - Verify with unknown username → returns `None`.
+  - Register with an over-length secret (exceeds the bcrypt 72-byte limit) → raises a clear validation error and writes no row.
 - Create `src/civica/users/__init__.py` and `src/civica/users/service.py`:
-  - `register(username: str, secret: str) -> UserId` - hashes secret with bcrypt, inserts row, raises `UsernameTaken` on conflict.
-  - `verify(username: str, secret: str) -> UserId | None` - returns `UserId` on success, `None` on bad credentials.
-  - `UserId` is a `NewType[UUID]`.
+  - `register(username: str, secret: str, conn: psycopg.Connection | None = None) -> UserId` - normalizes the username (trim + `casefold`), validates the secret length (raises on over-length input, before any hashing or write), hashes the secret with bcrypt, generates `uuid4()`, inserts the row, and returns the `UserId`. Catches `psycopg.errors.UniqueViolation` on the `username` constraint and raises `UsernameTaken`.
+  - `verify(username: str, secret: str, conn: psycopg.Connection | None = None) -> UserId | None` - normalizes the username identically, looks up the row, checks the secret with `bcrypt.checkpw`, and returns the stored `UserId` on success or `None` on either an unknown username or a bad secret (the two cases are indistinguishable to the caller by design).
+  - `UsernameTaken` is defined here (service-layer error) and exported. `UserId` is imported from `domain/user.py`.
+  - Optional-connection convention (pool by default, explicit connection in tests) matches `search`/`upsert_chunks`/`apply_schema`.
   
 - **Check In:** Stop and confirm with user that implementation is satisfactory and that the auth surface is what the UI will consume.
 
-- **README:** 
-  - In **Usage → Streamlit app**, note that first-time users register with a username + local secret. 
+- **README:**
   - Add to technology table: | `bcrypt`               | Local-secret hashing for username auth       |
   - No new dirs in the project structure diagram (`src/civica/users/` is a sub-package).
 
-- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any diversions from the plan.
+- **Update this plan:** 
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan. 
+    - Extracted `_BCRYPT_ROUNDS` to variable and override in tests so that production hash cycles remain near libary default (12) but tests can run on fewer cycles to maintain performance.
+    - Extracted shared logic for managing database sessions to one place (`session.py`).
+    - Manually confirmed creation of a user in database.
 
 ---
 
 ## Step 7: Memory layer (LangGraph checkpointer + store + record helpers + memory_writer + quiz log)
 
 **Goal:** All persistent learner state in one cohesive layer: LangGraph short-term thread state, LangGraph long-term namespaced store with four record types, an allowlist-guarded `memory_writer` helper, and a raw quiz-answer append-only table outside LangGraph state.
+
+- **`UserId` is imported from `domain/user.py`** (created in Step 6), never redefined here. The memory writer, the quiz log, and the record types all type their user parameter as `UserId`, keeping the namespace type single-sourced in the domain layer and this layer free of any dependency on the auth service.
 
 - Add dependency: `langgraph`, `langgraph-checkpoint-postgres` (or the equivalent monorepo package that ships `PostgresSaver` + `PostgresStore`).
 - Extend `src/civica/db/schema.sql` (see [Schema convention](#schema-convention)):
@@ -563,7 +587,7 @@ This addresses a silent failure mode that I discovered while implementing this s
   - `MistakeEpisode` must capture the source context of the missed question, not just the theme: `theme`, `question_id`, and `sources` - a list of `(page_slug, section_id)` references to the corpus passages the question was generated from (a question may draw on several). This is what lets Step 10's mistake-driven review reconstruct a corpus-prefix-style retrieval query and re-teach the exact passages the learner missed. Step 9's `Question` records carry their source chunk references forward for this purpose.
   - `writer.MEMORY_WRITE_ALLOWLIST: set[str] = {"learner_profile", "topic_mastery", "mistake_episode", "session_summary"}`.
   - `writer.put(user_id: UserId, namespace_kind: str, key: str, value: Mapping[str, object]) -> None` - raises `MemoryNotAllowed` if `namespace_kind` is not in the allowlist; otherwise calls `store.put(("<kind>", str(user_id)), key, value)`.
-  - `writer.get(user_id, namespace_kind, key) -> Mapping[str, object] | None` - thin read passthrough (no allowlist on reads).
+  - `writer.get(user_id: UserId, namespace_kind: str, key: str) -> Mapping[str, object] | None` - thin read passthrough (no allowlist on reads).
 
 - **Check In:** Stop and confirm with user that the implemenation is satisfactory.
 
@@ -571,8 +595,9 @@ This addresses a silent failure mode that I discovered while implementing this s
   - Log 5 answers, `recent_mistakes(user_id, limit=3)` returns the 3 most recent incorrect ones in reverse-chronological order.
   - `recent_mistakes` for a fresh user returns an empty list.
 - Create `src/civica/progress/quiz_log.py`:
-  - `log_answer(user_id, theme, question_id, chosen_index, correct_index, is_correct) -> None`.
-  - `recent_mistakes(user_id, limit=20) -> list[QuizAnswerRow]`.
+  - `log_answer(user_id: UserId, theme: Theme, question_id: str, chosen_index: int, correct_index: int, is_correct: bool, conn: psycopg.Connection | None = None) -> None`.
+  - `recent_mistakes(user_id: UserId, limit: int = 20, conn: psycopg.Connection | None = None) -> list[QuizAnswerRow]`.
+  - `UserId` from `domain/user.py`, `Theme` from `domain/themes.py`. Optional-connection convention (pool by default, explicit connection in tests) matches the rest of the codebase.
 
 - **Check In:** Stop and confirm with user that implementation is satisfactory and that the memory surface (record shapes, allowlist, quiz-log schema) is what the graph will consume.
 
@@ -692,7 +717,7 @@ This addresses a silent failure mode that I discovered while implementing this s
 - **Check In:** Stop and confirm with the user that the implementation is satisfactory. Manually exercise the full loop (register → quiz a theme → mock exam) end-to-end before declaring MVP done.
 
 - **README:** 
-  - Fill in the **Usage → Streamlit app** section with the exact `uv run streamlit run chat_ui.py` command and a screenshot placeholder. 
+  - Fill in the **Usage → Streamlit app** section with the exact `uv run streamlit run chat_ui.py` command and a screenshot placeholder. Note that first-time users register with a username + local secret, and that usernames are case-insensitive and ignore surrounding whitespace. 
   - Add `chat_ui.py` to the project structure diagram (with inline comment: `# Streamlit entrypoint`).
   - Add to **Technology** table: | `streamlit`            | Web UI                                       |
   - Add to project structure:    ├── chat_ui.py                # streamlit entrypoint

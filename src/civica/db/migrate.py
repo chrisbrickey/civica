@@ -2,7 +2,8 @@ from pathlib import Path
 
 import psycopg
 
-from civica.db.pool import enable_pgvector, get_pool
+from civica.db.pool import enable_pgvector
+from civica.db.session import run_on_connection
 from civica.embeddings.embedder import EMBEDDING_DIMENSIONS
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -21,15 +22,5 @@ def _run_schema(conn: psycopg.Connection[psycopg.rows.TupleRow]) -> None:
 
 
 def apply_schema(conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None) -> None:
-    """Enable pgvector and execute schema.sql.
-
-    When connection is provided, the schema runs against that connection directly.
-    When connection is None, a connection is checked out from the shared pool.
-    """
-    if conn is not None:
-        _run_schema(conn)
-        return
-
-    pool = get_pool()
-    with pool.connection() as pool_conn:
-        _run_schema(pool_conn)
+    """Enable pgvector and execute schema.sql."""
+    run_on_connection(_run_schema, conn)

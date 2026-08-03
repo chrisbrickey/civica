@@ -11,7 +11,7 @@ import psycopg
 from pgvector.psycopg import register_vector
 from pydantic import BaseModel, ConfigDict, Field
 
-from civica.db.pool import get_pool
+from civica.db.session import run_on_connection
 from civica.domain.chunk import Chunk
 from civica.embeddings.embedder import EMBEDDING_DIMENSIONS
 
@@ -66,18 +66,8 @@ def _upsert_on_connection(
 def upsert_chunks(
     rows: Iterable[EmbeddedChunk], conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None
 ) -> None:
-    """Insert or update content chunks, keyed by content_hash.
-
-    When conn is provided, the upsert runs on that connection directly.
-    When conn is None, a connection is checked out from the shared pool.
-    """
-    if conn is not None:
-        _upsert_on_connection(rows, conn)
-        return
-
-    pool = get_pool()
-    with pool.connection() as pool_conn:
-        _upsert_on_connection(rows, pool_conn)
+    """Insert or update content chunks, keyed by content_hash."""
+    run_on_connection(lambda connection: _upsert_on_connection(rows, connection), conn)
 
 
 def _delete_not_in_on_connection(
@@ -96,18 +86,11 @@ def delete_chunks_not_in(
 
     Returns the number of rows deleted. Raises ValueError if keep_hashes is
     empty, before touching the database, so a full wipe never happens
-    implicitly. Resetting the table to empty is a manual operation, not
-    something this function will do on your behalf.
-
-    When conn is provided, the delete runs on that connection directly.
-    When conn is None, a connection is checked out from the shared pool.
+    implicitly. Resetting the table to empty requires a manual operation.
     """
     if not keep_hashes:
         raise ValueError("keep_hashes must not be empty; refusing to wipe content_chunks")
 
-    if conn is not None:
-        return _delete_not_in_on_connection(keep_hashes, conn)
-
-    pool = get_pool()
-    with pool.connection() as pool_conn:
-        return _delete_not_in_on_connection(keep_hashes, pool_conn)
+    return run_on_connection(
+        lambda connection: _delete_not_in_on_connection(keep_hashes, connection), conn
+    )
