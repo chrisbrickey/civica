@@ -51,17 +51,18 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
 
 ### Technology
 
-| Major Dependencies   | Purpose                                       |
-|----------------------|-----------------------------------------------|
-| uv                   | Python package + venv manager                 |
-| python (3.12)        | Runtime                                       |
-| docker (compose v2)  | Container runtime for local databases         |
-| pgvector             | Vector similarity search (Postgres extension) |
-| psycopg[binary,pool] | Postgres driver + connection pool             |
-| langchain-openai     | Corpus embedding                              |
-| pydantic             | Data validation                               |
-| bcrypt               | User auth                                     |
-| pytest               | Test suite                                    |
+| Major Dependencies   | Purpose                                          |
+|----------------------|--------------------------------------------------|
+| uv                   | python package + venv manager                    |
+| python (3.12)        | runtime                                          |
+| docker (compose v2)  | container runtime for local databases            |
+| pgvector             | vector similarity search (Postgres extension)    |
+| psycopg[binary,pool] | postgres driver + connection pool                |
+| langchain-openai     | corpus embedding                                 |
+| langgraph            | graph orchestration (short and long-term memory) |
+| pydantic             | data validation                                  |
+| bcrypt               | yser auth                                        |
+| pytest               | test suite                                       |
 
 
 ## Setup
@@ -241,6 +242,7 @@ civica/
   │     ├── domain/             # pure business logic, no I/O
   │     ├── embeddings/         # embedding client shared by ingestion and retrieval
   │     ├── ingestion/          # corpus chunking and persistence into pgvector
+  │     ├── memory/             # orchestration of short and long-term memory
   │     ├── retrieval/          # semantic search over the embedded corpus
   │     ├── scripts/            # offline operations intended for single use
   │     └── users/              # user authentication

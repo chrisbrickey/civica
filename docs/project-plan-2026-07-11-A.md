@@ -491,12 +491,13 @@ This addresses a silent failure mode that I discovered while implementing this s
 **Goal:** A `users` table plus register/verify flows. Every subsequent memory/quiz-log call is namespaced by `user_id`.
 
 **Design decisions (from the pre-implementation review; see the rationale bullets inline):**
-- `UserId` lives in the domain layer, not the auth service. Step 7's `quiz_answers`, the memory layer, and later the graph all import `UserId`; anchoring it in `domain/` (beside `Chunk` and `Theme`) keeps those data layers from importing the auth service and avoids an import cycle.
+- `UserId` lives in the domain layer, not the auth service. Step 7B's `quiz_answers`, the Step 7 memory layer, and later the graph all import `UserId`; anchoring it in `domain/` (beside `Chunk` and `Theme`) keeps those data layers from importing the auth service and avoids an import cycle.
 - The application owns the UUID. `register` generates `uuid4()` in Python and inserts it explicitly (no DB `DEFAULT`, no `RETURNING` roundtrip). This mirrors how `content_chunks` owns its own primary key (`content_hash` generated in Python) rather than delegating identity to the database.
 - `UsernameTaken` comes from the DB `UNIQUE` constraint, not a pre-check. `register` attempts the `INSERT` and catches `psycopg.errors.UniqueViolation`, translating it to `UsernameTaken`. A `SELECT`-then-`INSERT` would carry a time-of-check/time-of-use race; relying on the constraint is both correct and simpler.
 - Usernames are normalized at the service boundary (trim surrounding whitespace + `casefold()`) before hashing, insert, and lookup, so `Alex`, `alex`, and `alex ` resolve to one account. The stored column stays plain `TEXT UNIQUE` (no `CITEXT`, no functional index); normalization is a service-layer concern, keeping the schema simple.
 - `register` validates secret length to sidestep bcrypt's silent 72-byte truncation (two long secrets sharing a 72-byte prefix would otherwise verify as equal, and newer `bcrypt` releases raise on over-length input). Reject an over-long secret with a clear error rather than pre-hashing.
 - Service functions follow the established optional-connection convention (`conn: psycopg.Connection | None = None`; pool by default, explicit connection in tests), identical to `search`, `upsert_chunks`, and `apply_schema`.
+
 
 - Add dependency: `bcrypt`.
 
@@ -547,13 +548,74 @@ This addresses a silent failure mode that I discovered while implementing this s
 
 ---
 
-## Step 7: Memory layer (LangGraph checkpointer + store + record helpers + memory_writer + quiz log)
+## Step 7: Memory layer (LangGraph checkpointer + store + records + memory_writer)
 
-**Goal:** All persistent learner state in one cohesive layer: LangGraph short-term thread state, LangGraph long-term namespaced store with four record types, an allowlist-guarded `memory_writer` helper, and a raw quiz-answer append-only table outside LangGraph state.
+**Goal:** The LangGraph-backed learner memory: short-term thread state (checkpointer), a long-term namespaced store holding four record types, and an allowlist-guarded `memory_writer` helper over that store. The raw quiz-answer log lives outside LangGraph state and is built in Step 7B.
 
-- **`UserId` is imported from `domain/user.py`** (created in Step 6), never redefined here. The memory writer, the quiz log, and the record types all type their user parameter as `UserId`, keeping the namespace type single-sourced in the domain layer and this layer free of any dependency on the auth service.
+**Conventions to follow:**
+- `UserId` is imported from `domain/user.py`, never redefined here. The memory writer, the quiz log, and the record types all type their user parameter as `UserId`, keeping the namespace type single-sourced in the domain layer and this layer free of any dependency on the auth service.
+- Typing (mirror `domain/`): every record/row type is a **frozen pydantic `BaseModel`** (`model_config = ConfigDict(frozen=True)`, `Field(...)` constraints), matching `Chunk`/`Theme`. Each `BaseModel` class needs a `# type: ignore[explicit-any]` comment on its `class` line, because the project's `disallow_any_explicit = true` flags pydantic's base. No plain dataclasses in this layer.
+- `Theme` persists as its slug, everywhere. The `Theme` pydantic model is never stored whole. In store records, add a field serializer so `theme` dumps to `theme.slug` (rehydrate with `Theme.from_slug`); in `quiz_answers` the `theme TEXT` column holds `theme.slug`. Slug is the single wire form across the store JSON and the SQL column. (Applied in `records.py` below; the same rule governs `quiz_log.py` in Step 7B.)
 
+**Part 1**
 - Add dependency: `langgraph`, `langgraph-checkpoint-postgres` (or the equivalent monorepo package that ships `PostgresSaver` + `PostgresStore`).
+  - No `schema.sql` change in this step because the LangGraph tables are created by `setup()`. The `quiz_answers` table is added in a subsequent step.
+- **Test:** `tests/integration/memory/test_checkpointer.py` (integration: exercises real `PostgresSaver` tables)
+  - A checkpoint saved for thread `t1` can be restored; unrelated threads return `None`.
+  - Note: LangGraph's `setup()` creates its own tables outside `schema.sql` so the `db_schema` fixture does not isolate them. These tests run against the test DB's public schema and must clean up the threads they create.
+- Pool config (Do this first because the existing pool is not drop-in compatible.): 
+  - LangGraph's `PostgresSaver`/`PostgresStore` require their connections to use `row_factory=dict_row` and `prepare_threshold=0` (in addition to `autocommit=True`, which the pool already sets). 
+  - The current `db/pool.py` hands back `TupleRow` connections. 
+  - Verify the exact required kwargs against the installed `langgraph-checkpoint-postgres` version, then extend `db/pool.py` to add `row_factory=dict_row` and `prepare_threshold=0` to the shared pool's `kwargs`, and re-check existing `TupleRow` consumers (they read rows positionally via `session.run_on_connection`.
+  - Confirm none break or have them set their own per-connection row factory. 
+  - Keep the single-pool rule from `CLAUDE.md`: Do not spin up a second pool.
+- Create `src/civica/memory/__init__.py`, `src/civica/memory/checkpointer.py`, and `src/civica/memory/store.py`:
+  - `checkpointer.get_saver() -> PostgresSaver` - singleton bound to the shared connection pool (constructed directly over the pool, not via the `from_conn_string` context manager, so it stays open for the process). Calls `setup()` once.
+  - `store.get_store() -> PostgresStore` - singleton bound to the shared pool. Calls `setup()` once. Key-based only (no vector index config); nothing in the current plan needs semantic memory search.
+- **Check In:** Stop and confirm with user that the implemenation is satisfactory.
+
+**Part 2**
+- **Test (unit):** `tests/unit/memory/test_records.py` (pure serialization, no DB, no network)
+  - `SourceRef` round-trips through `model_dump(mode="json")` / `model_validate` as an object with `page_slug`/`section_id` intact (no tuple-vs-list drift).
+  - A `TopicMastery` (a Theme-bearing record) dumps its `theme` as `theme.slug` (a string, not a nested object) and rehydrates via `Theme.from_slug` to an equal record, locking in the Theme-as-slug convention.
+  - Each of the four record models (`LearnerProfile`, `TopicMastery`, `MistakeEpisode`, `SessionSummary`) round-trips to an equal instance and exposes the expected `kind`.
+  - Note: This is the fast test for the pydantic/typing layer.
+- Create `src/civica/domain/source_ref.py` and `src/civica/memory/records.py`:
+  - `domain/source_ref.py` - `SourceRef(BaseModel, frozen)` with `page_slug: str = Field(min_length=1)` and `section_id: str = Field(min_length=1)`. Lives in `domain/` (not `memory/`) because Step 9's `Question` also carries `list[SourceRef]` forward into `MistakeEpisode`. Replaces bare `(page_slug, section_id)` tuples and mirrors `Chunk`'s identity fields.
+  - `records.py`:
+    - `MemoryKind(StrEnum)` with members `LEARNER_PROFILE = "learner_profile"`, `TOPIC_MASTERY = "topic_mastery"`, `MISTAKE_EPISODE = "mistake_episode"`, `SESSION_SUMMARY = "session_summary"`. Single source of truth for the namespaces.
+    - Four frozen pydantic record models - `LearnerProfile`, `TopicMastery`, `MistakeEpisode`, `SessionSummary` - each declaring `kind: ClassVar[MemoryKind]` so the writer derives the namespace from the record (no separate stringly-typed `namespace_kind` param, no CamelCase-to-snake drift). Each has an obvious `Theme`-typed field where relevant (persisted as slug per the Theme rule above). No hidden state.
+    - `MistakeEpisode` captures the source context of the missed question, not just the theme: `theme`, `question_id: str`, and `sources: list[SourceRef]` (a question may draw on several passages). This is what lets Step 10's mistake-driven review reconstruct a corpus-prefix-style retrieval query and re-teach the exact passages the learner missed.
+- **Check In:** Stop and confirm with user that the implemenation is satisfactory.
+
+**Part 3**
+- **Test (integration):** `tests/integration/memory/test_writer.py` (integration: exercises the real `PostgresStore`; same public-schema caveat as the checkpointer tests - use unique per-test `user_id`s so runs do not collide)
+  - `writer.put` with a typed record succeeds and is readable back via `writer.get` as the same typed record.
+  - `writer.put_raw` with a kind **not** in the allowlist raises `MemoryNotAllowed` (this is the graph/LLM-boundary entrypoint - the guard is reachable here because the caller supplies the kind as a string).
+  - Reads/writes are scoped per `user_id` - a value written for `alex` is not returned for `jordan`.
+  - A `MistakeEpisode` written with `sources: list[SourceRef]` reads back as an equal `MistakeEpisode` with those `SourceRef`s intact (end-to-end through the real store, complementing the unit round-trip above).
+- Create `src/civica/memory/writer.py`:
+  - `MEMORY_WRITE_ALLOWLIST: frozenset[MemoryKind]` = all four `MemoryKind` members.
+  - `put_raw(user_id: UserId, kind: str, key: str, value: Mapping[str, object]) -> None` - the boundary entrypoint (graph/LLM path, where the kind arrives as an untrusted string). Raises `MemoryNotAllowed` if `kind` is not a member of the allowlist; otherwise `store.put((kind, str(user_id)), key, value)`. This is where the allowlist is enforced.
+  - `put(user_id: UserId, key: str, record: MemoryRecord) -> None` - typed convenience wrapper for in-process callers; delegates to `put_raw(user_id, record.kind.value, key, record.model_dump(mode="json"))`. (`MemoryRecord` is the union / shared base of the four record models; its `kind` is always allowed by construction, so this path never raises.)
+  - `get(user_id: UserId, key: str, kind: type[R]) -> R | None` where `R` is bound to `MemoryRecord` - reads the raw mapping and returns `kind.model_validate(mapping)` (typed, not a bare `Mapping`), or `None`. No allowlist on reads.
+  - **Key conventions** (state them, downstream steps depend on them): `LearnerProfile` / `SessionSummary` - one per user, a constant key (e.g. `"current"`); `TopicMastery` - keyed by `theme.slug`; `MistakeEpisode` - unique key per episode (e.g. `question_id` + timestamp).
+- **Check In:** Stop and confirm with user that the implemenation is satisfactory and that the memory surface (record shapes, allowlist) is what the graph will consume.
+
+- **README:** 
+  - Add `src/civica/memory/` to the project structure (and note `domain/source_ref.py` if the diagram lists domain files).
+  - Add to technology table: | `langgraph`            | Graph orchestration, checkpointer, store     |
+
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+
+---
+
+## Step 7B: Quiz-answer log (raw append-only table outside LangGraph)
+
+**Goal:** A plain-SQL append-only record of every quiz answer, separate from LangGraph state. It powers scoring and the mistake-driven review.
+
 - Extend `src/civica/db/schema.sql` (see [Schema convention](#schema-convention)):
   ```sql
   CREATE TABLE IF NOT EXISTS quiz_answers (
@@ -566,44 +628,30 @@ This addresses a silent failure mode that I discovered while implementing this s
     is_correct BOOLEAN NOT NULL,
     answered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
-  CREATE INDEX IF NOT EXISTS quiz_answers_user_theme_idx ON quiz_answers(user_id, theme);
+  CREATE INDEX IF NOT EXISTS quiz_answers_user_recent_idx
+    ON quiz_answers(user_id, is_correct, answered_at DESC);
   ```
-
-- **Test:** `tests/integration/memory/test_checkpointer.py` (integration: exercises real `PostgresSaver` tables. Note: LangGraph's `setup()` creates its own tables outside `schema.sql`, so the `db_schema` fixture does not isolate them; these tests run against the test DB's public schema and must clean up the threads they create.)
-  - A checkpoint saved for thread `t1` can be restored; unrelated threads return `None`.
-- Create `src/civica/memory/__init__.py`, `src/civica/memory/checkpointer.py`, and `src/civica/memory/store.py`:
-  - `checkpointer.get_saver() -> PostgresSaver` - singleton bound to the shared connection pool. Calls `setup()` once.
-  - `store.get_store() -> PostgresStore` - singleton bound to the shared pool. Calls `setup()` once.
-
-- **Check In:** Stop and confirm with user that the implemenation is satisfactory.
-
-- **Test:** `tests/integration/memory/test_writer.py` (integration: exercises the real `PostgresStore`; same public-schema caveat as the checkpointer tests - use unique per-test `user_id`s so runs do not collide)
-  - `writer.put` with an allowed kind succeeds and is readable back via `writer.get`.
-  - `writer.put` with a disallowed kind raises `MemoryNotAllowed`.
-  - Reads/writes are scoped per `user_id` - a value written for `alex` is not returned for `jordan`.
-  - A `MistakeEpisode` written with source references (`page_slug`/`section_id` pairs) reads back with those references intact.
-- Create `src/civica/memory/records.py` and `src/civica/memory/writer.py`:
-  - `records.py` - typed dataclasses for the four record types: `LearnerProfile`, `TopicMastery`, `MistakeEpisode`, `SessionSummary`. Each has an obvious `Theme`-typed field where relevant. No hidden state.
-  - `MistakeEpisode` must capture the source context of the missed question, not just the theme: `theme`, `question_id`, and `sources` - a list of `(page_slug, section_id)` references to the corpus passages the question was generated from (a question may draw on several). This is what lets Step 10's mistake-driven review reconstruct a corpus-prefix-style retrieval query and re-teach the exact passages the learner missed. Step 9's `Question` records carry their source chunk references forward for this purpose.
-  - `writer.MEMORY_WRITE_ALLOWLIST: set[str] = {"learner_profile", "topic_mastery", "mistake_episode", "session_summary"}`.
-  - `writer.put(user_id: UserId, namespace_kind: str, key: str, value: Mapping[str, object]) -> None` - raises `MemoryNotAllowed` if `namespace_kind` is not in the allowlist; otherwise calls `store.put(("<kind>", str(user_id)), key, value)`.
-  - `writer.get(user_id: UserId, namespace_kind: str, key: str) -> Mapping[str, object] | None` - thin read passthrough (no allowlist on reads).
-
-- **Check In:** Stop and confirm with user that the implemenation is satisfactory.
+  - This index matches the only reader (`recent_mistakes`: filter `user_id` + `is_correct = false`, order `answered_at DESC`). No theme-scoped index yet. Add one only when a theme-scoped reader exists.
+  - `quiz_answers` is the **append-only stats/scoring log** (every answer, right or wrong). It is complementary to `MistakeEpisode` store record, which captures the corpus **source context** of wrong answers for re-teaching. Do not fold one into the other.
+  - No tests. Schema only.
 
 - **Test:** `tests/integration/progress/test_quiz_log.py` (integration: writes real `quiz_answers` rows; use the `db_schema` fixture, which also provides the `users` table for the FK)
+  - **First insert a `users` row** (call `users.register`, or insert directly) - `quiz_answers.user_id` has a FK to `users(user_id)`, so logging against a non-existent user raises a `ForeignKeyViolation`. Use that row's `UserId` for the rest of the test.
   - Log 5 answers, `recent_mistakes(user_id, limit=3)` returns the 3 most recent incorrect ones in reverse-chronological order.
+  - Field fidelity: a returned `QuizAnswerRow` matches what was logged - `theme` rehydrated (via `Theme.from_slug`) to the same `Theme` that was written as a slug, and `question_id` / `chosen_index` / `correct_index` / `is_correct` preserved.
   - `recent_mistakes` for a fresh user returns an empty list.
-- Create `src/civica/progress/quiz_log.py`:
-  - `log_answer(user_id: UserId, theme: Theme, question_id: str, chosen_index: int, correct_index: int, is_correct: bool, conn: psycopg.Connection | None = None) -> None`.
-  - `recent_mistakes(user_id: UserId, limit: int = 20, conn: psycopg.Connection | None = None) -> list[QuizAnswerRow]`.
+- Create `src/civica/progress/__init__.py` and `src/civica/progress/quiz_log.py`:
+  - `QuizAnswerRow` - frozen pydantic model over a `quiz_answers` row: `id: int`, `user_id: UserId`, `theme: Theme`, `question_id: str`, `chosen_index: int = Field(ge=0)`, `correct_index: int = Field(ge=0)`, `is_correct: bool`, `answered_at: datetime`. Reads rehydrate `theme` via `Theme.from_slug`.
+  - `log_answer(user_id: UserId, theme: Theme, question_id: str, chosen_index: int, correct_index: int, is_correct: bool, conn: psycopg.Connection | None = None) -> None` - writes `theme.slug` into the `theme` column.
+  - `recent_mistakes(user_id: UserId, limit: int = 20, conn: psycopg.Connection | None = None) -> list[QuizAnswerRow]` - filters `is_correct = false`, orders `answered_at DESC` (served by `quiz_answers_user_recent_idx`).
+- Notes on conventions:
   - `UserId` from `domain/user.py`, `Theme` from `domain/themes.py`. Optional-connection convention (pool by default, explicit connection in tests) matches the rest of the codebase.
+  - `Theme` persists as its slug: `log_answer` writes `theme.slug` into the `theme TEXT` column; reads rehydrate via `Theme.from_slug`.  
 
-- **Check In:** Stop and confirm with user that implementation is satisfactory and that the memory surface (record shapes, allowlist, quiz-log schema) is what the graph will consume.
+- **Check In:** Stop and confirm with user that implementation is satisfactory and that the quiz-log surface (row shape, schema) is what the graph will consume.
 
 - **README:** 
-  - Add `src/civica/memory/` and `src/civica/progress/` to the project structure.
-  - Add to technology table: | `langgraph`            | Graph orchestration, checkpointer, store     |
+  - Add `src/civica/progress/` to the project structure.
 
 - **Update this plan:** 
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -744,9 +792,10 @@ This addresses a silent failure mode that I discovered while implementing this s
 5. **Step 5 - Retriever:** depends on Step 4's `content_chunks` table
 6. **Step 6 - Users + auth:** required to namespace memory in Step 7; independent of retrieval
 7. **Step 7 - Memory layer:** needs Step 6's `user_id` and Step 1's pool; blocks the graph
+   - **Step 7B - Quiz-answer log:** needs Step 6's `user_id` and Step 1's pool; independent of Step 7 (no LangGraph coupling), can be built in parallel
 8. **Step 8 - Explanation engine:** needs Step 5 (retrieval); independent of memory
-9. **Step 9 - Assessment engine:** needs Step 5 (retrieval) and Step 7 (persist quiz log); independent of the graph
-10. **Step 10 - Router + graph:** needs Steps 7, 8, 9; last piece of pure back end
+9. **Step 9 - Assessment engine:** needs Step 5 (retrieval) and Step 7B (persist quiz log); independent of the graph
+10. **Step 10 - Router + graph:** needs Steps 7, 7B, 8, 9; last piece of pure back end
 11. **Step 11 - Streamlit UI:** needs Steps 6 and 10; delivers the user-facing MVP
 
 ---
