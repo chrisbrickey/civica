@@ -20,7 +20,7 @@ def test_apply_schema_enables_vector_extension() -> None:
             "SELECT extname FROM pg_extension WHERE extname = 'vector'"
         ).fetchone()
     assert result is not None
-    assert result[0] == "vector"
+    assert result["extname"] == "vector"
 
 
 def test_apply_schema_is_idempotent() -> None:

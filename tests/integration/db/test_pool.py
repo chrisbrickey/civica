@@ -11,12 +11,14 @@ from civica.db.pool import enable_pgvector, get_pool
 
 def test_get_pool_returns_working_pool() -> None:
     """A connection checked out from get_pool() can execute a basic query.
-    get_pool() returns a working pool; SELECT 1 succeeds through a checked-out connection."""
+    get_pool() returns a working pool; SELECT 1 succeeds through a checked-out connection.
+    The pool hands back dict_row connections (required by LangGraph), so the
+    row is a mapping keyed by column name, not a positional tuple."""
     pool = get_pool()
     with pool.connection() as conn:
-        result = conn.execute("SELECT 1").fetchone()
+        result = conn.execute("SELECT 1 AS value").fetchone()
     assert result is not None
-    assert result[0] == 1
+    assert result["value"] == 1
 
 
 def test_enable_pgvector_is_idempotent() -> None:

@@ -18,7 +18,10 @@ def _run_schema(conn: psycopg.Connection[psycopg.rows.TupleRow]) -> None:
     ).strip()
     sql = sql.replace("{embedding_dim}", str(EMBEDDING_DIMENSIONS))
     if sql:
-        conn.execute(sql)
+        # schema.sql is a single multi-command string. The shared pool sets
+        # prepare_threshold=0 (required by LangGraph), and Postgres cannot
+        # prepare a statement containing multiple commands, so force no prepare.
+        conn.execute(sql, prepare=False)
 
 
 def apply_schema(conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None) -> None:
