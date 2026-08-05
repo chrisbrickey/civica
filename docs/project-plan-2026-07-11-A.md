@@ -548,7 +548,7 @@ This addresses a silent failure mode that I discovered while implementing this s
 
 ---
 
-## Step 7: Memory layer (LangGraph checkpointer + store + records + memory_writer)
+## ✅ Step 7: Memory layer (LangGraph checkpointer + store + records + memory_writer)
 
 **Goal:** The LangGraph-backed learner memory: short-term thread state (checkpointer), a long-term namespaced store holding four record types, and an allowlist-guarded `memory_writer` helper over that store. The raw quiz-answer log lives outside LangGraph state and is built in Step 7B.
 
@@ -609,6 +609,8 @@ This addresses a silent failure mode that I discovered while implementing this s
 - **Update this plan:** 
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+    - Added maximum character limit on free-form prose fields. The cap is generous (500) to capture nuance. Such fields are intended only for LLM or human consumption. Other types of fields (e.g. identifiers, slugs) are more tightly controlled.
+    - Developed field shapes: `LearnerProfile.goal: str` (bounded free-form prose, `max_length=500`, LLM-consumed personalization context), `TopicMastery` = `theme` + `mastery: float` in `[0,1]` (scoring stats stay in the `quiz_answers` log, not duplicated here), `SessionSummary.summary: str` (bounded free-form prose, `max_length=500`); `MistakeEpisode` = `theme` + `question_id` + `sources: list[SourceRef]`.
 
 ---
 
@@ -756,6 +758,7 @@ This addresses a silent failure mode that I discovered while implementing this s
   - Assert an unauthenticated user cannot access the mode picker.
 - Create `chat_ui.py` at the repo root:
   - Login screen: username + secret text field. Calls `users.service.register` for new usernames or `.verify` for existing ones. Stores `user_id` in `st.session_state`.
+    - **Onboarding capture (populates `LearnerProfile`):** on first registration, prompt the new user for their study goal (free text) and write it via `memory.writer.put(user_id, "current", LearnerProfile(goal=...))`. This is the only writer of `LearnerProfile` in the plan; the `goal` field is bounded free-form prose (`max_length=500`) consumed as personalization context by the `teach`/`evaluate` prompts, not as branching logic. If onboarding is skipped, no `LearnerProfile` is written and reads return `None`.
   - Mode picker: **Teach**, **Quiz**, **Mock Exam**.
   - **Teach**: free-text input → `graph.invoke({..., "mode": "teach"})` → renders the explanation + citations.
   - **Quiz**: renders the next MCQ question, captures the user's choice, submits, renders correct/incorrect + short explanation.
