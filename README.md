@@ -243,6 +243,7 @@ civica/
   │     ├── embeddings/         # embedding client shared by ingestion and retrieval
   │     ├── ingestion/          # corpus chunking and persistence into pgvector
   │     ├── memory/             # orchestration of short and long-term memory
+  │     ├── progress/           # tracks learner history for scoring and review
   │     ├── retrieval/          # semantic search over the embedded corpus
   │     ├── scripts/            # offline operations intended for single use
   │     └── users/              # user authentication

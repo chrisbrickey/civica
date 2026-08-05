@@ -614,7 +614,7 @@ This addresses a silent failure mode that I discovered while implementing this s
 
 ---
 
-## Step 7B: Quiz-answer log (raw append-only table outside LangGraph)
+## ✅ Step 7B: Quiz-answer log (raw append-only table outside LangGraph)
 
 **Goal:** A plain-SQL append-only record of every quiz answer, separate from LangGraph state. It powers scoring and the mistake-driven review.
 
@@ -658,6 +658,9 @@ This addresses a silent failure mode that I discovered while implementing this s
 - **Update this plan:** 
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+    - Ordering tiebreaker: `recent_mistakes` orders by `answered_at DESC, id DESC` instead of `answered_at DESC` alone. The `answered_at` timestamp defaults to `NOW()`, and Postgres freezes `NOW()` to the moment a transaction starts, so several answers saved together can end up with the exact same timestamp, which could be problematic when searching for the 'most recent' user response. Adding `id DESC` breaks the tie by the always-increasing row `id`: the answer inserted later always has the larger `id`, so it sorts first.
+    - Theme loading: `QuizAnswerRow` turns the stored theme slug back into a `Theme` on its own so that query results load straight into the row model without an extra step.
+    - Added a test confirming that logging an answer for a user who does not exist is rejected by the foreign key.
 
 ---
 

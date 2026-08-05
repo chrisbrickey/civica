@@ -19,3 +19,16 @@ CREATE TABLE IF NOT EXISTS users (
   secret_hash TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS quiz_answers (
+  id BIGSERIAL PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(user_id),
+  theme TEXT NOT NULL,
+  question_id TEXT NOT NULL,
+  chosen_index INT NOT NULL,
+  correct_index INT NOT NULL,
+  is_correct BOOLEAN NOT NULL,
+  answered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS quiz_answers_user_recent_idx
+  ON quiz_answers(user_id, is_correct, answered_at DESC);
