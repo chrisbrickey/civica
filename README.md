@@ -6,7 +6,7 @@ Civica includes a bespoke ingestion pipeline to ground guidance in the study mat
 My primary reason for building Civica is to work on **memory-aware agents** that adapt to human users and improve over time,
 as opposed to optimization of chunk embedding and retrieval. See [Luminary RAG app](https://github.com/chrisbrickey/luminary) for optimization techniques including a custom evaluation harness.
 
-## MVP Features (anticipated)
+## MVP Features
 
 - **Memory-aware coaching:** remembers weak themes, recurring misconceptions, preferred explanation depth, and study cadence across sessions
 - **Guided study by theme:** the five official themes
@@ -25,7 +25,7 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
 
 ## Architecture
 
-### Pipelines (anticipated)
+### Pipelines
 ```
                                         ┌────────┐
                                         │   UI   │
