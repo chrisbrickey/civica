@@ -9,6 +9,8 @@ Store key conventions:
 from collections.abc import Mapping
 from typing import TypeVar
 
+from langgraph.store.base import BaseStore
+
 from civica.domain.user import UserId
 from civica.memory.records import MemoryKind, MemoryRecord
 from civica.memory.store import get_store
@@ -22,28 +24,46 @@ class MemoryNotAllowed(Exception):
     """Raised when a write targets a memory kind outside the allowlist."""
 
 
-def put_raw(user_id: UserId, kind: str, key: str, value: Mapping[str, object]) -> None:
+def put_raw(
+    user_id: UserId,
+    kind: str,
+    key: str,
+    value: Mapping[str, object],
+    store: BaseStore | None = None,
+) -> None:
     """Write a raw value to the store, enforcing the allowlist on `kind`.
 
     This is the graph/LLM boundary where `kind` arrives as an untrusted string.
+
+    The allowlist is checked before the store is touched, so a rejected write never reaches it.
     """
     if kind not in MEMORY_WRITE_ALLOWLIST:
         raise MemoryNotAllowed(
             f"Memory kind {kind!r} is not in the write allowlist: "
             f"{sorted(MEMORY_WRITE_ALLOWLIST)}"
         )
-    get_store().put((kind, str(user_id)), key, dict(value))
+    (store or get_store()).put((kind, str(user_id)), key, dict(value))
 
 
-def put(user_id: UserId, key: str, record: MemoryRecord) -> None:
+def put(
+    user_id: UserId,
+    key: str,
+    record: MemoryRecord,
+    store: BaseStore | None = None,
+) -> None:
     """Typed convenience wrapper for in-process callers."""
-    put_raw(user_id, record.kind.value, key, record.model_dump(mode="json"))
+    put_raw(user_id, record.kind.value, key, record.model_dump(mode="json"), store)
 
 
-def get(user_id: UserId, key: str, kind: type[R]) -> R | None:
+def get(
+    user_id: UserId,
+    key: str,
+    kind: type[R],
+    store: BaseStore | None = None,
+) -> R | None:
     """Read a typed record from the store, or None if it does not exist."""
     namespace = (kind.kind.value, str(user_id))
-    item = get_store().get(namespace, key)
+    item = (store or get_store()).get(namespace, key)
     if item is None:
         return None
     return kind.model_validate(item.value)

@@ -63,23 +63,23 @@ def _contextualized(title: str, heading: str, chunk: str) -> str:
 _HASH_FIELD_SEPARATOR = "\x00"
 
 
-def _content_hash(text: str) -> str:
+def _content_hash(text: str, embedding_model: str) -> str:
     """sha256 over the embedding model identity plus NFC-normalized UTF-8 text.
 
     NFC normalization keeps accent-encoding drift from duplicating rows.
 
-    Folding EMBEDDING_MODEL into the hash means that swapping to a different
+    Folding the embedding model into the hash means that swapping to a different
     embedding model (with same dimensions) changes every hash. That is important
     because the embedding step of the ingestion pipeline skips unchanged hashes
     to reduce unnecessary cost. If the embedding model changes, we want the hash
     to also change so that re-embedding is triggered.
     """
     normalized = unicodedata.normalize("NFC", text)
-    payload = f"{EMBEDDING_MODEL}{_HASH_FIELD_SEPARATOR}{normalized}"
+    payload = f"{embedding_model}{_HASH_FIELD_SEPARATOR}{normalized}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _pending_chunks_for_page(page: NormalizedPage) -> list[PendingChunk]:
+def _pending_chunks_for_page(page: NormalizedPage, embedding_model: str) -> list[PendingChunk]:
     """Chunk every section of one normalized page. Raises ValueError on unknown theme."""
     theme = Theme.from_slug(page["theme"])
     pending: list[PendingChunk] = []
@@ -92,21 +92,23 @@ def _pending_chunks_for_page(page: NormalizedPage) -> list[PendingChunk]:
                     page_slug=page["slug"],
                     section_id=section["id"],
                     chunk_index=index,
-                    content_hash=_content_hash(text),
+                    content_hash=_content_hash(text, embedding_model),
                     text=text,
                 )
             )
     return pending
 
 
-def collect_pending_chunks(corpus_root: Path) -> list[PendingChunk]:
+def collect_pending_chunks(
+    corpus_root: Path, *, embedding_model: str = EMBEDDING_MODEL
+) -> list[PendingChunk]:
     """Read every corpus JSON and return its chunks, deduplicated by content_hash."""
     by_hash: dict[str, PendingChunk] = {}
     page_count = 0
     for json_path in sorted(corpus_root.rglob("*.json")):
         page: NormalizedPage = json.loads(json_path.read_text(encoding="utf-8"))
         page_count += 1
-        for chunk in _pending_chunks_for_page(page):
+        for chunk in _pending_chunks_for_page(page, embedding_model):
             by_hash.setdefault(chunk.content_hash, chunk)
     logger.info("Collected %d chunk(s) from %d page(s).", len(by_hash), page_count)
     return list(by_hash.values())
@@ -125,9 +127,6 @@ def ingest(
     embed: EmbedBatchFn = embedder.embed,
 ) -> int:
     """Chunk, embed, and upsert everything new under corpus_root. Returns rows written.
-
-    embed is a keyword-only injection seam (defaults to the real batch embedder)
-    so tests can pass a fake instead of monkeypatching this module's globals.
     """
     pending = collect_pending_chunks(corpus_root)
     existing = _existing_hashes()

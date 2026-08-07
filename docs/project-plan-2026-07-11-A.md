@@ -34,6 +34,10 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   ```
 - The migrate script and its accompanying `db.migrate.apply_schema()` function are created in Step 1. Later steps only append to `schema.sql`.
 
+## Dependency-injection convention (testability)
+
+Production code exposes injection seams to separate concerns and reduce coupling. This should result in a minimization of test-time monkeypatching.
+
 ---
 
 ## ✅ Step 1: Project scaffolding + Postgres
@@ -335,7 +339,8 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Added a `<page title> - <section heading>` prefix (part of the hashed text) to each chunk prior to embedding so that chunk retrieval stays anchored to the official topic. How? Adding the prefix encourages a co-location of chunks which come from the same topic in the official study materials within the vector DB. The goal is to minimize the chance that responses stray from the official material when studying a given topic. I would not have enforced this kind of categorization on a more general LLM applicationm, but it's appropriate for this narrowly focused exam prep app.
   - Used NFC-normalized UTF-8 on `content_hash` so that accent-encoding drift will not duplicate rows.
   - Nested the `db_schema` fixture within `tests/integration/conftest.py` following the logic of the unit/integration test suite split. `apply_schema()` accepts an optional connection so tests can target a per-test schema that is not visible to concurrent tests.
-  
+  - Refactored embedding flow to use dependency injection (of embeddings and embedding model) to improve separation of concerns. This unifies the embedding flow with the injection seam planned for subsequent steps. I updated the conventions on this plan to maintain this pattern going forward.
+
 ---
 
 ## ✅ Step 5: Content retriever
@@ -384,7 +389,8 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   - Beyond the planned cases, tests also cover the `k` limit and full `ContentChunk` field round-trip (theme hydrated as a `Theme` instance for citation identity).
   - Added smoke test to ensure database container is up before running subsequent database tests (that will all fail after wasting 30 seconds of timeout). I also DRYed a few of the existing test files that had a lot of hard-coded repetition.
   - Renamed `ingest/` to `ingestion/` to align with best practices. Modules are named for the thing or subsystem they contain (nouns). Functions are named for actions (verbs).
-
+  - Refactored to use dependency injection to improve separation of concerns, which removed monkeypatching in tests.
+  
 ---
 
 ## ✅ Step 5B: Extract a validated `Chunk` domain model (refactor)
@@ -483,7 +489,7 @@ This addresses a silent failure mode that I discovered while implementing this s
       - Added a module-private `_SearchRow` pydantic model whose fields mirror the SELECT column list deserialized from the database. This improved the `_search_on_connection` method such that it opens the database cursor with `row_factory=psycopg.rows.class_row(_SearchRow)`, which means that `cursor.fetchall()` returns a typed list[_SearchRow] instead of raw tuples or a dict of untyped values. 
       - Now the read and write paths (relevant to chunks) are much more aligned and safe because they both move data through typed pydantic models with attribute access. Additionally, the `Theme` to slug conversion sits at the SQL boundary for both the read and write processes. 
       - The remaining inherent (and acceptable) asymmetry is directional: the read path needs a hydration step, whereas the write path's mirror-image step is just serializing `theme.slug` inline when building the SQL params.
-
+    - Refactored to use dependency injection to improve separation of concerns. This removed need for monkeypatching in tests.  
 ---
 
 ## ✅ Step 6: Users + auth (username + local secret)
@@ -668,15 +674,10 @@ This addresses a silent failure mode that I discovered while implementing this s
 
 **Goal:** Given a theme and a learner question, produce a concise English explanation (with French vocabulary) grounded in retrieved French corpus chunks.
 
-- **New** Refactor embedding flow to use dependency injection at the embedder seam (to avoid monkeypatching in tests):
-  - Example: On `retrieval.content.search`, add a keyword-only parameter `embed_query: EmbedQueryFn = embedder.embed_query` to `search` (default is the existing module verb, so callers are unaffected). Update `tests/integration/retrieval/test_content.py` to pass a fake `embed_query` through that parameter instead of `monkeypatch.setattr(content, "embed_query", ...)`. 
-  - This improves testability and unifies the embedding flow with the injection seam planned for subsequent steps: Inject fakes. Don't patch module globals.
-- **Check In:** Stop and confirm with the user that the implementation is satisfactory.
-
 - Add dependency: `langchain-anthropic`.
 - Create `src/civica/llm/client.py` - a thin chat-model factory mirroring `embeddings/embedder.py`: a module constant `GENERATION_MODEL = "claude-sonnet-5"` (named to parallel `embedder.py`'s `EMBEDDING_MODEL` - both name the *task*, embedding vs generation, not the provider) and `get_chat_model(model: str = GENERATION_MODEL) -> BaseChatModel` that lazily constructs `ChatAnthropic(model=model, max_tokens=...)` so importing never requires `ANTHROPIC_API_KEY`. The optional `model` override lets Step 9 request a stronger model for question generation without a second factory or a second constant; callers that omit it get the default. If you keep the lazy-cache pattern from `embedder.py`, key the cache by `model` (a small dict), since the override means more than one client can exist. This is the single place the generation provider and default model are chosen; Step 8 (`explain`) and Step 9 (assessment engine) both default their injected `chat_client` to it, so the provider choice is never duplicated. It is deliberately a thin wrapper, not a provider-abstraction service (see the NB below): `BaseChatModel` is the portability layer, so a future provider swap is a one-line constructor change here. No dedicated test (thin wrapper, exercised via the engines and the external tests), matching `embedder.py`.
 - **Unit tests:** `tests/unit/explanation/test_engine.py`
-  - Unit test (no DB, no network) with a fake retriever (returns fixed chunks) and a fake `ChatAnthropic` (records the prompt, returns a canned response), both injected into `explain` (see the dependency-injection note below) rather than monkeypatched onto module globals. Assert:
+  - Unit test (no DB, no network) with a fake retriever (returns fixed chunks) and a fake `ChatAnthropic` (records the prompt, returns a canned response), both injected into `explain` (see the dependency-injection note below). Assert:
     - The final prompt contains all retrieved passages verbatim.
     - The system message forbids drawing on outside knowledge (assert the exact substring is present).
     - The system message mandates English output while retaining French vocabulary (assert the exact substring is present). This is the second hard product contract alongside grounding: the exam is French, explanations are English.
@@ -684,7 +685,7 @@ This addresses a silent failure mode that I discovered while implementing this s
   - Empty-retrieval case: with a fake retriever that returns `[]`, `explain` returns an `Explanation` stating there is insufficient material and does **not** call the fake `ChatAnthropic` (assert the fake was never invoked). See the empty-retrieval short-circuit below.
 - Create `src/civica/explanation/engine.py` (noun-named package per the Step 5 naming convention; the public function stays the verb `explain`):
   - `explain(user_question: str, theme: Theme, *, retriever: SearchFn = search, chat_client: BaseChatModel | None = None) -> Explanation` - calls the injected `retriever` (a callable with the same shape as `retrieval.content.search`, which is the default), packs the retrieved passages into a Claude prompt with a fixed system message that mandates using only the provided passages and translating French → English, calls the injected `chat_client` (defaults to `llm.client.get_chat_model()`), returns a frozen `Explanation`.
-  - Dependency injection: `retriever` and `chat_client` are keyword-only parameters with production defaults, per the dependency-inversion rule. This gives the unit test a real seam (pass a fake retriever and fake `ChatAnthropic`) instead of monkeypatching module globals.
+  - Dependency injection: `retriever` and `chat_client` are keyword-only parameters with production defaults, per the dependency-inversion rule. This gives the unit test a real seam (pass a fake retriever and fake `ChatAnthropic`).
   - `Explanation` is a **frozen pydantic model** (matching `Chunk` / `ContentChunk` / `QuizAnswerRow`, not a bare dataclass) with `text: str` and `context_chunks: list[ContentChunk]`. The field is named `context_chunks`, not `citations`: it holds every passage retrieved and packed into the prompt, i.e. the model's grounding context, not a verified per-claim attribution of what Claude actually cited. (Step 9's analogous field is `Question.sources`; the different name is deliberate - those are the specific chunks a question was generated from.)
   - Model pinning and choice: the default model id lives in the `llm/client.py` `GENERATION_MODEL` constant (`claude-sonnet-5`), never an inline `"claude-..."` placeholder in the engine. Default to Sonnet, not Opus: explanation is a high-volume, tightly-scoped, retrieval-grounded task where Sonnet is the better cost/quality default; revisit at the check-in if quality disappoints. The factory must **not** set `temperature` (removed on current Claude models; passing it returns a 400), and should set an explicit `max_tokens` large enough that an explanation is never truncated (streaming is unnecessary at this size).
   - Empty-retrieval short-circuit: if the retriever returns no chunks (the `search` docstring notes a theme filter can return fewer than `k`, possibly zero), return an `Explanation` whose `text` states there is insufficient official material for the question, with `context_chunks=[]`, **without** calling the LLM. A grounded coach must not free-associate when it has no passages; this enforces the official-facts-only rule.

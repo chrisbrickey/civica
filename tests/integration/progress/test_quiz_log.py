@@ -58,16 +58,13 @@ _TEST_BCRYPT_ROUNDS = 4
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _fast_bcrypt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Lower the bcrypt cost factor for the single user registration."""
-    monkeypatch.setattr("civica.users.service._BCRYPT_ROUNDS", _TEST_BCRYPT_ROUNDS)
-
-
 @pytest.fixture()
 def user_id(db_schema: psycopg.Connection[psycopg.rows.TupleRow]) -> UserId:
-    """Register a real user and return its UserId for the FK-bound writes."""
-    return register(_USERNAME, _SECRET, conn=db_schema)
+    """Register a real user and return its UserId for the FK-bound writes.
+
+    Injects the lowered bcrypt cost factor to improve test velocity.
+    """
+    return register(_USERNAME, _SECRET, conn=db_schema, rounds=_TEST_BCRYPT_ROUNDS)
 
 
 @pytest.fixture()
