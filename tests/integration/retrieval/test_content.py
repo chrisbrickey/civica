@@ -2,7 +2,8 @@
 Integration tests for civica.retrieval.content.
 
 Exercises search() against a real (isolated, per-test) Postgres schema.
-Query embeddings are stubbed by monkeypatching (no network calls, not 'external').
+Query embeddings are stubbed via the embed_query injection seam (no network
+calls, not 'external'), not by monkeypatching module globals.
 Corpus embeddings are fixed, hand-picked fake vectors (not real OpenAI output)
 chosen so their cosine similarity to the stubbed query vector is hand-computable.
 """
@@ -62,28 +63,21 @@ def _orthogonal_embedding() -> list[float]:
     return _unit_vector(_ORTHOGONAL_AXIS)
 
 
+def _fake_embed_query(vector: list[float]) -> Callable[[str], list[float]]:
+    """Build a fake embed_query that returns a fixed vector regardless of input text.
+
+    Passed through search()'s embed_query injection seam so no test needs to
+    monkeypatch civica.retrieval.content or hit the real embeddings API.
+    """
+    return lambda text: vector
+
+
+_DEFAULT_QUERY_VECTOR = _unit_vector(_QUERY_AXIS)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def stub_query_embedding(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Callable[[list[float]], None]:
-    """Stub content.embed_query with the default query vector; return an override.
-
-    Patches the reference inside civica.retrieval.content (not the definition
-    in civica.embeddings.embedder) so search() never makes a real network
-    call to the embeddings API. The default stub is applied at setup; tests
-    needing a different query vector call the returned function.
-    """
-
-    def _stub(vector: list[float]) -> None:
-        monkeypatch.setattr(content, "embed_query", lambda text: vector)
-
-    _stub(_unit_vector(_QUERY_AXIS))
-    return _stub
 
 
 @pytest.fixture()
@@ -101,16 +95,25 @@ def seed(
 @pytest.fixture()
 def run_search(
     db_schema: psycopg.Connection[psycopg.rows.TupleRow],
-    stub_query_embedding: Callable[[list[float]], None],
 ) -> Callable[..., list[content.ContentChunk]]:
     """Run content.search with the default query text on the per-test schema.
 
-    Depends on stub_query_embedding so no test can hit the embeddings API by
-    forgetting to request the stub.
+    Injects a fake embed_query (defaulting to the stubbed query vector) so no
+    test can hit the embeddings API; pass query_vector to exercise a different one.
     """
 
-    def _run(theme: Theme | None = None, k: int = 5) -> list[content.ContentChunk]:
-        return content.search(query=_DEFAULT_QUERY_TEXT, theme=theme, k=k, conn=db_schema)
+    def _run(
+        theme: Theme | None = None,
+        k: int = 5,
+        query_vector: list[float] = _DEFAULT_QUERY_VECTOR,
+    ) -> list[content.ContentChunk]:
+        return content.search(
+            query=_DEFAULT_QUERY_TEXT,
+            theme=theme,
+            k=k,
+            conn=db_schema,
+            embed_query=_fake_embed_query(query_vector),
+        )
 
     return _run
 

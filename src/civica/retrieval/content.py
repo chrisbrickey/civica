@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict
 from civica.db.session import run_on_connection
 from civica.domain.chunk import Chunk
 from civica.domain.themes import Theme
-from civica.embeddings.embedder import EMBEDDING_DIMENSIONS, embed_query
+from civica.embeddings import embedder
+from civica.embeddings.embedder import EMBEDDING_DIMENSIONS, EmbedQueryFn
 
 # The HNSW index is built on embedding::halfvec(EMBEDDING_DIMENSIONS).
 # So the query side must cast through the same halfvec(N) to hit that index.
@@ -73,6 +74,7 @@ def _search_on_connection(
     query: str,
     theme: Theme | None,
     k: int,
+    embed_query: EmbedQueryFn,
     conn: psycopg.Connection[psycopg.rows.TupleRow],
 ) -> list[ContentChunk]:
     register_vector(conn)
@@ -97,6 +99,8 @@ def search(
     theme: Theme | None = None,
     k: int = 5,
     conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None,
+    *,
+    embed_query: EmbedQueryFn = embedder.embed_query,
 ) -> list[ContentChunk]:
     """Semantic search over the official corpus, ranked by descending similarity.
 
@@ -108,7 +112,10 @@ def search(
     to that theme only. This inserts some deterministic behavior, reducing the
     probability of responses diverging from official study material.
     NB: If a theme filter is applied, less than k chunks may be returned.
+
+    embed_query is a keyword-only injection seam (defaults to the real embedder)
+    so tests can pass a fake instead of monkeypatching this module's globals.
     """
     return run_on_connection(
-        lambda connection: _search_on_connection(query, theme, k, connection), conn
+        lambda connection: _search_on_connection(query, theme, k, embed_query, connection), conn
     )
