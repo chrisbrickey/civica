@@ -60,25 +60,21 @@ def _count_users_with_username(
 
 # bcrypt cost factor:
 # In production this value is close to library default of 12.
-# Each hash consumes roughly ~0.24s as of 2026 so we override in tests to avoid wasteful cycles.
+# Each hash consumes roughly ~0.24s as of 2026 so we lower it in tests to avoid wasteful cycles.
 _TEST_BCRYPT_ROUNDS = 4
-
-
-@pytest.fixture(autouse=True)
-def _fast_bcrypt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Lower the bcrypt cost factor for the auth tests."""
-
-    monkeypatch.setattr("civica.users.service._BCRYPT_ROUNDS", _TEST_BCRYPT_ROUNDS)
 
 
 @pytest.fixture()
 def do_register(
     db_schema: psycopg.Connection[psycopg.rows.TupleRow],
 ) -> Callable[[str, str], UserId]:
-    """Register a user against the per-test schema connection."""
+    """Register a user against the per-test schema connection.
+
+    Injects the lowered bcrypt cost factor to improve test velocity.
+    """
 
     def _register(username: str, secret: str) -> UserId:
-        return register(username, secret, conn=db_schema)
+        return register(username, secret, conn=db_schema, rounds=_TEST_BCRYPT_ROUNDS)
 
     return _register
 

@@ -1,8 +1,12 @@
 import os
+from collections.abc import Callable
 
 import psycopg
 import psycopg.rows
 import psycopg_pool
+
+# Shape of get_pool, exported so callers can type an injected fake the same way.
+PoolProvider = Callable[[], psycopg_pool.ConnectionPool]
 
 _pool: psycopg_pool.ConnectionPool | None = None
 

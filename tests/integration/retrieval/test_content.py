@@ -1,11 +1,12 @@
 """
 Integration tests for civica.retrieval.content.
 
-Exercises search() against a real (isolated, per-test) Postgres schema.
-Query embeddings are stubbed via the embed_query injection seam (no network
-calls, not 'external'), not by monkeypatching module globals.
+Query embeddings are injected (no network calls, not 'external').
+
 Corpus embeddings are fixed, hand-picked fake vectors (not real OpenAI output)
 chosen so their cosine similarity to the stubbed query vector is hand-computable.
+
+Exercises search() against a real (isolated, per-test) Postgres schema.
 """
 
 from collections.abc import Callable
@@ -66,8 +67,7 @@ def _orthogonal_embedding() -> list[float]:
 def _fake_embed_query(vector: list[float]) -> Callable[[str], list[float]]:
     """Build a fake embed_query that returns a fixed vector regardless of input text.
 
-    Passed through search()'s embed_query injection seam so no test needs to
-    monkeypatch civica.retrieval.content or hit the real embeddings API.
+    Passed through search()'s embed_query injection so no network calls.
     """
     return lambda text: vector
 

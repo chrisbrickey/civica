@@ -3,8 +3,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from civica.domain.themes import DROITS_ET_DEVOIRS
 from civica.scripts import ingest_corpus
 
@@ -42,12 +40,12 @@ def _write_corpus_page(corpus_root: Path) -> None:
     (corpus_root / f"{_PAGE_SLUG}.json").write_text(json.dumps(page), encoding="utf-8")
 
 
-def _hashes_under_model(
-    corpus_root: Path, model: str, monkeypatch: pytest.MonkeyPatch
-) -> list[str]:
-    """Collect content hashes with EMBEDDING_MODEL patched to `model`."""
-    monkeypatch.setattr(ingest_corpus, "EMBEDDING_MODEL", model)
-    return [chunk.content_hash for chunk in ingest_corpus.collect_pending_chunks(corpus_root)]
+def _hashes_under_model(corpus_root: Path, model: str) -> list[str]:
+    """Collect content hashes produced under embedding model `model`."""
+    return [
+        chunk.content_hash
+        for chunk in ingest_corpus.collect_pending_chunks(corpus_root, embedding_model=model)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -58,24 +56,20 @@ def _hashes_under_model(
 class TestModelIdentityInContentHash:
     """content_hash encodes the embedding model that produced the vector."""
 
-    def test_different_models_produce_different_hashes(
-        self, corpus_root: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_different_models_produce_different_hashes(self, corpus_root: Path) -> None:
         _write_corpus_page(corpus_root)
 
-        hashes_a = _hashes_under_model(corpus_root, _MODEL_A, monkeypatch)
-        hashes_b = _hashes_under_model(corpus_root, _MODEL_B, monkeypatch)
+        hashes_a = _hashes_under_model(corpus_root, _MODEL_A)
+        hashes_b = _hashes_under_model(corpus_root, _MODEL_B)
 
         assert hashes_a
         assert hashes_a != hashes_b
 
-    def test_same_model_is_deterministic(
-        self, corpus_root: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_same_model_is_deterministic(self, corpus_root: Path) -> None:
         _write_corpus_page(corpus_root)
 
-        first = _hashes_under_model(corpus_root, _MODEL_A, monkeypatch)
-        second = _hashes_under_model(corpus_root, _MODEL_A, monkeypatch)
+        first = _hashes_under_model(corpus_root, _MODEL_A)
+        second = _hashes_under_model(corpus_root, _MODEL_A)
 
         assert first
         assert first == second

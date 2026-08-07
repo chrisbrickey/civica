@@ -112,9 +112,6 @@ def search(
     to that theme only. This inserts some deterministic behavior, reducing the
     probability of responses diverging from official study material.
     NB: If a theme filter is applied, less than k chunks may be returned.
-
-    embed_query is a keyword-only injection seam (defaults to the real embedder)
-    so tests can pass a fake instead of monkeypatching this module's globals.
     """
     return run_on_connection(
         lambda connection: _search_on_connection(query, theme, k, embed_query, connection), conn

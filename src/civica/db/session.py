@@ -11,7 +11,7 @@ from typing import TypeVar
 import psycopg
 import psycopg.rows
 
-from civica.db.pool import get_pool
+from civica.db.pool import PoolProvider, get_pool
 
 T = TypeVar("T")
 
@@ -19,6 +19,8 @@ T = TypeVar("T")
 def run_on_connection(
     operation: Callable[[psycopg.Connection[psycopg.rows.TupleRow]], T],
     conn: psycopg.Connection[psycopg.rows.TupleRow] | None,
+    *,
+    pool_provider: PoolProvider = get_pool,
 ) -> T:
     """Run operation on a live connection, sourcing one from the pool if needed.
 
@@ -28,6 +30,6 @@ def run_on_connection(
     if conn is not None:
         return operation(conn)
 
-    pool = get_pool()
+    pool = pool_provider()
     with pool.connection() as pool_conn:
         return operation(pool_conn)

@@ -49,6 +49,7 @@ def _normalize_username(username: str) -> str:
 def _register_on_connection(
     username: str,
     secret: str,
+    rounds: int,
     conn: psycopg.Connection[psycopg.rows.TupleRow],
 ) -> UserId:
     normalized_username = _normalize_username(username)
@@ -59,7 +60,7 @@ def _register_on_connection(
         )
 
     secret_hash = bcrypt.hashpw(
-        secret.encode("utf-8"), bcrypt.gensalt(_BCRYPT_ROUNDS)
+        secret.encode("utf-8"), bcrypt.gensalt(rounds)
     ).decode("utf-8")
     generated_id = uuid4()
 
@@ -75,6 +76,8 @@ def register(
     username: str,
     secret: str,
     conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None,
+    *,
+    rounds: int = _BCRYPT_ROUNDS,
 ) -> UserId:
     """Register a new user with a username and local secret.
 
@@ -82,11 +85,15 @@ def register(
     before any hashing or database write, hashes the secret with bcrypt, and
     inserts the row with an application-generated UUID.
 
+    Pass in a value or rounds to override the production default
+    (e.g., to improve velocity in tests).
+
     Raises ValueError when the secret exceeds bcrypt's 72-byte limit.
     Raises UsernameTaken when the normalized username is already registered.
     """
     return run_on_connection(
-        lambda connection: _register_on_connection(username, secret, connection), conn
+        lambda connection: _register_on_connection(username, secret, rounds, connection),
+        conn,
     )
 
 
