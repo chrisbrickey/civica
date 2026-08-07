@@ -6,10 +6,18 @@ The client is instantiated lazily on first call so importing this module
 never requires OPENAI_API_KEY to be set.
 """
 
+from collections.abc import Callable
+
 from langchain_openai import OpenAIEmbeddings
 
 EMBEDDING_MODEL = "text-embedding-3-large"
 EMBEDDING_DIMENSIONS = 3072  # property of EMBEDDING_MODEL; must match schema.sql
+
+# Shape of embed_query, exported so callers can type an injected fake the same way.
+EmbedQueryFn = Callable[[str], list[float]]
+
+# Shape of embed (batch), exported so callers can type an injected fake the same way.
+EmbedBatchFn = Callable[[list[str]], list[list[float]]]
 
 _client: OpenAIEmbeddings | None = None
 

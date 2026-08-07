@@ -28,7 +28,8 @@ from civica.db.pool import get_pool
 from civica.domain.chunk import Chunk
 from civica.domain.themes import Theme
 from civica.ingestion.chunker import chunk_section
-from civica.embeddings.embedder import EMBEDDING_MODEL, embed
+from civica.embeddings import embedder
+from civica.embeddings.embedder import EMBEDDING_MODEL, EmbedBatchFn
 from civica.ingestion.repository import EmbeddedChunk, delete_chunks_not_in, upsert_chunks
 from civica.scripts.normalize_thematic_sheets import NormalizedPage
 
@@ -118,8 +119,16 @@ def _existing_hashes() -> set[str]:
     return {row[0] for row in rows}
 
 
-def ingest(corpus_root: Path) -> int:
-    """Chunk, embed, and upsert everything new under corpus_root. Returns rows written."""
+def ingest(
+    corpus_root: Path,
+    *,
+    embed: EmbedBatchFn = embedder.embed,
+) -> int:
+    """Chunk, embed, and upsert everything new under corpus_root. Returns rows written.
+
+    embed is a keyword-only injection seam (defaults to the real batch embedder)
+    so tests can pass a fake instead of monkeypatching this module's globals.
+    """
     pending = collect_pending_chunks(corpus_root)
     existing = _existing_hashes()
     new_chunks = [chunk for chunk in pending if chunk.content_hash not in existing]
