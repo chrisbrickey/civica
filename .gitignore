@@ -1,17 +1,24 @@
+# raw and normalized source data
+data/
+
 # python
 __pycache__/
 .venv/
 
-# raw and normalized source data
-data/
+# environment variables
+.env
 
-# IDE
+# ide
 .idea/
+
+# macOS
 .DS_Store
 
-# AI
-.claude/
-CLAUDE.md
+# development workflow
+BACKLOG.md
 
-# Environment
-.env
+# agentic platforms
+AGENTS.md
+.claude/
+.codex/
+.vibe/

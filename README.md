@@ -9,9 +9,10 @@ as opposed to optimization of chunk embedding and retrieval. See [Luminary RAG a
 ## MVP Features
 
 - **Memory-aware coaching:** remembers weak themes, recurring misconceptions, preferred explanation depth, and study cadence across sessions
-- **Guided study by theme:** the five official themes
+- **Autonomous coaching guided by theme:** uses an LLM planner to decides on the next action, ensuring coverage of the five official themes
 - **Quiz mode:** LLM-generated questions using the official French thematic content as source with explanations grounded in the official study material
 - **Mock exam mode:** mirrors the official format (40 Q, 45-min timer, 80% pass, per-theme weighting) and reports pass/fail plus per-theme scores
+- **Self-improvement reflection loop:** updates its own artifacts from measured learner outcomes to improve quality of explanations and questions posed 
 
 ### Examples
 
@@ -25,28 +26,37 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
 
 ## Architecture
 
-### Pipelines
+### Pipelines Under Development
 ```
-                                        ┌────────┐
-                                        │   UI   │
-                                        └───┬────┘                                  
-                                            │
-                                            ▼
-                             ┌──────────────────────────────┐
-                             │       LangGraph (one graph)  │
-   ┌────────────┐            │                              │
-   │  Corpus    │───────────►│  route ──► teach             │
-   │ (pgvector) │  content   │        ──► quiz              │
-   └────────────┘  retrieval │        ──► mock_exam         │
-                             │        ──► memory_writer     │
-   ┌────────────┐            │                              │
-   │  Memory    │◄──────────►│                              │
-   │ (PGStore + │    user    └──────────────┬───────────────┘
-   │  PGSaver)  │   history                 │        context
-   └────────────┘                           ▼
-                                      ┌───────────┐
-                                      │    LLM    │
-                                      └───────────┘
+                                      ┌───────┐
+                                      │  UI   │
+                                      └───┬───┘
+                  ┌───────────────────────┼─────────────────────────┐
+                  │ LangGraph         ┌───▼───┐                     │
+                  │                   │ route │                     │
+                  │                   └───┬───┘                     │
+                  │      teach / quiz     │       mock exam         │
+                  │      (autonomous)     │    (deterministic)      │
+                  │           ┌───────────┴───────────┐             │
+                  │           │                       │             │
+┌────────────┐    │    ┌──────▼──────┐        ┌───────▼───────┐     │
+│   corpus   │────►    │ planner LLM │        │   mock_exam   │     │
+│ (pgvector) │    │    └───┬─────▲───┘        └───────┬───────┘     │
+└────────────┘    │   call │     │ result             │             │
+   content        │    ┌───▼─────┴───┐                │             │
+  retrieval       │    │    tools*   │                │             │
+                  │    └──────┬──────┘                │             │
+                  │           └───────────┬───────────┘             │
+                  │              ┌────────▼────────┐                │
+                  │              │  memory_writer  │                │
+                  │              └────────┬────────┘                │
+                  └───────────────────────┼─────────────────────────┘                
+                                          │ 
+                              ┌───────────▼────────────┐          ┌────────────────────────────────────┐
+                              │   memory and progress  ◄──────────►         self-improvement           │
+                              │   (PGStore + PGSaver)  │          │ (explanation and question quality) │
+                              └────────────────────────┘          └────────────────────────────────────┘
+
 ```
 
 ### Technology
@@ -58,7 +68,7 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
 | docker (compose v2)  | container runtime for local databases            |
 | pgvector             | vector similarity search (Postgres extension)    |
 | psycopg[binary,pool] | postgres driver + connection pool                |
-| langchain-openai     | corpus embedding                                 |
+| langchain            | integration with various LLM providers           |
 | langgraph            | graph orchestration (short and long-term memory) |
 | pydantic             | data validation                                  |
 | bcrypt               | yser auth                                        |

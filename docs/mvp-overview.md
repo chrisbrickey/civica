@@ -51,9 +51,11 @@ Same architecture (40 Q, 45 min, 80% pass, five themes with identical weighting)
 ## MVP Features
 
 - **Memory-aware coaching:** remembers weak themes, recurring misconceptions, preferred explanation depth, and study cadence across sessions
-- **Guided study by theme:** the five official themes
+- **Autonomous planning:** an LLM planner decides its own next action each turn over a bounded, guarded tool set, and keeps a durable study plan across sessions. Its choice is surfaced to the learner as a short "why this next" line.
+- **Guided study by theme:** the five official themes, with a per-theme coverage readout of how much material the learner has actually seen
 - **Quiz mode:** LLM-generated questions using the official French thematic content as source with explanations grounded in the official material*
 - **Mock exam mode:** mirrors the official format (40 Q, 45-min timer, 80% pass, per-theme weighting) and reports pass/fail plus per-theme scores*
+- **Improves over time:** per-learner item scheduling rests questions the learner has mastered and resurfaces the ones they missed, so the bank stops wasting their time and drills their gaps
 
 _*Use of official knowledge question list is deferred to post-MVP due to lack of official answer key._
 
@@ -63,30 +65,39 @@ _*Use of official knowledge question list is deferred to post-MVP due to lack of
 Functional modules will contain domain logic that is invoked from graph nodes. This preserves the LangGraph layer as a control plane - not a bucket for business logic.
 - **Official content ingester** pulls, normalizes, chunks, and embeds thematic sheets and the official question list from `data/corpus/`.
 - **Progress store** persists mastery, quiz history, and next-review timestamps.
-- **Memory service** wraps LangGraph store namespaces: `("learner_profile", user_id)`, `("topic_mastery", user_id)`, `("mistake_episode", user_id)`, `("session_summary", user_id)`.
+- **Memory service** wraps LangGraph store namespaces: `("learner_profile", user_id)`, `("topic_mastery", user_id)`, `("mistake_episode", user_id)`, `("session_summary", user_id)`, `("study_plan", user_id)`. A sixth, `("teaching_strategy_stat", user_id)`, arrives post-MVP with the strategy policy.
 - **Assessment engine** assembles quizzes and mock exams to the official proportions and theme weighting.
 - **Explanation engine** generates concise, corpus-grounded explanations for teach and evaluate nodes. One mode in MVP. Tone controls are out of scope for MVP.
 
 
 One graph, three terminal modes (teach, quiz, mock exam). Subgraphs are out of scope for MVP.
 
+Teach and Quiz are driven by the autonomous planner: an LLM tool-calling loop that decides its own next action over a bounded tool set. 
+Mock Exam will be a deterministic path because the official format is fixed and we don't want to deviate from this.
+
 ```
 onboarding
     │
     ▼
-route  ──► retrieve_content ──► teach ──► evaluate ──► update_mastery ──► save_session_summary
-    │                     ▲                                                      │
-    │                     └──── quiz ◄──── retrieve_question ────┐               │
-    │                                                            │               │
-    └──► mock_exam ─────────────────────────────────────────────►┘               │
-                                                                                 │
-                                            memory_writer ◄───────────────────────
+mode ──► planner ⇄ tools ──────────────────────────► memory_writer
+    │      (teach, quiz)   │                              ▲
+    │                      │  suggest_review_theme        │
+    │                      │  retrieve_corpus / teach     │
+    │                      │  generate_quiz / score       │
+    │                      │  read_learner_state          │
+    │                      │  read_study_plan             │
+    │                      │  get_coverage_gaps           │
+    │                      │  record_outcome  (only write)│
+    │                                                     │
+    └──► mock_exam ──► update_mastery ──► save_session_summary
 ```
 
 Notes:
-- `retrieve_learner_memory` is NOT a node. It is a helper the router and teach/quiz nodes call.
-- `memory_writer` is a dedicated node that enforces the write allowlist before any durable long-term write.
-- `route` is deterministic, not LLM-only. See adaptive routing rule section.
+- `retrieve_learner_memory` is NOT a node. It is a helper the planner's tools call.
+- `memory_writer` is a dedicated node that enforces the write allowlist before any durable long-term write. It runs on every path.
+- The planner replaces the earlier deterministic `route` node. The mastery-weighted priority heuristic survives as `suggest_review_theme`, one tool the planner may call for a strong default, so the deterministic signal stays testable underneath the autonomy.
+- **Two allowlists.** `MEMORY_WRITE_ALLOWLIST` governs in-process writers. A narrower, hand-enumerated `PLANNER_WRITE_ALLOWLIST` governs what the LLM may write through `record_outcome`: episodic and narrative records only. Numeric state (`topic_mastery`) is always derived deterministically from the quiz log, never written by the model.
+- The planner loop is bounded by `MAX_PLANNER_STEPS`. On halt it falls back to a plain lesson, never an error.
 
 
 ## Data Stores
@@ -184,23 +195,26 @@ Split retrieval by purpose:
 | Layer                           | Where it lives                              | Contents                                                       |
 |---------------------------------|---------------------------------------------|----------------------------------------------------------------|
 | Working                         | Thread state via `PostgresSaver`            | Current messages, active lesson plan, tool outputs, scratchpad |
-| Long-term (semantic + episodic) | `PostgresStore`, namespaced per `user_id`   | four record types (detailed below)                             |
+| Long-term (semantic + episodic) | `PostgresStore`, namespaced per `user_id`   | five record types (detailed below)                             |
 | Raw quiz log                    | Own Postgres table (not in LangGraph state) | Append-only history of every answered question                 |
 
-Four record types for long-term records:
+Five record types for long-term records:
 - **`learner_profile`:** target permit (naturalization), study cadence, preferred explanation depth, preferred correction tone; stable and rarely changes
-- **`topic_mastery`:** one record per theme (5 total): score estimate, confidence, last-updated timestamp
+- **`topic_mastery`:** one record per theme (5 total): score estimate, confidence, last-updated timestamp. Derived from the quiz log, never written by the LLM.
 - **`mistake_episode`:** clustered misconceptions (not raw wrong answers) - each with evidence pointers back to the raw quiz log
 - **`session_summary`:** compact recap of what improved and what to revisit next
+- **`study_plan`:** the agent's own durable agenda (focus themes, next action, rationale), read at session start and revised by the planner. This is what makes the autonomy persist across sessions instead of being re-derived from mastery numbers every turn.
 
-### Adaptive routing rule
-The router picks the highest-priority theme not covered in the last N sessions. 
+### Theme prioritization rule
+The `suggest_review_theme` tool returns the highest-priority theme.
 Ties are broken by presence of active `mistake_episode` records for that theme.
-This MVP rule is simple, testable, and directly links memory to behavior.
+This rule is simple, testable, and directly links memory to behavior. It is a deterministic default the planner can consult, not the controller.
 
 ```
 priority(theme) = weight(theme) × (1 − mastery(theme))
 ```
+
+Coverage complements it: mastery says *how well* the learner knows a theme, coverage says *how much of it they have seen*. Without coverage, a planner optimizing on mastery alone can loop on familiar passages forever.
 
 ### Memory Policies
 
@@ -211,8 +225,8 @@ Memory policy = what earns a memory, how confidence is tracked, and when old mem
 | Write policy  | Save explicit preferences only                                               | Save inferred preferences with confidence + evidence                   |
 | Retrieval     | Keyword + semantic search                                                    | Hybrid retrieval with recency, confidence, and scope ranking           |
 | Consolidation | Rolling summary per thread; misconception clustering after every N questions | Separate semantic facts, episodes, and summaries as distinct pipelines |
-| Safety        | Manual allowlist of memory types, enforced by `memory_writer` node           | Memory-reviewer LLM node before durable writes                         |
-| Debugging     | Log retrieved memories per turn                                              | Full "why this memory was used" trace per response                     |
+| Safety        | Two manual allowlists (in-process vs. planner-writable), enforced by `memory_writer` | Memory-reviewer LLM node before durable writes                  |
+| Debugging     | `planner_trace` table: every tool call, its args, and the halt reason, per turn | Full "why this memory was used" trace per response                   |
 
 **Concrete rules:**
 - Write `learner_profile` memory only when user intent is explicit or highly stable.
@@ -243,5 +257,7 @@ I chose python `3.12` for multiple reasons.
 - Payment, subscriptions, billing
 - Memory decay / TTL
 - A separate memory-reviewer LLM node before writes
+- Cross-learner difficulty calibration (empirical p-correct per item). Meaningless with one learner: it would conflate item difficulty with that learner's mastery and retire exactly the questions they most need to drill. Deferred until there is a real multi-learner population, which also requires sanctioning a shared memory namespace.
+- Outcome-driven teaching-strategy policy
 - Deployed to cloud; Database: Heroku Postgres in production (accessed via `DATABASE_URL`)
 
