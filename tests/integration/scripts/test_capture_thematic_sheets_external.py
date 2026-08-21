@@ -9,14 +9,14 @@ Does NOT write anything to disk and does NOT perform a full crawl.
 Run with: uv run pytest -m external
 """
 
+import os
 import pytest
-
 import httpx
 
 from civica.scripts.capture_thematic_sheets import (
     ALLOWED_PATH_PREFIX,
-    DEFAULT_USER_AGENT,
     INDEX_URL,
+    resolve_user_agent,
 )
 
 
@@ -33,7 +33,7 @@ def test_ministry_index_is_reachable_and_contains_in_scope_links() -> None:
 
     response = httpx.get(
         INDEX_URL,
-        headers={"User-Agent": DEFAULT_USER_AGENT},
+        headers={"User-Agent": resolve_user_agent(os.environ)},
         follow_redirects=True,
         timeout=15.0,
     )

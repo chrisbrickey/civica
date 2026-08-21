@@ -11,20 +11,24 @@ from pathlib import Path
 import httpx
 import pytest
 
-from civica.scripts.capture_thematic_sheets import capture
+from civica.scripts.capture_thematic_sheets import capture, resolve_user_agent
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
+# Held as a literal rather than read from the module, so that a rename of the production
+# constant's value will result in test failure instead of remaining silent.
+_USER_AGENT_ENV_VAR = "CIVICA_USER_AGENT"
+_SAMPLE_OVERRIDE_USER_AGENT = "sample-fork/0.1 (+https://example.com/sample-fork)"
+
+_BASE_URL = "https://formation-civique.interieur.gouv.fr"
 _SITEMAP_PATH = "/sitemap.xml"
 _INDEX_PATH = "/fiches-par-thematiques/"
 _ALPHA_PATH = "/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-sample-alpha/"
 _BETA_PATH = "/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-sample-beta/"
 _ORPHAN_PATH = "/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-sample-orphan/"
 _UNLISTED_EXTRA_PATH = "/fiches-par-thematiques/theme-sample/subtheme-sample/fiche-unlisted-extra/"
-
-_BASE_URL = "https://formation-civique.interieur.gouv.fr"
 
 # Mirrored on-disk relative paths (strip /fiches-par-thematiques/ prefix)
 _ALPHA_REL_PATH = Path("theme-sample/subtheme-sample/fiche-sample-alpha")
@@ -502,3 +506,40 @@ class TestFetchFailureHandling:
         # Beta must not be written
         beta_file = _written_file(tmp_path, _BETA_REL_PATH)
         assert not beta_file.exists(), "Beta file should NOT be written after a 404"
+
+
+class TestUserAgentResolution:
+    """resolve_user_agent() prefers the CIVICA_USER_AGENT env variable override but falls back to the default."""
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            pytest.param({}, id="unset"),
+            pytest.param({_USER_AGENT_ENV_VAR: ""}, id="blank"),
+            pytest.param({_USER_AGENT_ENV_VAR: "   \t\n"}, id="whitespace-only"),
+        ],
+    )
+    def test_falls_back_to_default_when_override_is_unusable(self, env: dict[str, str]) -> None:
+        """Scenario: The override is absent, empty, or whitespace-only. Each yields the built-in default."""
+        from civica.scripts import capture_thematic_sheets
+
+        result = resolve_user_agent(env)
+
+        assert result == capture_thematic_sheets.DEFAULT_USER_AGENT, (
+            f"Expected fallback to the default User-Agent; got {result!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "raw_value",
+        [
+            pytest.param(_SAMPLE_OVERRIDE_USER_AGENT, id="exact"),
+            pytest.param(f"  {_SAMPLE_OVERRIDE_USER_AGENT}  ", id="padded"),
+        ],
+    )
+    def test_override_replaces_the_default_and_is_trimmed(self, raw_value: str) -> None:
+        """Scenario: A fork sets CIVICA_USER_AGENT. Its value is returned in place of the default."""
+        result = resolve_user_agent({_USER_AGENT_ENV_VAR: raw_value})
+
+        assert result == _SAMPLE_OVERRIDE_USER_AGENT, (
+            f"Expected the override User-Agent, trimmed; got {result!r}"
+        )
