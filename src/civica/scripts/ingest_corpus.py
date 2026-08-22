@@ -22,9 +22,11 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+import psycopg
+import psycopg.rows
 from dotenv import load_dotenv
 
-from civica.db.pool import get_pool
+from civica.db.session import run_on_connection
 from civica.domain.chunk import Chunk
 from civica.domain.themes import Theme
 from civica.ingestion.chunker import chunk_section
@@ -114,22 +116,28 @@ def collect_pending_chunks(
     return list(by_hash.values())
 
 
-def _existing_hashes() -> set[str]:
+def _existing_hashes_on_connection(conn: psycopg.Connection[psycopg.rows.TupleRow]) -> set[str]:
+    # scalar_row because pooled connections default to dict_row which cannot be accessed by index number
+    with conn.cursor(row_factory=psycopg.rows.scalar_row) as cursor:
+        hashes: list[str] = cursor.execute("SELECT content_hash FROM content_chunks").fetchall()
+    return set(hashes)
+
+
+def _existing_hashes(conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None) -> set[str]:
     """Return the content hashes already ingested."""
-    with get_pool().connection() as conn:
-        rows = conn.execute("SELECT content_hash FROM content_chunks").fetchall()
-    return {row[0] for row in rows}
+    return run_on_connection(_existing_hashes_on_connection, conn)
 
 
 def ingest(
     corpus_root: Path,
     *,
     embed: EmbedBatchFn = embedder.embed,
+    conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None,
 ) -> int:
     """Chunk, embed, and upsert everything new under corpus_root. Returns rows written.
     """
     pending = collect_pending_chunks(corpus_root)
-    existing = _existing_hashes()
+    existing = _existing_hashes(conn)
     new_chunks = [chunk for chunk in pending if chunk.content_hash not in existing]
     logger.info(
         "%d chunk(s) already ingested; %d new chunk(s) to embed.",
@@ -155,13 +163,13 @@ def ingest(
             )
             for chunk, embedding in zip(batch, embeddings, strict=True)
         ]
-        upsert_chunks(rows)
+        upsert_chunks(rows, conn)
         written += len(rows)
         logger.info("Upserted %d/%d chunk(s).", written, len(new_chunks))
 
     if pending:
         keep_hashes = {chunk.content_hash for chunk in pending}
-        deleted = delete_chunks_not_in(keep_hashes)
+        deleted = delete_chunks_not_in(keep_hashes, conn)
         logger.info("Pruned %d stale row(s) no longer present in the corpus.", deleted)
     else:
         logger.warning("Corpus yielded zero chunks; skipping prune to avoid emptying the table.")
