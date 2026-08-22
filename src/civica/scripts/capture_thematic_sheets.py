@@ -13,14 +13,16 @@ Entrypoint: main() runnable via:
 """
 
 import logging
+import os
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +33,25 @@ DEFAULT_OUT_DIR = Path("data/raw/thematic_sheets")
 _INDEX_HOST = urlparse(INDEX_URL).netloc
 _SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
 
-# Permitted by target security as of 2026-07-19. Communicates identity and intention of the requests.
+# Default identity. Permitted by target security as of 2026-07-19.
+# This string communicates identity and intention of the requests to the official Ministry site.
+# That permission covers this project, not forks. Set CIVICA_USER_AGENT in .env so the traffic is attributed correctly.
 DEFAULT_USER_AGENT = (
     "civica/0.1 (+https://github.com/chrisbrickey/civica; "
     "amateur french naturalization civics exam prep)"
 )
+
+# References the value set for CIVICA_USER_AGENT on .env
+USER_AGENT_ENV_VAR = "CIVICA_USER_AGENT"
+
+def resolve_user_agent(env: Mapping[str, str]) -> str:
+    """Return the CIVICA_USER_AGENT override if set. Otherwise, return default string.
+
+    Public because main() and the external test both call it to build their headers.
+    This is an explicit choice in favor of simplification. It avoids injecting the user-agent into main().
+    """
+    override = env.get(USER_AGENT_ENV_VAR, "").strip()
+    return override or DEFAULT_USER_AGENT
 
 
 def _parse_sitemap_urls(xml_bytes: bytes) -> list[str]:
@@ -252,7 +268,13 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
-    headers = {"User-Agent": DEFAULT_USER_AGENT}
+    load_dotenv()
+
+    # Set and log user-agent (describes source of traffic)
+    user_agent = resolve_user_agent(os.environ)
+    logger.info("Using User-Agent: %s", user_agent)
+    headers = {"User-Agent": user_agent}
+
     with httpx.Client(headers=headers, timeout=30.0, follow_redirects=True) as client:
         capture(client=client, out_dir=DEFAULT_OUT_DIR, sleep_fn=time.sleep)
 

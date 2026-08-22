@@ -101,6 +101,7 @@ Reads `pyproject.toml` and `uv.lock`, creates `.venv/`, and installs runtime + d
 Copy `.env.example` to `.env` and insert your API keys. 
 - `ANTHROPIC_API_KEY` (required at runtime): Go to console.anthropic.com to obtain a new key.
 - `OPENAI_API_KEY` (required for one-time embedding): Go to platform.openai.com to obtain a new key.
+- `CIVICA_USER_AGENT` (optional): Identifies your traffic to the ministry site during ingestion. Please set this to a string that identifies your fork (especially if you make adjustments to the ingestion pipeline) so that requests you initiate are attributed correctly.
 
 _DATABASE_URL and TEST_DATABASE_URL variables are already present and correct for the default docker setup._
 
