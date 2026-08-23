@@ -9,12 +9,12 @@ Run explicitly with `uv run pytest -m external`.
 
 import pytest
 
-from civica.embeddings.embedder import EMBEDDING_DIMENSIONS, embed
+from civica.embeddings.embedder import DEFAULT_EMBEDDER, EMBEDDING_DIMENSIONS
 
 
 @pytest.mark.external
 def test_embed_returns_one_vector_of_the_expected_dimension() -> None:
-    result = embed(["texte d'exemple generique"])
+    result = DEFAULT_EMBEDDER.embed(["texte d'exemple generique"])
 
     assert len(result) == 1
     vector = result[0]

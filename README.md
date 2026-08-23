@@ -154,8 +154,8 @@ _DATABASE_URL and TEST_DATABASE_URL variables are already present and correct fo
   uv run python -m civica.scripts.ingest_corpus               # chunk + embed -> content_chunks table
 ```
 - Splits each section into chunks of roughly 800 characters each (100 character overlap), prefixed with the page title and section heading so short chunks keep their retrieval context.
-- Embeds chunks with OpenAI `text-embedding-3-large` (3072 dimensions) and upserts them into the `content_chunks` table, keyed by a sha256 hash of the chunk text.
-- Idempotent and incremental: Chunks already present in the table are skipped so re-running embeds only new or changed content. It also prunes rows whose source disappeared compared to previous ingestion.
+- Idempotent and incremental: Chunks already present in the table are skipped so re-running embeds only new or changed content. It also prunes rows whose source disappeared compared to the previous ingestion.
+- Embeds chunks with OpenAI `text-embedding-3-large` (3072 dimensions) and upserts them into the `content_chunks` table, keyed by a sha256 hash of the embedding model identity plus the chunk text. Therefore, switching embedding models triggers re-embedding of the whole corpus.
 - Requires `OPENAI_API_KEY` in `.env`. As of 2026, it costs less than 1 USD to perform a full embedding run of the entire corpus from scratch.
 
 

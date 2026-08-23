@@ -30,8 +30,7 @@ from civica.db.session import run_on_connection
 from civica.domain.chunk import Chunk
 from civica.domain.themes import Theme
 from civica.ingestion.chunker import chunk_section
-from civica.embeddings import embedder
-from civica.embeddings.embedder import EMBEDDING_MODEL, EmbedBatchFn
+from civica.embeddings.embedder import DEFAULT_EMBEDDER, Embedder
 from civica.ingestion.repository import EmbeddedChunk, delete_chunks_not_in, upsert_chunks
 from civica.scripts.normalize_thematic_sheets import NormalizedPage
 
@@ -81,7 +80,7 @@ def _content_hash(text: str, embedding_model: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _pending_chunks_for_page(page: NormalizedPage, embedding_model: str) -> list[PendingChunk]:
+def _pending_chunks_for_page(page: NormalizedPage, embedder: Embedder) -> list[PendingChunk]:
     """Chunk every section of one normalized page. Raises ValueError on unknown theme."""
     theme = Theme.from_slug(page["theme"])
     pending: list[PendingChunk] = []
@@ -94,23 +93,21 @@ def _pending_chunks_for_page(page: NormalizedPage, embedding_model: str) -> list
                     page_slug=page["slug"],
                     section_id=section["id"],
                     chunk_index=index,
-                    content_hash=_content_hash(text, embedding_model),
+                    content_hash=_content_hash(text, embedder.model),
                     text=text,
                 )
             )
     return pending
 
 
-def collect_pending_chunks(
-    corpus_root: Path, *, embedding_model: str = EMBEDDING_MODEL
-) -> list[PendingChunk]:
+def collect_pending_chunks(corpus_root: Path, *, embedder: Embedder) -> list[PendingChunk]:
     """Read every corpus JSON and return its chunks, deduplicated by content_hash."""
     by_hash: dict[str, PendingChunk] = {}
     page_count = 0
     for json_path in sorted(corpus_root.rglob("*.json")):
         page: NormalizedPage = json.loads(json_path.read_text(encoding="utf-8"))
         page_count += 1
-        for chunk in _pending_chunks_for_page(page, embedding_model):
+        for chunk in _pending_chunks_for_page(page, embedder):
             by_hash.setdefault(chunk.content_hash, chunk)
     logger.info("Collected %d chunk(s) from %d page(s).", len(by_hash), page_count)
     return list(by_hash.values())
@@ -131,12 +128,12 @@ def _existing_hashes(conn: psycopg.Connection[psycopg.rows.TupleRow] | None = No
 def ingest(
     corpus_root: Path,
     *,
-    embed: EmbedBatchFn = embedder.embed,
+    embedder: Embedder = DEFAULT_EMBEDDER,
     conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None,
 ) -> int:
     """Chunk, embed, and upsert everything new under corpus_root. Returns rows written.
     """
-    pending = collect_pending_chunks(corpus_root)
+    pending = collect_pending_chunks(corpus_root, embedder=embedder)
     existing = _existing_hashes(conn)
     new_chunks = [chunk for chunk in pending if chunk.content_hash not in existing]
     logger.info(
@@ -148,7 +145,7 @@ def ingest(
     written = 0
     for start in range(0, len(new_chunks), EMBED_BATCH_SIZE):
         batch = new_chunks[start : start + EMBED_BATCH_SIZE]
-        embeddings = embed([chunk.text for chunk in batch])
+        embeddings = embedder.embed([chunk.text for chunk in batch])
         rows = [
             EmbeddedChunk(
                 chunk=Chunk(
