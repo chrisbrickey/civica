@@ -16,7 +16,7 @@ import psycopg.rows
 import pytest
 
 from civica.domain.themes import DROITS_ET_DEVOIRS, HISTOIRE_GEOGRAPHIE_ET_CULTURE, Theme
-from civica.embeddings.embedder import EMBEDDING_DIMENSIONS
+from civica.embeddings.embedder import EMBEDDING_DIMENSIONS, Embedder
 from civica.ingestion.repository import EmbeddedChunk, upsert_chunks
 from civica.retrieval import content
 
@@ -35,6 +35,8 @@ _SIMILARITY_TOLERANCE = 1e-2  # HNSW index compares half-precision halfvec casts
 # match the query exactly, embeddings on any other axis are orthogonal to it.
 _QUERY_AXIS = 0
 _ORTHOGONAL_AXIS = 1
+
+_FAKE_MODEL = "test-embedding-model"
 
 
 # ---------------------------------------------------------------------------
@@ -64,12 +66,17 @@ def _orthogonal_embedding() -> list[float]:
     return _unit_vector(_ORTHOGONAL_AXIS)
 
 
-def _fake_embed_query(vector: list[float]) -> Callable[[str], list[float]]:
-    """Build a fake embed_query that returns a fixed vector regardless of input text.
+def _fake_embedder(vector: list[float]) -> Embedder:
+    """Build a fake Embedder whose embed_query returns a fixed vector for any text.
 
-    Passed through search()'s embed_query injection so no network calls.
+    Passed through search()'s embedder injection so no network calls. search()
+    never batch-embeds, so `embed` raises if it is ever called.
     """
-    return lambda text: vector
+
+    def _unreachable_embed(texts: list[str]) -> list[list[float]]:
+        raise AssertionError("search() must not batch-embed")
+
+    return Embedder(model=_FAKE_MODEL, embed=_unreachable_embed, embed_query=lambda text: vector)
 
 
 _DEFAULT_QUERY_VECTOR = _unit_vector(_QUERY_AXIS)
@@ -98,7 +105,7 @@ def run_search(
 ) -> Callable[..., list[content.ContentChunk]]:
     """Run content.search with the default query text on the per-test schema.
 
-    Injects a fake embed_query (defaulting to the stubbed query vector) so no
+    Injects a fake embedder (defaulting to the stubbed query vector) so no
     test can hit the embeddings API; pass query_vector to exercise a different one.
     """
 
@@ -112,7 +119,7 @@ def run_search(
             theme=theme,
             k=k,
             conn=db_schema,
-            embed_query=_fake_embed_query(query_vector),
+            embedder=_fake_embedder(query_vector),
         )
 
     return _run
