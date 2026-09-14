@@ -44,7 +44,7 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
 │ (pgvector) │    │    └───┬─────▲───┘        └───────┬───────┘     │
 └────────────┘    │   call │     │ result             │             │
    content        │    ┌───▼─────┴───┐                │             │
-  retrieval       │    │    tools*   │                │             │
+  retrieval       │    │    tools    │                │             │
                   │    └──────┬──────┘                │             │
                   │           └───────────┬───────────┘             │
                   │              ┌────────▼────────┐                │
@@ -71,7 +71,7 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
 | langchain            | integration with various LLM providers           |
 | langgraph            | graph orchestration (short and long-term memory) |
 | pydantic             | data validation                                  |
-| bcrypt               | yser auth                                        |
+| bcrypt               | user auth                                        |
 | pytest               | test suite                                       |
 
 
