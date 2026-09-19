@@ -252,7 +252,9 @@ civica/
   │     ├── db/                 # connection pool and schema migration
   │     ├── domain/             # pure business logic, no I/O
   │     ├── embeddings/         # embedding client shared by ingestion and retrieval
+  │     ├── explanation/        # corpus-grounded explanations for learner questions
   │     ├── ingestion/          # corpus chunking and persistence into pgvector
+  │     ├── llm/                # chat-model factory shared by generation engines
   │     ├── memory/             # orchestration of short and long-term memory
   │     ├── progress/           # tracks learner history for scoring and review
   │     ├── retrieval/          # semantic search over the embedded corpus

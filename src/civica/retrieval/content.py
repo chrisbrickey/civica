@@ -1,5 +1,7 @@
 """Semantic-search API for the official exam corpus."""
 
+from typing import Protocol
+
 import psycopg
 import psycopg.rows
 from pgvector.psycopg import register_vector
@@ -29,6 +31,7 @@ LIMIT %s
 
 _THEME_WHERE_CLAUSE = "WHERE theme = %s"
 
+
 class ContentChunk(BaseModel):  # type: ignore[explicit-any]
     """A single corpus Chunk returned by search(), with its similarity to the query."""
 
@@ -36,6 +39,16 @@ class ContentChunk(BaseModel):  # type: ignore[explicit-any]
 
     chunk: Chunk
     similarity: float
+
+
+class SearchFn(Protocol):
+    """Shape of `search` as callers consume it, so an injected retriever can be typed.
+
+    The real `search` carries extra defaulted params; a test fake takes only these two.
+    """
+
+    def __call__(self, query: str, theme: Theme | None) -> list[ContentChunk]: ...
+
 
 class _SearchRow(BaseModel):  # type: ignore[explicit-any]
     """One raw content_chunks row as returned by the search query.

@@ -672,7 +672,7 @@ This addresses a silent failure mode that I discovered while implementing this s
 
 ---
 
-## Step 8: Explanation engine (Claude + retrieval)
+## ✅ Step 8: Explanation engine (Claude + retrieval)
 
 **Goal:** Given a theme and a learner question, produce a concise English explanation (with French vocabulary) grounded in retrieved French corpus chunks.
 
@@ -695,20 +695,25 @@ This addresses a silent failure mode that I discovered while implementing this s
   - Prompt-injection boundary: interpolate `user_question` only into the user/human message, never into the system message. The fixed system message (grounding + English-output mandate) is the trusted channel; the learner question is untrusted input.
   - Query construction: pass the learner's question to the retriever raw, scoped by the hard `theme` filter. Do not prepend theme context to the query here: a natural user question exists, the filter already scopes the theme deterministically, and prefix tokens would dilute the question's own signal. (Contrast with Step 9, where no natural question exists and the query is manufactured from context.)
   - Prompt lives in a `PROMPTS` dict at module top so it can be tested without invoking the LLM.
+
+**Check In:** Stop and confirm with the user that the implementation is satisfactory. Eyeball the explanation quality on a real theme before moving on.
 - Notes
-  - I explored the creation of an extracted service to interface with claude so that I could integrate with more LLM providers easily in the future. However, LangChain is serving this purpose sufficiently at this time. Changing clients is generally a matter of using a different contructor, e.g., `ChatAnthropic(...)` vs `ChatOpenAI(...)`.  
-  - I explored aligning more fully the embedding and generation pathways in terms of how they reach out to LLM providers. I decided against a refactor at this time because they already match at the architecture level: thin lazy factory, a task-named model constant (`EMBEDDING_MODEL` / `GENERATION_MODEL`), the provider isolated in one file, and no API key needed at import. They differ only at the surface and that difference is deliberate because the two calls are shaped differently. Embedding is stateless data-in / data-out, so `embedder` exposes verbs that return plain vectors (`embed_query() -> list[float]`) and hides the client entirely. A caller does not import LangChain. Generation is an orchestrated exchange (build a system + user message, invoke, read a response object), so `llm/client.py` hands back the `BaseChatModel` for the engine to drive and to inject in tests. Forcing symmetry would mean leaking the LangChain client into embedding callers for no benefit.
-- **Check In:** Stop and confirm with the user that the implementation is satisfactory. Eyeball the explanation quality on a real theme before moving on.
+  - I explored the creation of an extracted service to interface with claude so that I could integrate with more LLM providers easily in the future. However, LangChain is serving this purpose sufficiently for now. Given the current structure, changing clients simply requires using a different contructor, e.g., `ChatAnthropic(...)` vs `ChatOpenAI(...)`.  
+  - I explored aligning more fully the embedding and generation pathways in terms of how they reach out to LLM providers. I decided against a refactor at this time because they already match at the architecture level. They differ only at the surface and that difference is deliberate because the two calls are shaped differently.
 
-- **Add integration test:** `tests/integration/explanation/test_engine_external.py`: one `@pytest.mark.external` test that calls Claude with a tiny stub context and asserts the response is non-empty **and** is not a refusal (a bare "non-empty" assertion would pass on a refusal or a French-only answer, so also assert the text contains no obvious refusal marker). External tests live under `integration/` with the `_external` suffix, matching `test_embedder_external.py`.
+- **Add integration test:** `../tests/integration/explanation/test_engine_external.py`: one `@pytest.mark.external` test that calls Claude with a tiny stub context and asserts the response is non-empty **and** is not a refusal (a bare "non-empty" assertion would pass on a refusal or a French-only answer, so also assert the text contains no obvious refusal marker). External tests live under `integration/` with the `_external` suffix, matching `test_embedder_external.py`.
+
 - **README:**
-  - Add to technology table: | `langchain-anthropic`  | Claude LLM client                            |
   - Add `src/civica/llm/` (chat-model factory) and `src/civica/explanation/` to the project structure diagram.
-- **Check In:** Stop and confirm with the user that the implementation is satisfactory.
 
-- **Update this plan:**
+**Check In:** Stop and confirm with the user that the implementation is satisfactory.
+
+**Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
-  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan below:
+    - Improved control and extensibility of the LLM chat clients: Solidified LLM clients into classes (e.g. `AnthropicChat`) depending on the platform. Bound the required input parameters to an LLM chat client to prevent mismatched parameters or accidental reliance on a default.
+    - Corrected the explanation engine from using `response.content` (which includes a lot of metadata) to using `response.text` (only the text blocks)
+    - Added `SearchFn` to `retrieval/content.py` as a Protocol so both the real `search` (extra defaulted params) and test fakes satisfy it.
 
 ---
 
@@ -725,7 +730,7 @@ This addresses a silent failure mode that I discovered while implementing this s
     - Persistence: with a fake `question_store`, assert each returned `Question` is written exactly once, keyed by its content hash, so Step 12 can schedule and reuse items. Assert re-running with the same generated payload does not double-write (idempotent upsert). Assert the persisted row carries the current `prompt_version`.
     - Answer logging: with a fake answer-logger injected, assert `MockExam.score(answers)` emits exactly one log call per answer (40 for a full exam), carrying the right `theme`/`question_id`/`is_correct`. This is the assertion that keeps the densest mastery signal from bypassing `quiz_answers`.
 - Create `src/civica/assessment/engine.py`:
-  - LLM client: `generate_quiz` and `generate_mock_exam` take keyword-only `retriever` (defaults to `content.search`) and `chat_client: BaseChatModel` (defaults to `llm.client.get_chat_model()`). This is the same injection seam and shared factory as the explanation engine. Do not construct a second `ChatAnthropic` or define a second model constant here. If question generation needs a stronger model than explanation, request it through the factory's override (`get_chat_model(model=...)`) rather than a new constant.
+  - LLM client: `generate_quiz` and `generate_mock_exam` take keyword-only `retriever` (defaults to `content.search`) and `chat_client: BaseChatModel` (defaults to `llm.client.get_chat_model()`). This is the same injection seam and shared factory as the explanation engine. Do not construct a second `ChatAnthropic` here. If question generation needs a different model or a larger token cap than explanation (a mock exam is far longer than one explanation, so the 2048 cap will not fit), add a `QUIZ_PROFILE = AnthropicChat(...)` constant in `llm/client.py` and pass it to `get_chat_model(...)`, rather than inlining a model id or a token count at the call site.
   - `generate_quiz(user_id: UserId, theme: Theme, n: int = 5) -> list[Question]` - retrieves corpus passages for the theme, prompts Claude to produce `n` MCQ questions in French (4 options, exactly one correct), returns typed `Question` records. Each `Question` carries `sources: list[(page_slug, section_id)]` taken from the retrieved `ContentChunk`s it was generated from, so a wrong answer can be logged as a `MistakeEpisode` (Step 7) with enough context for targeted re-teaching (Step 10).
   - Query construction: no natural user question exists here, so manufacture the retrieval query from context in the same style as the corpus chunk prefix (`<page title> - <section heading>`, see Step 4 notes): at minimum `theme.display_name_fr`, or `<theme display_name_fr> - <page title>` when targeting a specific page. Combined with the hard `theme` filter, this pulls the query embedding toward that topic's chunk cluster without any corpus change. Vary the targeted page/section across the `n` questions so a quiz batch draws on more than one passage cluster.
   - `generate_mock_exam(user_id: UserId) -> MockExam` - produces exactly 40 questions in the fixed theme distribution (11, 11, 8, 6, 4), also mirroring 28 knowledge + 12 scenario if separable via prompt. `MockExam` exposes `questions`, `time_limit_seconds = 45 * 60`, and a `score(answers) -> MockExamResult` method. Retrieval per theme follows the same query-construction rule as `generate_quiz`.
@@ -764,7 +769,7 @@ This addresses a silent failure mode that I discovered while implementing this s
 - Extend `src/civica/assessment/engine.py`:
   - After the generation call, each candidate MCQ passes through a critic step before it is returned. 
   - The critic is a second LLM call over the same retrieved chunks that checks three hard properties: (1) exactly one option is correct, (2) every option and the marked answer are grounded in the provided passages (no outside knowledge), (3) the distractors are plausible but wrong. Items that fail are regenerated up to a bounded number of attempts (`MAX_REFINE_ATTEMPTS`, small constant); if an item still fails, it is dropped rather than shown.
-  - Implement the critic as an injected callable (`critic: CritiqueFn = default_critic`) defaulting to a `get_chat_model()`-backed check, so the unit test drives it with a fake, same seam as `retriever`/`chat_client`. The critic prompt lives in the module `PROMPTS` dict alongside the generation prompt so it is testable without the LLM. Do not construct a second model constant; if the critic needs a stronger model, request it via `get_chat_model(model=...)`.
+  - Implement the critic as an injected callable (`critic: CritiqueFn = default_critic`) defaulting to a `get_chat_model()`-backed check, so the unit test drives it with a fake, same seam as `retriever`/`chat_client`. The critic prompt lives in the module `PROMPTS` dict alongside the generation prompt so it is testable without the LLM. Do not inline a model id here; if the critic needs a different model or a smaller token cap, add a `CRITIC_PROFILE` constant in `llm/client.py` and pass it to `get_chat_model(...)`.
   - Only critic-passed questions are persisted to `generated_questions` (tightens the Step 9 persistence rule from "generated" to "generated and validated"), so the self-improvement loop (Step 12) schedules validated items instead of first-pass items.
   - Persist rejections too: a small append-only `question_rejections` table (`prompt_version`, `theme`, `reason`, `attempt`, `rejected_at`) written whenever the critic fails an item. Rejected questions are still not shown to the learner; only the reason is kept. Rejection rate grouped by `prompt_version` then answers whether a prompt change improved generation, which converts the critic's doubled LLM cost into data. One table and one insert; do not build a UI for it (the Step 12/13 reflection dashboard reads it).
 
