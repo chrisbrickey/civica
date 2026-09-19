@@ -30,6 +30,8 @@ _THEME_B = HISTOIRE_GEOGRAPHIE_ET_CULTURE
 _DEFAULT_QUERY_TEXT = "sample-query"
 
 _SIMILARITY_TOLERANCE = 1e-2  # HNSW index compares half-precision halfvec casts
+_FLOOR_BELOW_PARTIAL_MATCH = 0.5  # above orthogonal (0.0), below partial match (~0.707)
+_FLOOR_ABOVE_PARTIAL_MATCH = 0.9  # above partial match (~0.707), below exact match (1.0)
 
 # The stubbed query embedding lives on axis 0; embeddings built on that axis
 # match the query exactly, embeddings on any other axis are orthogonal to it.
@@ -113,6 +115,7 @@ def run_search(
         theme: Theme | None = None,
         k: int = 5,
         query_vector: list[float] = _DEFAULT_QUERY_VECTOR,
+        min_similarity: float | None = None,
     ) -> list[content.ContentChunk]:
         return content.search(
             query=_DEFAULT_QUERY_TEXT,
@@ -120,6 +123,7 @@ def run_search(
             k=k,
             conn=db_schema,
             embedder=_fake_embedder(query_vector),
+            min_similarity=min_similarity,
         )
 
     return _run
@@ -290,3 +294,122 @@ class TestFieldRoundTrip:
         assert result.chunk.section_id == seeded.chunk.section_id
         assert result.chunk.chunk_index == seeded.chunk.chunk_index
         assert result.chunk.content_hash == seeded.chunk.content_hash
+
+
+class TestMinSimilarityFloor:
+    """min_similarity is an optional hard floor.
+
+    If set, chunks with similarity below the minimum are dropped.
+    If not set, those chunks should be returned."""
+
+    def test_omitting_min_similarity_returns_below_floor_chunks(
+        self,
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
+        run_search: Callable[..., list[content.ContentChunk]],
+    ) -> None:
+        orthogonal_match = make_chunk_row(
+            theme=_THEME_A, embedding=_orthogonal_embedding(), content_hash="hash-orthogonal"
+        )
+        seed([orthogonal_match])
+
+        results = run_search()
+
+        assert [result.chunk.content_hash for result in results] == [
+            orthogonal_match.chunk.content_hash
+        ]
+
+    def test_floor_excludes_orthogonal_and_keeps_matching(
+        self,
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
+        run_search: Callable[..., list[content.ContentChunk]],
+    ) -> None:
+        orthogonal_match = make_chunk_row(
+            theme=_THEME_A, embedding=_orthogonal_embedding(), content_hash="hash-orthogonal"
+        )
+        exact_match = make_chunk_row(
+            theme=_THEME_A, embedding=_matching_embedding(), content_hash="hash-exact"
+        )
+        seed([orthogonal_match, exact_match])
+
+        results = run_search(min_similarity=_FLOOR_BELOW_PARTIAL_MATCH)
+
+        assert [result.chunk.content_hash for result in results] == [
+            exact_match.chunk.content_hash
+        ]
+
+    def test_partial_match_kept_when_floor_is_below_it(
+        self,
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
+        run_search: Callable[..., list[content.ContentChunk]],
+    ) -> None:
+        partial_match = make_chunk_row(
+            theme=_THEME_A,
+            embedding=_combine_vectors(_matching_embedding(), _orthogonal_embedding()),
+            content_hash="hash-partial",
+        )
+        seed([partial_match])
+
+        results = run_search(min_similarity=_FLOOR_BELOW_PARTIAL_MATCH)
+
+        assert [result.chunk.content_hash for result in results] == [
+            partial_match.chunk.content_hash
+        ]
+
+    def test_partial_match_excluded_when_floor_is_above_it(
+        self,
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
+        run_search: Callable[..., list[content.ContentChunk]],
+    ) -> None:
+        partial_match = make_chunk_row(
+            theme=_THEME_A,
+            embedding=_combine_vectors(_matching_embedding(), _orthogonal_embedding()),
+            content_hash="hash-partial",
+        )
+        seed([partial_match])
+
+        results = run_search(min_similarity=_FLOOR_ABOVE_PARTIAL_MATCH)
+
+        assert results == []
+
+    def test_floor_and_theme_filter_compose(
+        self,
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
+        run_search: Callable[..., list[content.ContentChunk]],
+    ) -> None:
+        # High-similarity but wrong theme, and right theme but below the floor: both excluded.
+        high_similarity_wrong_theme = make_chunk_row(
+            theme=_THEME_A, embedding=_matching_embedding(), content_hash="hash-wrong-theme"
+        )
+        low_similarity_right_theme = make_chunk_row(
+            theme=_THEME_B, embedding=_orthogonal_embedding(), content_hash="hash-below-floor"
+        )
+        seed([high_similarity_wrong_theme, low_similarity_right_theme])
+
+        results = run_search(theme=_THEME_B, min_similarity=_FLOOR_BELOW_PARTIAL_MATCH)
+
+        assert results == []
+
+    def test_no_chunk_clearing_floor_returns_empty_list(
+        self,
+        make_chunk_row: Callable[..., EmbeddedChunk],
+        seed: Callable[[list[EmbeddedChunk]], None],
+        run_search: Callable[..., list[content.ContentChunk]],
+    ) -> None:
+        orthogonal_match = make_chunk_row(
+            theme=_THEME_A, embedding=_orthogonal_embedding(), content_hash="hash-orthogonal"
+        )
+        partial_match = make_chunk_row(
+            theme=_THEME_A,
+            embedding=_combine_vectors(_matching_embedding(), _orthogonal_embedding()),
+            content_hash="hash-partial",
+        )
+        seed([orthogonal_match, partial_match])
+
+        results = run_search(min_similarity=_FLOOR_ABOVE_PARTIAL_MATCH)
+
+        assert results == []
