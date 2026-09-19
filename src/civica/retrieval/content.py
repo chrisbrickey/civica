@@ -29,7 +29,10 @@ ORDER BY distance ASC
 LIMIT %s
 """
 
-_THEME_WHERE_CLAUSE = "WHERE theme = %s"
+_THEME_CONDITION = "theme = %s"
+# distance is repeated (not the `distance` alias) because Postgres cannot reference a
+# SELECT alias in WHERE, and only this exact expression matches the HNSW index.
+_FLOOR_CONDITION = "embedding::halfvec({dim}) <=> %s::halfvec({dim}) <= %s"
 
 
 class ContentChunk(BaseModel):  # type: ignore[explicit-any]
@@ -88,16 +91,24 @@ def _search_on_connection(
     k: int,
     embedder: Embedder,
     conn: psycopg.Connection[psycopg.rows.TupleRow],
+    min_similarity: float | None,
 ) -> list[ContentChunk]:
     register_vector(conn)
     query_vector = embedder.embed_query(query)
 
-    where_clause = _THEME_WHERE_CLAUSE if theme is not None else ""
-    sql = _SEARCH_SQL_TEMPLATE.format(dim=EMBEDDING_DIMENSIONS, where_clause=where_clause)
-
+    conditions: list[str] = []
     params: list[object] = [query_vector]
+
     if theme is not None:
+        conditions.append(_THEME_CONDITION)
         params.append(theme.slug)
+    if min_similarity is not None:
+        conditions.append(_FLOOR_CONDITION.format(dim=EMBEDDING_DIMENSIONS))
+        params.append(query_vector)
+        params.append(1 - min_similarity)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    sql = _SEARCH_SQL_TEMPLATE.format(dim=EMBEDDING_DIMENSIONS, where_clause=where_clause)
     params.append(k)
 
     with conn.cursor(row_factory=psycopg.rows.class_row(_SearchRow)) as cursor:
@@ -113,6 +124,7 @@ def search(
     conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None,
     *,
     embedder: Embedder = DEFAULT_EMBEDDER,
+    min_similarity: float | None = None,
 ) -> list[ContentChunk]:
     """Semantic search over the official corpus, ranked by descending similarity.
 
@@ -120,11 +132,17 @@ def search(
     Ranks content_chunks rows by cosine similarity (1 - cosine distance) via the
     pgvector halfvec HNSW index.
 
-    When theme is provided, results are hard-filtered (not a ranking preference)
+    If theme is provided, results are hard-filtered (not a ranking preference)
     to that theme only. This inserts some deterministic behavior, reducing the
     probability of responses diverging from official study material.
-    NB: If a theme filter is applied, less than k chunks may be returned.
+
+    If min_similarity is provided, results below that similarity value are excluded.
+
+    NB: If either of those filters is applied, less than k chunks may be returned.
     """
     return run_on_connection(
-        lambda connection: _search_on_connection(query, theme, k, embedder, connection), conn
+        lambda connection: _search_on_connection(
+            query, theme, k, embedder, connection, min_similarity
+        ),
+        conn,
     )

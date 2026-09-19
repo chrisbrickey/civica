@@ -28,6 +28,9 @@ _INSUFFICIENT_MATERIAL_MESSAGE = (
     "There is insufficient official material to answer this question."
 )
 
+# Floor below which a retrieved chunk is too dissimilar to the question to ground an answer.
+MINIMUM_SIMILARITY = 0.35
+
 
 class Explanation(BaseModel):  # type: ignore[explicit-any]
     """An explanation for a learner question, paired with the passages that grounded it."""
@@ -44,18 +47,29 @@ def _build_human_message(user_question: str, chunks: list[ContentChunk]) -> Huma
     return HumanMessage(content=content)
 
 
+def _grounded_search(query: str, theme: Theme | None) -> list[ContentChunk]:
+    """Default retriever: search() with the similarity floor already applied."""
+    return search(query, theme, min_similarity=MINIMUM_SIMILARITY)
+
+
 def explain(
     user_question: str,
     theme: Theme,
     *,
-    retriever: SearchFn = search,
+    retriever: SearchFn = _grounded_search,
     chat_client: BaseChatModel | None = None,
 ) -> Explanation:
     """Answer a learner's question about `theme`, grounded only in retrieved passages.
 
-    With no passages, returns early without calling the LLM so it cannot free-associate.
+    MINIMUM_SIMILARITY is passed to the retriever to prevent retrieval of chunks
+    that are not deemed 'relevant enough'.
+
+    If no passages are retrieved, the function returns early without calling the LLM to prevent free-association.
     """
     chunks = retriever(user_question, theme)
+
+    # Re-apply the MINIMUM_SIMILARITY threshold as a backstop in case the filtering at the retrieval level compromised.
+    chunks = [chunk for chunk in chunks if chunk.similarity >= MINIMUM_SIMILARITY]
     if not chunks:
         return Explanation(text=_INSUFFICIENT_MATERIAL_MESSAGE, context_chunks=())
 
@@ -70,5 +84,5 @@ def explain(
             "Explanation for %r hit the generation token cap and may end mid-sentence.",
             user_question,
         )
-    # .text reads only the text blocks; response.content may be a list of typed blocks.
+
     return Explanation(text=response.text, context_chunks=tuple(chunks))

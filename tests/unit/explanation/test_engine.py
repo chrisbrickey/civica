@@ -14,7 +14,7 @@ from pydantic import PrivateAttr
 
 from civica.domain.chunk import Chunk
 from civica.domain.themes import PRINCIPES_ET_VALEURS_DE_LA_REPUBLIQUE, Theme
-from civica.explanation.engine import Explanation, explain
+from civica.explanation.engine import MINIMUM_SIMILARITY, Explanation, explain
 from civica.retrieval.content import ContentChunk
 
 # ---------------------------------------------------------------------------
@@ -27,6 +27,13 @@ _SAMPLE_RESPONSE_TEXT = "sample explanation text"
 
 _SAMPLE_PASSAGE_ONE = "sample passage one about civic values."
 _SAMPLE_PASSAGE_TWO = "sample passage two about civic duties."
+
+_BELOW_FLOOR_SIMILARITY = MINIMUM_SIMILARITY - 0.1
+_ABOVE_FLOOR_SIMILARITY = MINIMUM_SIMILARITY + 0.1
+
+_BELOW_FLOOR_PASSAGE = "sample passage below the similarity floor."
+_ABOVE_FLOOR_PASSAGE = "sample passage above the similarity floor."
+_BOUNDARY_PASSAGE = "sample passage exactly at the similarity floor."
 
 # Hard product contracts. Pinned here as literal strings so that a passing assertion proves
 # the implementation actually contains this text, rather reusing the same constant.
@@ -51,7 +58,7 @@ _COMPLETE_METADATA = {"stop_reason": "end_turn"}
 # ---------------------------------------------------------------------------
 
 
-def _make_content_chunk(text: str, page_slug: str) -> ContentChunk:
+def _make_content_chunk(text: str, page_slug: str, similarity: float = 0.9) -> ContentChunk:
     return ContentChunk(
         chunk=Chunk(
             theme=_SAMPLE_THEME,
@@ -61,7 +68,7 @@ def _make_content_chunk(text: str, page_slug: str) -> ContentChunk:
             content_hash="sample-hash",
             text=text,
         ),
-        similarity=0.9,
+        similarity=similarity,
     )
 
 
@@ -162,6 +169,27 @@ def empty_retriever() -> _RecordingRetriever:
 @pytest.fixture()
 def chat_client() -> _RecordingChatModel:
     return _RecordingChatModel()
+
+
+@pytest.fixture()
+def below_floor_chunk() -> ContentChunk:
+    return _make_content_chunk(
+        _BELOW_FLOOR_PASSAGE, "sample-page-below-floor", similarity=_BELOW_FLOOR_SIMILARITY
+    )
+
+
+@pytest.fixture()
+def above_floor_chunk() -> ContentChunk:
+    return _make_content_chunk(
+        _ABOVE_FLOOR_PASSAGE, "sample-page-above-floor", similarity=_ABOVE_FLOOR_SIMILARITY
+    )
+
+
+@pytest.fixture()
+def boundary_chunk() -> ContentChunk:
+    return _make_content_chunk(
+        _BOUNDARY_PASSAGE, "sample-page-boundary", similarity=MINIMUM_SIMILARITY
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +345,72 @@ class TestEmptyRetrieval:
     ) -> None:
         result = explain(
             _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=empty_retriever, chat_client=chat_client
+        )
+
+        assert isinstance(result, Explanation)
+        assert _INSUFFICIENT_MATERIAL_SUBSTRING in result.text
+        assert result.context_chunks == ()
+        assert chat_client.invocation_count == 0
+
+
+class TestSimilarityFloor:
+    """explain() drops chunks below MINIMUM_SIMILARITY before they reach the prompt or the result."""
+
+    def test_below_floor_chunk_excluded_from_prompt(
+        self,
+        below_floor_chunk: ContentChunk,
+        above_floor_chunk: ContentChunk,
+        chat_client: _RecordingChatModel,
+    ) -> None:
+        retriever = _RecordingRetriever([below_floor_chunk, above_floor_chunk])
+
+        explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
+
+        prompt_text = _concatenated_text(chat_client.received_messages[0])
+        assert _ABOVE_FLOOR_PASSAGE in prompt_text
+        assert _BELOW_FLOOR_PASSAGE not in prompt_text
+
+    def test_below_floor_chunk_excluded_from_context_chunks(
+        self,
+        below_floor_chunk: ContentChunk,
+        above_floor_chunk: ContentChunk,
+        chat_client: _RecordingChatModel,
+    ) -> None:
+        retriever = _RecordingRetriever([below_floor_chunk, above_floor_chunk])
+
+        result = explain(
+            _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client
+        )
+
+        assert above_floor_chunk in result.context_chunks
+        assert below_floor_chunk not in result.context_chunks
+
+    def test_chunk_at_exact_floor_is_kept(
+        self,
+        boundary_chunk: ContentChunk,
+        chat_client: _RecordingChatModel,
+    ) -> None:
+        """The floor is inclusive: similarity == MINIMUM_SIMILARITY passes."""
+        retriever = _RecordingRetriever([boundary_chunk])
+
+        result = explain(
+            _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client
+        )
+
+        assert boundary_chunk in result.context_chunks
+        prompt_text = _concatenated_text(chat_client.received_messages[0])
+        assert _BOUNDARY_PASSAGE in prompt_text
+
+    def test_all_below_floor_returns_insufficient_material_without_calling_model(
+        self,
+        below_floor_chunk: ContentChunk,
+        chat_client: _RecordingChatModel,
+    ) -> None:
+        """When every retrieved chunk is below the floor, explain() short-circuits like empty retrieval."""
+        retriever = _RecordingRetriever([below_floor_chunk])
+
+        result = explain(
+            _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client
         )
 
         assert isinstance(result, Explanation)
