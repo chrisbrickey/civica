@@ -717,7 +717,7 @@ This addresses a silent failure mode that I discovered while implementing this s
 
 ---
 
-## Step 9: Assessment engine (quiz + mock exam assembly)
+## ✅ Step 9: Assessment engine (quiz + mock exam assembly)
 
 **Goal:** Assemble quiz batches and mock exams that mirror the official structure.
 
@@ -751,6 +751,13 @@ This addresses a silent failure mode that I discovered while implementing this s
 - **Update this plan:** 
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+    - `generate_quiz` returns a frozen `Quiz` (user_id, questions, `score(answers)`) instead of just a `list[Question]` so that quiz and mock exam answers can both get scored and logged through the same `score_answers` function.
+    - Added `QuestionKind` field on `Question` class to represent the difference between knowledge questions and scenario questions. 
+    - The mock exam asks a total of 36 questions across each theme (`EXAM_QUESTION_COUNTS`). This are broken down into 28 knowledge questions and 12 scenario questions (`EXAM_SCENARIO_COUNTS`). 
+      - The full breakdown by theme is: 8/3 Principes et valeurs de la République, 8/3 Droits et devoirs, 6/2 Histoire géographie et culture, 4/2 Système intitutionnel et politique, 2/2 Vivre dans la société française.
+    - Mock exam generates all five themes before saving once. Any failure saves nothing.
+    - One retrieval and one LLM call per theme. Chunks are grouped by section into one passage group per question. `sources` and `kind` are assigned in code.
+    - `PREFER_SCHEDULED_QUESTIONS` was dropped from this step; Step 12 adds it when it has something to gate.
 
 ---
 
