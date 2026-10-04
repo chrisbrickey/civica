@@ -57,3 +57,22 @@ THEMES_BY_SLUG: dict[str, Theme] = {
         VIVRE_DANS_LA_SOCIETE_FRANCAISE,
     ]
 }
+
+# Official mock exam structure:
+# 40 questions in total (including all knowledge and scenario questions) spread across all official themes
+EXAM_QUESTION_COUNTS: dict[Theme, int] = {
+    PRINCIPES_ET_VALEURS_DE_LA_REPUBLIQUE: 11,
+    DROITS_ET_DEVOIRS: 11,
+    HISTOIRE_GEOGRAPHIE_ET_CULTURE: 8,
+    SYSTEME_INSTITUTIONNEL_ET_POLITIQUE: 6,
+    VIVRE_DANS_LA_SOCIETE_FRANCAISE: 4,
+}
+
+# Scenario questions per theme
+EXAM_SCENARIO_COUNTS: dict[Theme, int] = {
+    PRINCIPES_ET_VALEURS_DE_LA_REPUBLIQUE: 3,
+    DROITS_ET_DEVOIRS: 3,
+    HISTOIRE_GEOGRAPHIE_ET_CULTURE: 2,
+    SYSTEME_INSTITUTIONNEL_ET_POLITIQUE: 2,
+    VIVRE_DANS_LA_SOCIETE_FRANCAISE: 2,
+}

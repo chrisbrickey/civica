@@ -249,6 +249,7 @@ civica/
   ├── docs/                     # design docs and plans
   │
   ├── src/civica/               # application package
+  │     ├── assessment/         # quiz and mock exam generation and scoring
   │     ├── db/                 # connection pool and schema migration
   │     ├── domain/             # pure business logic, no I/O
   │     ├── embeddings/         # embedding client shared by ingestion and retrieval
@@ -266,6 +267,14 @@ civica/
         └── unit/               # dependency-free tests that are confined to a single class
 ```
 _*Any tests that make a network call (e.g., to confirm service contracts) are tagged with `@pytest.mark.external` annotation and are excluded from the default run._
+
+#### Postgres tables 
+
+Schema is located at `src/civica/db/schema.sql`.
+- `users`
+- `content_chunks`: embedded corpus
+- `generated_questions`: the persisted question bank, keyed by content hash and stamped with `prompt_version`
+- `quiz_answers`: every scored answer
 
 
 ### Reference Material

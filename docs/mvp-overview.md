@@ -171,8 +171,8 @@ Ingestion pipeline:
     - LLM-generated answers using previously ingested corpus of the ministry's thematic material
     - online sources such as 
       - culture-civique.fr: [Questions CR](https://culture-civique.fr/questions-cr.html); This is the most comprehensive resource found. It has 200+ official questions across all 5 themes, each paired with the correct answer/explanation. It appears to be compiled from the official thematic sheets.
-      - franceaccueil.com: [40 questions corrigées](https://franceaccueil.com/examen-civique-2026-40-questions-corrigees/); A sample of 40 questions in full MCQ format (A/B/C/D) with correct answers marked.
-      - natification.fr: [300 questions](https://blog.natification.fr/2026/02/examen-civique/); Broad Q&A bank, but not MCQ format.
+      - franceaccueil.com: [40 questions corrigées](https://franceaccueil.com/examen-civique-2026-40-questions-corrigees/); A sample of 40 questions in full multiple choice format (A/B/C/D) with correct answers marked.
+      - natification.fr: [300 questions](https://blog.natification.fr/2026/02/examen-civique/); Broad Q&A bank, but not multiple choice format.
 
 ```
 data/

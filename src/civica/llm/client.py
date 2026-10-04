@@ -49,6 +49,11 @@ class AnthropicChat:
 # Sized for a single grounded explanation, not for long multi-question generation.
 EXPLANATION_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=2048)
 
+# max_tokens default is sized to cover a theme with 12 French multiple-choice questions in one call plus lots of buffer.
+# The buffer is free. We only pay for tokens actually generated. max_tokens is tunable. Lowering the max_tokens cap
+# could risk cutting off the generated questions, but this would raise QuestionGenerationError so it would not fail silently.
+QUIZ_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=8192)
+
 _clients: dict[ChatProfile, BaseChatModel] = {}
 
 
