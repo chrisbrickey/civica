@@ -12,6 +12,7 @@ as opposed to optimization of chunk embedding and retrieval. See [Luminary RAG a
 - **Autonomous coaching guided by theme:** uses an LLM planner to decides on the next action, ensuring coverage of the five official themes
 - **Quiz mode:** LLM-generated questions using the official French thematic content as source with explanations grounded in the official study material
 - **Mock exam mode:** mirrors the official format (40 Q, 45-min timer, 80% pass, per-theme weighting) and reports pass/fail plus per-theme scores
+- **Grounded question quality:** optional corpus-grounded critic pass (off by default to optimize LLM calls) rejects ungrounded or ambiguous questions
 - **Self-improvement reflection loop:** updates its own artifacts from measured learner outcomes to improve quality of explanations and questions posed 
 
 ### Examples
@@ -273,7 +274,8 @@ _*Any tests that make a network call (e.g., to confirm service contracts) are ta
 Schema is located at `src/civica/db/schema.sql`.
 - `users`
 - `content_chunks`: embedded corpus
-- `generated_questions`: the persisted question bank, keyed by content hash and stamped with `prompt_version`
+- `generated_questions`: persisted question bank, keyed by content hash and stamped with `prompt_version`
+- `rejected_questions`: append-only log of questions rejected by critic including metadata
 - `quiz_answers`: every scored answer
 
 
