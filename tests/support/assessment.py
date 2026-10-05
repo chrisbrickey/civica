@@ -1,16 +1,26 @@
 """Shared builders and recording fakes for assessment tests (unit and integration)."""
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
+from civica.domain.chunk import Chunk
 from civica.domain.question import Question, QuestionKind
 from civica.domain.source_ref import SourceRef
 from civica.domain.themes import DROITS_ET_DEVOIRS, EXAM_QUESTION_COUNTS, Theme
 from civica.domain.user import UserId
+from civica.retrieval.content import ContentChunk
+
+if TYPE_CHECKING:
+    # Type-only import keeps this module importable by tests that never touch rejections.
+    from civica.assessment.store import Rejection
 
 SAMPLE_OPTIONS = ("option-a", "option-b", "option-c", "option-d")
 SAMPLE_SOURCE = SourceRef(page_slug="sample-page", section_id="section-001")
 OPTION_COUNT = len(SAMPLE_OPTIONS)
+DEFAULT_SECTION_COUNT = 3
 
 
 def make_question(
@@ -104,3 +114,54 @@ class RecordingQuestionStore:
     @property
     def saved_prompt_versions(self) -> set[str]:
         return {version for _, version in self.saves}
+
+
+@dataclass
+class RecordingRejectionStore:
+    """Fake RejectionStore: records each save call instead of writing question_rejections rows."""
+
+    saves: list[tuple[Rejection, ...]] = field(default_factory=list)
+
+    def save(self, rejections: Sequence[Rejection]) -> None:
+        self.saves.append(tuple(rejections))
+
+    @property
+    def rejections(self) -> list[Rejection]:
+        return [r for rejections in self.saves for r in rejections]
+
+
+def make_content_chunk(theme: Theme, index: int) -> ContentChunk:
+    """One retrieved chunk in its own section, with text unique to (theme, index)."""
+    return ContentChunk(
+        chunk=Chunk(
+            theme=theme,
+            page_slug=f"sample-page-{index:03d}",
+            section_id=f"section-{index:03d}",
+            chunk_index=0,
+            content_hash=f"sample-hash-{theme.slug}-{index:03d}",
+            text=f"sample passage {index} about {theme.slug}.",
+        ),
+        similarity=0.9,
+    )
+
+
+class RecordingRetriever:
+    """Fake SearchFn: records every (query, theme), returns chunks from distinct sections of that theme."""
+
+    def __init__(self, section_count: int = DEFAULT_SECTION_COUNT) -> None:
+        self.section_count = section_count
+        self.calls: list[tuple[str, Theme | None]] = []
+
+    def __call__(self, query: str, theme: Theme | None) -> list[ContentChunk]:
+        self.calls.append((query, theme))
+        assert theme is not None, "assessment retrieval must always be scoped to a theme"
+        return self.chunks(theme)
+
+    def chunks(self, theme: Theme) -> list[ContentChunk]:
+        return [make_content_chunk(theme, i) for i in range(self.section_count)]
+
+    def source_refs(self, theme: Theme) -> set[SourceRef]:
+        return {
+            SourceRef(page_slug=c.chunk.page_slug, section_id=c.chunk.section_id)
+            for c in self.chunks(theme)
+        }

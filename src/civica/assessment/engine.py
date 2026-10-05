@@ -1,19 +1,32 @@
 """Assessment engine: builds quizzes and mock exams from retrieved corpus passages.
 
-Per theme: one retrieval of chunks, one LLM call.
+Per theme: one retrieval of chunks, one generation call, and an optional critic pass
 Sources and kind are assigned deterministically in code, not by the model.
+
+Questions rejected by the critic (off by default) get regenerated up to MAX_REFINE_ATTEMPTS.
+Every rejection is logged. Pass e.g. LlmCritic() as critic to enable it.
 """
 
 import logging
-import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from civica.assessment.critic import CritiqueFn
+from civica.assessment.errors import QuestionGenerationError
+from civica.assessment.prompts import PROMPT_VERSION, PROMPTS
+from civica.assessment.replies import strip_code_fence
 from civica.assessment.scoring import AnswerLogger, MockExam, Quiz
-from civica.assessment.store import PostgresQuestionStore, QuestionStore
+from civica.assessment.store import (
+    PostgresQuestionStore,
+    PostgresRejectionStore,
+    QuestionStore,
+    Rejection,
+    RejectionStore,
+)
 from civica.domain.question import Question, QuestionKind
 from civica.domain.source_ref import SourceRef
 from civica.domain.themes import EXAM_QUESTION_COUNTS, EXAM_SCENARIO_COUNTS, Theme
@@ -22,42 +35,24 @@ from civica.llm.client import QUIZ_PROFILE, get_chat_model
 from civica.progress.quiz_log import log_answer
 from civica.retrieval.content import ContentChunk, SearchFn, search
 
+__all__ = [
+    "MAX_REFINE_ATTEMPTS",
+    "PROMPT_VERSION",
+    "QuestionGenerationError",
+    "generate_mock_exam",
+    "generate_quiz",
+]
+
 logger = logging.getLogger(__name__)
 
-# Bump by hand whenever PROMPTS changes. Stored with every question for later comparison.
-PROMPT_VERSION = "quiz-v001"
-
-PROMPTS: dict[str, str] = {
-    "system": (
-        "Tu es un concepteur de questions pour l'examen civique de naturalisation francaise. "
-        "Utilise uniquement les passages officiels fournis, sans connaissances externes. "
-        "Redige en francais des questions a choix multiples avec exactement 4 options, "
-        "dont une seule est correcte. Les mauvaises options doivent etre plausibles mais fausses. "
-        "Une question de connaissance porte sur un fait du passage. "
-        "Une question de mise en situation decrit un cas concret a resoudre avec le passage. "
-        "Reponds uniquement par un tableau JSON, sans texte autour, de la forme "
-        '[{"text": "...", "options": ["...", "...", "...", "..."], "correct_index": 0}]. '
-        "correct_index est l'indice (0 a 3) de la bonne option."
-    ),
-    "human": (
-        "Theme : {theme}\n\n"
-        "Ecris exactement {count} questions, une par groupe de passages numerote, dans l'ordre "
-        "des groupes. Chaque question s'appuie uniquement sur son groupe.\n\n{groups}"
-    ),
-}
+# Regenerations allowed for questions the critic rejects, after the first generation.
+MAX_REFINE_ATTEMPTS = 2
 
 # Enough chunks to fill up to 11 passage groups; the floor drops weakly related chunks.
 _RETRIEVAL_K = 30
 _MINIMUM_SIMILARITY = 0.3
 
-_FENCE_PATTERN = re.compile(r"^```[a-zA-Z]*\s*(.*?)\s*```$", re.DOTALL)
-
 SectionKey = tuple[str, str]
-
-
-class QuestionGenerationError(Exception):
-    """Raised when questions cannot be generated, so nothing is shown or saved."""
-
 
 class _GeneratedItem(BaseModel):  # type: ignore[explicit-any]
     """One multiple choice question (MCQ) as the model returns it, validated at the edge."""
@@ -126,12 +121,8 @@ def _build_messages(
 
 def _parse_items(reply: str, n: int) -> list[_GeneratedItem]:
     """Parse the model reply (tolerating a code fence) and keep the first n items."""
-    body = reply.strip()
-    fenced = _FENCE_PATTERN.match(body)
-    if fenced:
-        body = fenced.group(1)
     try:
-        items = _ITEMS_ADAPTER.validate_json(body)
+        items = _ITEMS_ADAPTER.validate_json(strip_code_fence(reply))
     except ValidationError as error:
         raise QuestionGenerationError(f"Model reply is not a valid question list: {error}") from error
     if len(items) < n:
@@ -139,27 +130,20 @@ def _parse_items(reply: str, n: int) -> list[_GeneratedItem]:
     return items[:n]
 
 
-def _generate_for_theme(
+def _generate_batch(
     theme: Theme,
-    n: int,
-    scenario_count: int,
-    *,
-    retriever: SearchFn,
+    groups: Sequence[Sequence[ContentChunk]],
+    kinds: Sequence[QuestionKind],
     client: BaseChatModel,
-) -> tuple[Question, ...]:
-    chunks = retriever(theme.display_name_fr, theme)
-    if not chunks:
-        raise QuestionGenerationError(f"No corpus passages retrieved for theme {theme.slug!r}")
-
-    groups = _group_chunks(chunks, n)
-    kinds = _kinds(n, scenario_count)
+) -> list[Question]:
+    """One generation call: one question per group, in group order."""
     response = client.invoke(_build_messages(theme, groups, kinds))
     if QUIZ_PROFILE.was_truncated(response):
         logger.warning("Question generation for %r hit the token cap; reply may be cut off.", theme.slug)
 
-    items = _parse_items(response.text, n)
+    items = _parse_items(response.text, len(groups))
     try:
-        return tuple(
+        return [
             Question(
                 theme=theme,
                 kind=kind,
@@ -169,9 +153,82 @@ def _generate_for_theme(
                 sources=_group_sources(group),
             )
             for item, group, kind in zip(items, groups, kinds, strict=True)
-        )
+        ]
     except ValidationError as error:
         raise QuestionGenerationError(f"Generated question is invalid: {error}") from error
+
+
+@dataclass(frozen=True)
+class _Collaborators:
+    """The injected services one theme's generation uses."""
+
+    client: BaseChatModel
+    critic: CritiqueFn | None
+    rejection_store: RejectionStore
+
+
+def _refine(
+    theme: Theme,
+    questions: list[Question],
+    groups: Sequence[Sequence[ContentChunk]],
+    kinds: Sequence[QuestionKind],
+    services: _Collaborators,
+    critic: CritiqueFn,
+) -> tuple[Question, ...]:
+    """Critique, log rejections, and regenerate only failed items; drop any still failing."""
+    accepted: dict[int, Question] = {}
+    pending = list(range(len(questions)))
+    for attempt in range(1, MAX_REFINE_ATTEMPTS + 2):
+        verdicts = critic(theme, questions, [groups[i] for i in pending])
+        failed: list[int] = []
+        rejections: list[Rejection] = []
+        for position, question, verdict in zip(pending, questions, verdicts, strict=True):
+            if verdict.passed:
+                accepted[position] = question
+            else:
+                failed.append(position)
+                rejections.append(Rejection(PROMPT_VERSION, theme, verdict.reason, attempt))
+        if rejections:
+            services.rejection_store.save(rejections)
+        if not failed or attempt > MAX_REFINE_ATTEMPTS:
+            break
+        pending = failed
+        questions = _generate_batch(
+            theme, [groups[i] for i in pending], [kinds[i] for i in pending], services.client
+        )
+    return tuple(accepted[position] for position in sorted(accepted))
+
+
+def _generate_for_theme(
+    theme: Theme,
+    n: int,
+    scenario_count: int,
+    *,
+    retriever: SearchFn,
+    services: _Collaborators,
+) -> tuple[Question, ...]:
+    chunks = retriever(theme.display_name_fr, theme)
+    if not chunks:
+        raise QuestionGenerationError(f"No corpus passages retrieved for theme {theme.slug!r}")
+
+    groups = _group_chunks(chunks, n)
+    kinds = _kinds(n, scenario_count)
+    questions = _generate_batch(theme, groups, kinds, services.client)
+    if services.critic is None:
+        return tuple(questions)
+    return _refine(theme, questions, groups, kinds, services, services.critic)
+
+
+def _collaborators(
+    chat_client: BaseChatModel | None,
+    critic: CritiqueFn | None,
+    rejection_store: RejectionStore | None,
+) -> _Collaborators:
+    return _Collaborators(
+        client=chat_client if chat_client is not None else get_chat_model(QUIZ_PROFILE),
+        critic=critic,
+        rejection_store=rejection_store if rejection_store is not None else PostgresRejectionStore(),
+    )
 
 
 def generate_quiz(
@@ -183,14 +240,21 @@ def generate_quiz(
     chat_client: BaseChatModel | None = None,
     question_store: QuestionStore | None = None,
     answer_logger: AnswerLogger = log_answer,
+    critic: CritiqueFn | None = None,
+    rejection_store: RejectionStore | None = None,
 ) -> Quiz:
-    """Generate and save `n` knowledge questions for `theme`. Raises QuestionGenerationError."""
+    """Generate and save up to `n` knowledge questions for `theme`; an enabled critic may leave it short.
+
+    Raises QuestionGenerationError. The critic is off by default; pass e.g. LlmCritic() to enable it.
+    """
     if n < 1:
         raise ValueError("n must be at least 1")
-    client = chat_client if chat_client is not None else get_chat_model(QUIZ_PROFILE)
+    services = _collaborators(chat_client, critic, rejection_store)
     store = question_store if question_store is not None else PostgresQuestionStore()
 
-    questions = _generate_for_theme(theme, n, 0, retriever=retriever, client=client)
+    questions = _generate_for_theme(theme, n, 0, retriever=retriever, services=services)
+    if not questions:
+        raise QuestionGenerationError(f"No question passed the critic for theme {theme.slug!r}")
     store.save(questions, PROMPT_VERSION)
     return Quiz(user_id=user_id, questions=questions, answer_logger=answer_logger)
 
@@ -202,17 +266,26 @@ def generate_mock_exam(
     chat_client: BaseChatModel | None = None,
     question_store: QuestionStore | None = None,
     answer_logger: AnswerLogger = log_answer,
+    critic: CritiqueFn | None = None,
+    rejection_store: RejectionStore | None = None,
 ) -> MockExam:
-    """Generate the 40-question exam in official weighting, saving only if all themes succeed."""
-    client = chat_client if chat_client is not None else get_chat_model(QUIZ_PROFILE)
+    """Generate the 40-question exam in official weighting, saving only if all themes are full.
+
+    The critic is off by default; pass e.g. LlmCritic() to enable it.
+    A theme left short by the critic raises at once, so remaining themes cost no LLM calls.
+    """
+    services = _collaborators(chat_client, critic, rejection_store)
     store = question_store if question_store is not None else PostgresQuestionStore()
 
     questions: list[Question] = []
     for theme, count in EXAM_QUESTION_COUNTS.items():
-        questions.extend(
-            _generate_for_theme(
-                theme, count, EXAM_SCENARIO_COUNTS[theme], retriever=retriever, client=client
-            )
+        themed = _generate_for_theme(
+            theme, count, EXAM_SCENARIO_COUNTS[theme], retriever=retriever, services=services
         )
+        if len(themed) < count:
+            raise QuestionGenerationError(
+                f"Only {len(themed)} of {count} questions passed the critic for theme {theme.slug!r}"
+            )
+        questions.extend(themed)
     store.save(questions, PROMPT_VERSION)
     return MockExam(user_id=user_id, questions=tuple(questions), answer_logger=answer_logger)

@@ -3,6 +3,7 @@
 No network calls. No DB spinup."""
 
 import json
+import socket
 import uuid
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -11,7 +12,7 @@ from typing import Any
 import pytest
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import PrivateAttr
 
@@ -22,22 +23,20 @@ from civica.assessment.engine import (
     generate_quiz,
 )
 from civica.assessment.scoring import MOCK_EXAM_TIME_LIMIT_SECONDS, MockExam, Quiz
-from civica.domain.chunk import Chunk
 from civica.domain.question import Question, QuestionKind
-from civica.domain.source_ref import SourceRef
 from civica.domain.themes import (
     EXAM_QUESTION_COUNTS,
     EXAM_SCENARIO_COUNTS,
     SYSTEME_INSTITUTIONNEL_ET_POLITIQUE,
-    Theme,
 )
 from civica.domain.user import UserId
-from civica.retrieval.content import ContentChunk
 from tests.support.assessment import (
     OPTION_COUNT,
     SAMPLE_OPTIONS,
     RecordingAnswerLogger,
     RecordingQuestionStore,
+    RecordingRejectionStore,
+    RecordingRetriever,
 )
 
 # ---------------------------------------------------------------------------
@@ -57,12 +56,25 @@ _THEME_COUNT = len(EXAM_QUESTION_COUNTS)
 _MAX_ITEMS_PER_CALL = max(EXAM_QUESTION_COUNTS.values())
 _TOO_FEW_ITEMS = 2
 
-_SECTION_COUNT = 3
 _FEWER_SECTIONS_THAN_QUESTIONS = 2
 
 _SAMPLE_CORRECT_INDEX = 1
 
 _MALFORMED_JSON = "this is not json ["
+
+# Generation rules the system message must state verbatim; these strings are the spec.
+_SELF_CONTAINED_RULE = (
+    "Chaque question doit se comprendre seule : ne mentionne jamais le passage, le texte, "
+    "la fiche ou le document."
+)
+_CIVIC_KNOWLEDGE_RULE = (
+    "Interroge sur les connaissances civiques, jamais sur les fiches elles-memes "
+    "(titres, objectifs, contenu du cours)."
+)
+_GENERATION_RULES = {
+    "self-contained": _SELF_CONTAINED_RULE,
+    "civic-knowledge": _CIVIC_KNOWLEDGE_RULE,
+}
 
 
 def _item(text: str) -> dict[str, object]:
@@ -91,39 +103,6 @@ _WRONG_SHAPE_PAYLOADS = {
 # ---------------------------------------------------------------------------
 
 
-def _make_content_chunk(theme: Theme, index: int) -> ContentChunk:
-    return ContentChunk(
-        chunk=Chunk(
-            theme=theme,
-            page_slug=f"sample-page-{index:03d}",
-            section_id=f"section-{index:03d}",
-            chunk_index=0,
-            content_hash=f"sample-hash-{theme.slug}-{index:03d}",
-            text=f"sample passage {index} about {theme.slug}.",
-        ),
-        similarity=0.9,
-    )
-
-
-class _RecordingRetriever:
-    """Fake SearchFn: records every (query, theme), returns chunks from distinct sections of that theme."""
-
-    def __init__(self, section_count: int = _SECTION_COUNT) -> None:
-        self.section_count = section_count
-        self.calls: list[tuple[str, Theme | None]] = []
-
-    def __call__(self, query: str, theme: Theme | None) -> list[ContentChunk]:
-        self.calls.append((query, theme))
-        assert theme is not None, "assessment retrieval must always be scoped to a theme"
-        return [_make_content_chunk(theme, i) for i in range(self.section_count)]
-
-    def source_refs(self, theme: Theme) -> set[SourceRef]:
-        return {
-            SourceRef(page_slug=c.chunk.page_slug, section_id=c.chunk.section_id)
-            for c in (_make_content_chunk(theme, i) for i in range(self.section_count))
-        }
-
-
 class _RecordingChatModel(BaseChatModel):  # type: ignore[explicit-any]
     """Fake chat model: replies with a JSON array of well-formed multiple choice items.
 
@@ -140,6 +119,12 @@ class _RecordingChatModel(BaseChatModel):  # type: ignore[explicit-any]
     @property
     def invocation_count(self) -> int:
         return len(self._received)
+
+    def system_text(self, call_index: int) -> str:
+        """The system message content of one call."""
+        return "\n".join(
+            str(m.content) for m in self._received[call_index] if isinstance(m, SystemMessage)
+        )
 
     def _reply_for(self, call_index: int) -> str:
         if self.canned_text is not None:
@@ -172,9 +157,10 @@ class _RecordingChatModel(BaseChatModel):  # type: ignore[explicit-any]
 class _Fakes:
     """Every injected dependency of the engine; swap one with dataclasses.replace."""
 
-    retriever: _RecordingRetriever
+    retriever: RecordingRetriever
     chat_client: _RecordingChatModel
     question_store: RecordingQuestionStore
+    rejection_store: RecordingRejectionStore
     answer_logger: RecordingAnswerLogger
 
 
@@ -186,11 +172,23 @@ class _Fakes:
 @pytest.fixture()
 def fakes(answer_logger: RecordingAnswerLogger) -> _Fakes:
     return _Fakes(
-        retriever=_RecordingRetriever(),
+        retriever=RecordingRetriever(),
         chat_client=_RecordingChatModel(),
         question_store=RecordingQuestionStore(),
+        rejection_store=RecordingRejectionStore(),
         answer_logger=answer_logger,
     )
+
+
+@pytest.fixture()
+def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail fast instead of reaching a real model if a default client sneaks in."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    def _refuse(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("unit tests must not open network connections")
+
+    monkeypatch.setattr(socket.socket, "connect", _refuse)
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +205,8 @@ def _quiz(fakes: _Fakes, n: int = _QUIZ_SIZE) -> Quiz:
         chat_client=fakes.chat_client,
         question_store=fakes.question_store,
         answer_logger=fakes.answer_logger,
+        critic=None,
+        rejection_store=fakes.rejection_store,
     )
 
 
@@ -217,6 +217,34 @@ def _exam(fakes: _Fakes) -> MockExam:
         chat_client=fakes.chat_client,
         question_store=fakes.question_store,
         answer_logger=fakes.answer_logger,
+        critic=None,
+        rejection_store=fakes.rejection_store,
+    )
+
+
+def _quiz_with_default_critic(fakes: _Fakes) -> Quiz:
+    """Like _quiz, but leaves the critic argument out so its default applies."""
+    return generate_quiz(
+        _USER_ID,
+        _THEME,
+        _QUIZ_SIZE,
+        retriever=fakes.retriever,
+        chat_client=fakes.chat_client,
+        question_store=fakes.question_store,
+        answer_logger=fakes.answer_logger,
+        rejection_store=fakes.rejection_store,
+    )
+
+
+def _exam_with_default_critic(fakes: _Fakes) -> MockExam:
+    """Like _exam, but leaves the critic argument out so its default applies."""
+    return generate_mock_exam(
+        _USER_ID,
+        retriever=fakes.retriever,
+        chat_client=fakes.chat_client,
+        question_store=fakes.question_store,
+        answer_logger=fakes.answer_logger,
+        rejection_store=fakes.rejection_store,
     )
 
 
@@ -247,6 +275,8 @@ class TestQuizSize:
             chat_client=fakes.chat_client,
             question_store=fakes.question_store,
             answer_logger=fakes.answer_logger,
+            critic=None,
+            rejection_store=fakes.rejection_store,
         )
 
         assert len(quiz.questions) == _DEFAULT_QUIZ_SIZE
@@ -293,7 +323,7 @@ class TestQuizSources:
     def test_fewer_sections_than_questions_still_fills_the_batch(self, fakes: _Fakes) -> None:
         """Sections are reused round-robin when there are fewer of them than questions."""
         fakes = replace(
-            fakes, retriever=_RecordingRetriever(section_count=_FEWER_SECTIONS_THAN_QUESTIONS)
+            fakes, retriever=RecordingRetriever(section_count=_FEWER_SECTIONS_THAN_QUESTIONS)
         )
 
         questions = _quiz(fakes, n=_DEFAULT_QUIZ_SIZE).questions
@@ -372,6 +402,67 @@ class TestMockExamCalls:
 
 
 # ---------------------------------------------------------------------------
+# Tests: generation prompt rules
+# ---------------------------------------------------------------------------
+
+
+class TestGenerationPromptRules:
+    """Learners never see the passages, so questions must stand alone and test civic knowledge."""
+
+    @pytest.mark.parametrize("rule", _GENERATION_RULES.values(), ids=_GENERATION_RULES.keys())
+    def test_quiz_system_message_states_rule(self, fakes: _Fakes, rule: str) -> None:
+        _quiz(fakes)
+
+        assert rule in fakes.chat_client.system_text(0)
+
+    @pytest.mark.parametrize("rule", _GENERATION_RULES.values(), ids=_GENERATION_RULES.keys())
+    def test_every_mock_exam_system_message_states_rule(self, fakes: _Fakes, rule: str) -> None:
+        _exam(fakes)
+
+        calls = range(fakes.chat_client.invocation_count)
+        assert len(calls) == _THEME_COUNT
+        for call_index in calls:
+            assert rule in fakes.chat_client.system_text(call_index)
+
+
+# ---------------------------------------------------------------------------
+# Tests: critic off by default
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("no_network")
+class TestCriticOffByDefault:
+    """Without a critic argument, generation is a single pass: nothing is critiqued or rejected."""
+
+    def test_quiz_returns_and_saves_every_generated_question(self, fakes: _Fakes) -> None:
+        quiz = _quiz_with_default_critic(fakes)
+
+        expected = [_item_text(0, i) for i in range(_QUIZ_SIZE)]
+        assert [q.text for q in quiz.questions] == expected
+        assert [q.text for q in fakes.question_store.saved_questions] == expected
+        assert fakes.rejection_store.rejections == []
+
+    def test_quiz_makes_one_model_call(self, fakes: _Fakes) -> None:
+        _quiz_with_default_critic(fakes)
+
+        assert fakes.chat_client.invocation_count == 1
+
+    def test_mock_exam_returns_and_saves_all_forty_questions(self, fakes: _Fakes) -> None:
+        exam = _exam_with_default_critic(fakes)
+
+        assert len(exam.questions) == _EXAM_SIZE
+        assert [q.question_id for q in fakes.question_store.saved_questions] == [
+            q.question_id for q in exam.questions
+        ]
+        assert fakes.rejection_store.rejections == []
+
+    def test_mock_exam_makes_one_model_call_per_theme(self, fakes: _Fakes) -> None:
+        _exam_with_default_critic(fakes)
+
+        assert fakes.chat_client.invocation_count == _THEME_COUNT
+
+
+# ---------------------------------------------------------------------------
 # Tests: persistence
 # ---------------------------------------------------------------------------
 
@@ -416,7 +507,7 @@ class TestNoRetrievedMaterial:
     """Without grounding passages the model is never called and nothing is saved."""
 
     def test_quiz_raises_without_calling_model(self, fakes: _Fakes) -> None:
-        fakes = replace(fakes, retriever=_RecordingRetriever(section_count=0))
+        fakes = replace(fakes, retriever=RecordingRetriever(section_count=0))
 
         with pytest.raises(QuestionGenerationError):
             _quiz(fakes)
@@ -425,7 +516,7 @@ class TestNoRetrievedMaterial:
         assert fakes.question_store.saved_questions == []
 
     def test_mock_exam_raises_without_calling_model(self, fakes: _Fakes) -> None:
-        fakes = replace(fakes, retriever=_RecordingRetriever(section_count=0))
+        fakes = replace(fakes, retriever=RecordingRetriever(section_count=0))
 
         with pytest.raises(QuestionGenerationError):
             _exam(fakes)

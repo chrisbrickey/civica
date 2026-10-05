@@ -1,6 +1,7 @@
-"""Persisted question bank: the generated_questions table, keyed by question content hash."""
+"""Persisted question bank (generated_questions) and critic rejection log (question_rejections)."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 import psycopg
@@ -9,6 +10,7 @@ from psycopg.types.json import Jsonb
 
 from civica.db.session import run_on_connection
 from civica.domain.question import Question
+from civica.domain.themes import Theme
 
 _UPSERT_SQL = """
 INSERT INTO generated_questions (
@@ -68,3 +70,47 @@ class PostgresQuestionStore:
         run_on_connection(
             lambda connection: _save_on_connection(questions, prompt_version, connection), conn
         )
+
+
+_INSERT_REJECTION_SQL = """
+INSERT INTO question_rejections (prompt_version, theme, reason, attempt)
+VALUES (%s, %s, %s, %s)
+"""
+
+
+@dataclass(frozen=True)
+class Rejection:
+    """One question the critic rejected, with the refine attempt (1 = first pass) that rejected it."""
+
+    prompt_version: str
+    theme: Theme
+    reason: str
+    attempt: int
+
+
+class RejectionStore(Protocol):
+    """Appends critic rejections to a log for prompt-version quality comparison."""
+
+    def save(self, rejections: Sequence[Rejection]) -> None: ...
+
+
+def _save_rejections_on_connection(
+    rejections: Sequence[Rejection],
+    conn: psycopg.Connection[psycopg.rows.TupleRow],
+) -> None:
+    params = [(r.prompt_version, r.theme.slug, r.reason, r.attempt) for r in rejections]
+    if not params:
+        return
+    with conn.cursor() as cursor:
+        cursor.executemany(_INSERT_REJECTION_SQL, params)
+
+
+class PostgresRejectionStore:
+    """RejectionStore backed by the question_rejections table (append-only)."""
+
+    def save(
+        self,
+        rejections: Sequence[Rejection],
+        conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None,
+    ) -> None:
+        run_on_connection(lambda connection: _save_rejections_on_connection(rejections, connection), conn)

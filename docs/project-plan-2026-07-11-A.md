@@ -751,20 +751,21 @@ This addresses a silent failure mode that I discovered while implementing this s
 - **Update this plan:** 
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
-    - `generate_quiz` returns a frozen `Quiz` (user_id, questions, `score(answers)`) instead of just a `list[Question]` so that quiz and mock exam answers can both get scored and logged through the same `score_answers` function.
+    - `generate_quiz` returns a frozen `Quiz` (user_id, questions, `score(answers)`) instead of just a `list[Question]` so that quiz and mock exam answers can both get scored and logged through one shared scoring path in `assessment/scoring.py`.
     - Added `QuestionKind` field on `Question` class to represent the difference between knowledge questions and scenario questions. 
-    - The mock exam asks a total of 36 questions across each theme (`EXAM_QUESTION_COUNTS`). This are broken down into 28 knowledge questions and 12 scenario questions (`EXAM_SCENARIO_COUNTS`). 
+    - The mock exam asks a total of 40 questions across each theme (`EXAM_QUESTION_COUNTS`). These are broken down into 28 knowledge questions and 12 scenario questions (`EXAM_SCENARIO_COUNTS`). 
       - The full breakdown by theme is: 8/3 Principes et valeurs de la République, 8/3 Droits et devoirs, 6/2 Histoire géographie et culture, 4/2 Système intitutionnel et politique, 2/2 Vivre dans la société française.
     - Mock exam generates all five themes before saving once. Any failure saves nothing.
     - One retrieval and one LLM call per theme. Chunks are grouped by section into one passage group per question. `sources` and `kind` are assigned in code.
     - `PREFER_SCHEDULED_QUESTIONS` was dropped from this step; Step 12 adds it when it has something to gate.
+    - Bug discovered after merge: Each question cites several unrelated sections. Step 9C added to address this.
 
 ---
 
-## (optional) Step 9B: Grounding + correctness gate (question critic)
+## ✅ (optional) Step 9B: Grounding + correctness gate (question critic)
 
 **Goal:** 
-- A verifier pass that rejects ungrounded or malformed MCQs before they reach the learner. 
+- A verifier pass that rejects ungrounded or malformed MCQs (multiple choice questions) before they reach the learner. 
 - This is primarily a quality/safety gate that improves each output at generation time.
 - It also leaves an accumulating trail: paired with Step 9's `prompt_version` stamp, persisted rejection reasons make "did that prompt edit actually help?" a query instead of an opinion.
 - It remains independent of the learner-facing self-improvement loops in Steps 12 and 13.
@@ -786,6 +787,39 @@ This addresses a silent failure mode that I discovered while implementing this s
   - Add a **Grounded question quality** bullet to the MVP Features list: generated questions pass a corpus-grounded correctness gate (a critic pass that rejects ungrounded, ambiguous, or multi-answer items) before they reach the learner. Frame it as grounding/safety, not self-improvement.
 
 - **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+    - The critic lives in its own module (`assessment/critic.py`). All prompts moved to `assessment/prompts.py` under one `PROMPT_VERSION`.
+    - The critic checks a whole theme batch in one call. Only failed questions are regenerated, at most `MAX_REFINE_ATTEMPTS = 2` times. The critic reuses `QUIZ_PROFILE`; no `CRITIC_PROFILE` was added.
+    - The critic is off by default. In the check-in run it rejected 0 of 25 questions, so it doubled the cost for no gain. Pass `critic=LlmCritic()` to turn it on.
+    - The check-in run showed the real problems were questions that mention "the passage" or "the fiche", and questions about the course sheets themselves. The generation prompt now forbids both (`quiz-v003`), and the critic checks for them when it is on. A rerun showed 0 of 25 questions with either problem.
+    - Two corpus claims conflict with outside sources (cousin marriage is "interdit"; the Commission "replaced" the Haute Autorité in 1957). The exam is built from this corpus, so it stays the source of truth.
+    - A quiz may come back short but never empty. A mock exam that cannot fill a theme raises `QuestionGenerationError` and saves nothing.
+
+---
+
+## Step 9C (bug): Precise question sources
+
+**Goal:** Each generated question cites only the section it was written from, so a missed question can re-teach the exact passage (Step 10B mistake-driven review).
+
+**Bug:** `_group_chunks` in `assessment/engine.py` deals every retrieved section round-robin into the `n` passage groups. With `_RETRIEVAL_K = 30`, a 5-question quiz gives each question 5 to 6 unrelated sections, mostly "objectifs-de-la-fiche" introductions. Every one of them lands in `Question.sources`, then in `MistakeEpisode.sources`, so re-teaching would point at the wrong pages. Found during the Step 9B check-in run.
+
+- **Test:** extend `tests/unit/assessment/test_engine.py`
+  - With retrieved chunks spanning more sections than `n`, each question's `sources` holds exactly one section, and the `n` sections used are the top-ranked distinct sections in retrieval order.
+  - Each passage group in the generation prompt contains only that section's chunks; lower-ranked sections are not sent.
+  - With fewer sections than `n`, sections are reused (current behavior) and each question still cites one section.
+- Fix `_group_chunks`: one distinct section per question, taken in retrieval (similarity) order; discard the remaining sections instead of merging them in.
+- Side benefit: the Step 9B critic sees only the passage a question came from, which makes its grounding check stricter.
+
+- Add an `--exam` option to the comparison script (`.claude/scratch/compare_critic.py`, local and not committed) so it can generate a mock exam. Quizzes only produce knowledge questions, and the 12 scenario questions have not been reviewed yet.
+
+- **Check In:** Rerun the comparison script on all themes, then with `--exam`. Confirm:
+  - Each question cites one relevant section.
+  - A batch no longer repeats a topic (the Step 9B run had two questions on the national motto, from overlapping passage groups).
+  - Scenario questions are clear, realistic, and have one defensible answer. If they are weak, try Opus for question generation (one-line change to `QUIZ_PROFILE`).
+  - If "objectifs-de-la-fiche" introductions still dominate the top-ranked sections, raise it with the user as a separate retrieval follow-up (query construction or filtering), not part of this fix.
+
+- **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
 
@@ -818,7 +852,8 @@ This addresses a silent failure mode that I discovered while implementing this s
     - `suggest_review_theme(user_id) -> Theme` - the demoted heuristic above.
     - `retrieve_corpus(theme, query) -> list[ContentChunk]` - wraps `retrieval.content.search`.
     - `teach(theme, focus) -> Explanation` - wraps `explanation.explain` (retains its empty-retrieval short-circuit).
-    - `generate_quiz(theme, n) -> list[Question]` and `score_answer(question_id, choice) -> bool` - wrap the Step 9 assessment engine (and the Step 9B correctness gate when enabled).
+    - `generate_quiz(theme, n) -> list[Question]` and `score_answer(question_id, choice) -> bool` - wrap the assessment engine and correctness gate (implemented in Step 9 and 9B).
+      - NB: `generate_quiz` returns a `Quiz` (scored via `Quiz.score`), not a `list[Question]`. With the critic on, it may raise `QuestionGenerationError` when every question is rejected; the tool must treat that like the empty-retrieval short-circuit, not fail the turn.
     - `read_learner_state(user_id) -> LearnerState` - wraps `memory.writer.get` (mastery, recent mistakes, `LearnerProfile.goal`).
     - `record_outcome(...)` - the **only** write tool; wraps `memory.writer.put_raw`, so every autonomous write still passes an allowlist and raises `MemoryNotAllowed` on any kind outside it. This is exactly why the allowlist exists: it is the safety boundary for an LLM that decides its own writes.
   - **Narrow the planner's write scope (new constant).** `memory/writer.py` currently defines `MEMORY_WRITE_ALLOWLIST = frozenset(MemoryKind)`, which is derived from the enum and therefore silently widens every time a new kind is added. That is the right list for in-process callers but the wrong list for an LLM. Add a second, **hand-enumerated** constant that `record_outcome` checks:
@@ -832,6 +867,7 @@ This addresses a silent failure mode that I discovered while implementing this s
   - **Mastery is derived, never written by the LLM.** `topic_mastery` is computed deterministically from `quiz_answers` by `update_mastery_node` (Step 10B) and is *not* in `PLANNER_WRITE_ALLOWLIST`. The planner's writes are restricted to episodic and semantic records (mistake episodes, session summaries). This closes the "the LLM grades its own homework" hole and is what makes Step 13's mastery-gain reward trustworthy: an agent that can both choose a teaching strategy and write its own score has no reward signal at all.
   - **Halt fallback.** When the loop hits `MAX_PLANNER_STEPS` without a final message, the turn does not error and does not surface a partial tool trace. It falls back to `suggest_review_theme` plus a plain `teach` turn on that theme, and records `halt_reason="max_steps"` on the trace. The learner sees a normal lesson; the operator sees the halt in `planner_trace`.
   - **Comprehension check after teach.** Instruct the planner in its system prompt to follow a `teach` call with a single `generate_quiz(theme, n=1)` drawn from the just-taught passage before ending the turn. This needs no new tool or business logic (the tools already compose), it closes the teach-assess loop inside one turn, and it gives Step 13's bandit a dense immediate reward instead of one that waits for the next quiz session. Test it as a prompt convention, not a hard code path: the planner may skip it when the learner asked a direct question.
+    - NB: With `n=1` a single critic rejection leaves nothing to ask. If `generate_quiz` raises `QuestionGenerationError`, end the turn after the lesson without the check rather than erroring.
   - Guardrails (state them; the tests above enforce them): bounded loop (`MAX_PLANNER_STEPS`) with the halt fallback above; writes only via `record_outcome` behind `PLANNER_WRITE_ALLOWLIST`; numeric mastery never LLM-written; facts only via the corpus-grounded `teach`/`generate_quiz` tools, which short-circuit on empty retrieval so the planner cannot free-associate; the untrusted learner message is interpolated only into the human turn, never the system prompt (Step 8's prompt-injection boundary).
 
 **Planner trace + insufficient-material telemetry**
@@ -875,6 +911,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `planner_node` (the tool-calling loop from `planner.py`), plus deterministic nodes the tools and the mock-exam path share: `mock_exam_node`, `update_mastery_node`, `save_session_summary_node`, `memory_writer_node`.
   - Each node is a plain function `(state) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate. The planner reaches that same business logic through its tool bindings, so there is one implementation of each capability, called either autonomously (Teach/Quiz) or deterministically (mock exam).
   - `mock_exam_node` logs every one of the 40 answers to `quiz_answers` (Step 9's rule) and then runs `update_mastery_node` like any other assessed path. The mock exam bypasses the *planner*, never the *logging*.
+    - NB: `generate_mock_exam` raises `QuestionGenerationError` when the critic cannot fill a theme, and saves nothing. `mock_exam_node` must handle it (e.g. retry once, then show a "try again" message) rather than crash the graph.
   - `update_mastery_node` is the **only** writer of `topic_mastery`, computing it deterministically from `quiz_answers`. It writes through the in-process `memory.writer.put`, not the planner's `record_outcome`. See the two-allowlist rule in Step 10A.
   - Mistake-driven review: when the planner (via `suggest_review_theme` / `read_learner_state`) targets a theme with an active `mistake_episode`, `retrieve_corpus` reconstructs the retrieval query from the source context recorded on the episode (theme at minimum; `page_slug`/`section_id` when recorded) in the corpus prefix style, so re-teaching pulls the exact passages the learner missed rather than a generic theme sample. `ContentChunk.chunk_index`/`content_hash` (Step 5) give those citations stable identity across sessions. The needed source context flows from Step 9 (`Question.sources`) into Step 7's `MistakeEpisode.sources`.
 - Create `src/civica/graph/graph.py`:

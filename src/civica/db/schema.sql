@@ -46,3 +46,14 @@ CREATE TABLE IF NOT EXISTS generated_questions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS generated_questions_theme_idx ON generated_questions(theme);
+
+CREATE TABLE IF NOT EXISTS question_rejections (
+  id BIGSERIAL PRIMARY KEY,
+  prompt_version TEXT NOT NULL,
+  theme TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  attempt INT NOT NULL,
+  rejected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS question_rejections_prompt_version_idx
+  ON question_rejections(prompt_version);
