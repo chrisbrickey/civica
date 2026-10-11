@@ -43,6 +43,7 @@ from tests.support.assessment import (
     RecordingQuestionStore,
     RecordingRejectionStore,
     RecordingRetriever,
+    grouped_generation_reply,
     make_content_chunk,
 )
 
@@ -52,9 +53,8 @@ from tests.support.assessment import (
 
 _USER_ID = UserId(uuid.UUID(int=42))
 _THEME = SYSTEME_INSTITUTIONNEL_ET_POLITIQUE
-_EXPECTED_PROMPT_VERSION = "quiz-v003"
+_EXPECTED_PROMPT_VERSION = "quiz-v004"
 _EXAM_SIZE = 40
-_SAMPLE_CORRECT_INDEX = 1
 
 # Quiz of three; the retriever yields three sections, so passage group i is chunk i.
 _QUIZ_SIZE = 3
@@ -111,12 +111,8 @@ def _passage(theme: Theme, index: int) -> str:
 
 
 def _generation_reply(*texts: str) -> str:
-    return json.dumps(
-        [
-            {"text": text, "options": SAMPLE_OPTIONS, "correct_index": _SAMPLE_CORRECT_INDEX}
-            for text in texts
-        ]
-    )
+    """Items naming groups 1..len(texts), in order."""
+    return grouped_generation_reply(*enumerate(texts, start=1))
 
 
 def _critic_reply(*verdicts: Verdict) -> str:
@@ -460,6 +456,42 @@ class TestCriticDisabled:
         ]
         assert fakes.rejection_store.rejections == []
         assert chat.invocation_count == 1
+
+
+class TestCriticSeesGroupMatchedQuestions:
+    """With the critic on, items still follow the group they name, and missing groups are retried."""
+
+    def test_out_of_order_reply_is_critiqued_and_returned_in_group_order(
+        self, fakes: _Fakes
+    ) -> None:
+        chat = _ScriptedChatModel(
+            replies=(
+                grouped_generation_reply((3, _THIRD_TEXT), (1, _FIRST_TEXT), (2, _UNGROUNDED_TEXT)),
+                _critic_reply(_PASS, _PASS, _PASS),
+            )
+        )
+
+        quiz = _quiz(fakes, chat, LlmCritic(chat))
+
+        assert [q.text for q in quiz.questions] == [_FIRST_TEXT, _UNGROUNDED_TEXT, _THIRD_TEXT]
+        assert [q.sources for q in quiz.questions] == [_sources(i) for i in range(_QUIZ_SIZE)]
+
+    def test_regeneration_missing_its_group_is_retried_once(self, fakes: _Fakes) -> None:
+        chat = _ScriptedChatModel(
+            replies=(
+                _generation_reply(_FIRST_TEXT, _UNGROUNDED_TEXT, _THIRD_TEXT),
+                _critic_reply(_PASS, _fail(_UNGROUNDED_REASON), _PASS),
+                _generation_reply(),
+                _generation_reply(_REGENERATED_TEXT),
+                _critic_reply(_PASS),
+            )
+        )
+
+        quiz = _quiz(fakes, chat, LlmCritic(chat))
+
+        assert [q.text for q in quiz.questions] == [_FIRST_TEXT, _REGENERATED_TEXT, _THIRD_TEXT]
+        assert quiz.questions[_FAILING_POSITION].sources == _sources(_FAILING_POSITION)
+        assert chat.invocation_count == 5
 
 
 # ---------------------------------------------------------------------------

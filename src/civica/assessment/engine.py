@@ -29,7 +29,12 @@ from civica.assessment.store import (
 )
 from civica.domain.question import Question, QuestionKind
 from civica.domain.source_ref import SourceRef
-from civica.domain.themes import EXAM_QUESTION_COUNTS, EXAM_SCENARIO_COUNTS, Theme
+from civica.domain.themes import (
+    EXAM_QUESTION_COUNTS,
+    EXAM_SCENARIO_COUNTS,
+    HISTOIRE_GEOGRAPHIE_ET_CULTURE,
+    Theme,
+)
 from civica.domain.user import UserId
 from civica.llm.client import QUIZ_PROFILE, get_chat_model
 from civica.progress.quiz_log import log_answer
@@ -45,20 +50,34 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+_RETRIEVAL_K = 40
+_MINIMUM_SIMILARITY = 0.3
+
 # Regenerations allowed for questions the critic rejects, after the first generation.
 MAX_REFINE_ATTEMPTS = 2
 
-# Enough chunks to fill up to 11 passage groups; the floor drops weakly related chunks.
-_RETRIEVAL_K = 30
-_MINIMUM_SIMILARITY = 0.3
+# Course-objective intros carry no civic facts to test.
+_OBJECTIVE_SECTION_IDS = frozenset({"objectif-de-la-fiche", "objectifs-de-la-fiche"})
 
 SectionKey = tuple[str, str]
+
+# The theme name is too broad to clear the similarity floor, so its sub-topics are searched
+# separately (these queries were chosen by measurement: 45 usable sections vs 7).
+_SUBTOPIC_QUERIES: dict[Theme, tuple[str, ...]] = {
+    HISTOIRE_GEOGRAPHIE_ET_CULTURE: (
+        "Histoire de France",
+        "Géographie de la France",
+        "Culture française",
+    ),
+}
+
 
 class _GeneratedItem(BaseModel):  # type: ignore[explicit-any]
     """One multiple choice question (MCQ) as the model returns it, validated at the edge."""
 
     model_config = ConfigDict(frozen=True)
 
+    group: int = Field(ge=1, strict=True)
     text: str = Field(min_length=1)
     options: tuple[str, str, str, str]
     correct_index: int = Field(ge=0, le=3)
@@ -72,22 +91,34 @@ def _grounded_search(query: str, theme: Theme | None) -> list[ContentChunk]:
     return search(query, theme, k=_RETRIEVAL_K, min_similarity=_MINIMUM_SIMILARITY)
 
 
-def _group_chunks(chunks: Sequence[ContentChunk], n: int) -> list[list[ContentChunk]]:
-    """Split chunks into n passage groups by distinct section, reusing sections if too few."""
+def _section_key(chunk: ContentChunk) -> SectionKey:
+    return (chunk.chunk.page_slug, chunk.chunk.section_id)
+
+
+def _sections(chunks: Sequence[ContentChunk]) -> list[list[ContentChunk]]:
+    """Group chunks into sections, in order of first appearance."""
     by_section: dict[SectionKey, list[ContentChunk]] = {}
     for chunk in chunks:
-        key = (chunk.chunk.page_slug, chunk.chunk.section_id)
-        by_section.setdefault(key, []).append(chunk)
-    sections = list(by_section.values())
+        by_section.setdefault(_section_key(chunk), []).append(chunk)
+    return list(by_section.values())
 
-    groups: list[list[ContentChunk]] = [[] for _ in range(n)]
-    if len(sections) >= n:
-        for i, section in enumerate(sections):
-            groups[i % n].extend(section)
-    else:
-        for i in range(n):
-            groups[i] = sections[i % len(sections)]
-    return groups
+
+def _interleave(per_query: Sequence[Sequence[list[ContentChunk]]]) -> list[ContentChunk]:
+    """Take sections round-robin by rank across queries; a section stays at its first position."""
+    seen: set[SectionKey] = set()
+    chunks: list[ContentChunk] = []
+    for rank in range(max(map(len, per_query), default=0)):
+        for sections in per_query:
+            if rank < len(sections) and _section_key(sections[rank][0]) not in seen:
+                seen.add(_section_key(sections[rank][0]))
+                chunks.extend(sections[rank])
+    return chunks
+
+
+def _group_chunks(chunks: Sequence[ContentChunk], n: int) -> list[list[ContentChunk]]:
+    """One section per group in retrieval order; extras dropped, reused if too few."""
+    sections = _sections(chunks)
+    return [sections[i % len(sections)] for i in range(n)]
 
 
 def _group_sources(group: Sequence[ContentChunk]) -> tuple[SourceRef, ...]:
@@ -119,15 +150,30 @@ def _build_messages(
     return [SystemMessage(content=PROMPTS["system"]), HumanMessage(content=human)]
 
 
-def _parse_items(reply: str, n: int) -> list[_GeneratedItem]:
-    """Parse the model reply (tolerating a code fence) and keep the first n items."""
+def _parse_items(reply: str) -> list[_GeneratedItem]:
+    """Parse the model reply, tolerating a code fence."""
     try:
-        items = _ITEMS_ADAPTER.validate_json(strip_code_fence(reply))
+        return _ITEMS_ADAPTER.validate_json(strip_code_fence(reply))
     except ValidationError as error:
         raise QuestionGenerationError(f"Model reply is not a valid question list: {error}") from error
-    if len(items) < n:
-        raise QuestionGenerationError(f"Model returned {len(items)} questions, expected {n}")
-    return items[:n]
+
+
+def _items_by_group(
+    theme: Theme,
+    groups: Sequence[Sequence[ContentChunk]],
+    kinds: Sequence[QuestionKind],
+    client: BaseChatModel,
+) -> dict[int, _GeneratedItem]:
+    """One model call; the first item naming each group 1..len(groups). Others are ignored."""
+    response = client.invoke(_build_messages(theme, groups, kinds))
+    if QUIZ_PROFILE.was_truncated(response):
+        logger.warning("Question generation for %r hit the token cap; reply may be cut off.", theme.slug)
+
+    matched: dict[int, _GeneratedItem] = {}
+    for item in _parse_items(response.text):
+        if item.group <= len(groups):
+            matched.setdefault(item.group, item)
+    return matched
 
 
 def _generate_batch(
@@ -136,23 +182,32 @@ def _generate_batch(
     kinds: Sequence[QuestionKind],
     client: BaseChatModel,
 ) -> list[Question]:
-    """One generation call: one question per group, in group order."""
-    response = client.invoke(_build_messages(theme, groups, kinds))
-    if QUIZ_PROFILE.was_truncated(response):
-        logger.warning("Question generation for %r hit the token cap; reply may be cut off.", theme.slug)
+    """One question per group, in group order; groups the model skipped get one retry call."""
+    matched = _items_by_group(theme, groups, kinds, client)
+    missing = [i for i in range(1, len(groups) + 1) if i not in matched]
+    if missing:
+        logger.warning("Model skipped groups %s for %r; retrying them once.", missing, theme.slug)
+        retried = _items_by_group(
+            theme, [groups[i - 1] for i in missing], [kinds[i - 1] for i in missing], client
+        )
+        for new, original in enumerate(missing, start=1):
+            if new in retried:
+                matched[original] = retried[new]
+        still_missing = [i for i in missing if i not in matched]
+        if still_missing:
+            raise QuestionGenerationError(f"Model returned no question for groups {still_missing} after a retry")
 
-    items = _parse_items(response.text, len(groups))
     try:
         return [
             Question(
                 theme=theme,
                 kind=kind,
-                text=item.text,
-                options=item.options,
-                correct_index=item.correct_index,
+                text=matched[number].text,
+                options=matched[number].options,
+                correct_index=matched[number].correct_index,
                 sources=_group_sources(group),
             )
-            for item, group, kind in zip(items, groups, kinds, strict=True)
+            for number, (group, kind) in enumerate(zip(groups, kinds, strict=True), start=1)
         ]
     except ValidationError as error:
         raise QuestionGenerationError(f"Generated question is invalid: {error}") from error
@@ -207,9 +262,11 @@ def _generate_for_theme(
     retriever: SearchFn,
     services: _Collaborators,
 ) -> tuple[Question, ...]:
-    chunks = retriever(theme.display_name_fr, theme)
+    queries = _SUBTOPIC_QUERIES.get(theme, (theme.display_name_fr,))
+    ranked = _interleave([_sections(retriever(query, theme)) for query in queries])
+    chunks = [c for c in ranked if c.chunk.section_id not in _OBJECTIVE_SECTION_IDS]
     if not chunks:
-        raise QuestionGenerationError(f"No corpus passages retrieved for theme {theme.slug!r}")
+        raise QuestionGenerationError(f"No testable corpus passages retrieved for theme {theme.slug!r}")
 
     groups = _group_chunks(chunks, n)
     kinds = _kinds(n, scenario_count)
