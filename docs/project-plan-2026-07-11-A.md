@@ -799,7 +799,7 @@ This addresses a silent failure mode that I discovered while implementing this s
 
 ---
 
-## Step 9C (bug): Precise question sources
+## ✅ Step 9C: Optimize retrieval to improve question generation
 
 **Goal:** Each generated question cites only the section it was written from, so a missed question can re-teach the exact passage.
 
@@ -826,6 +826,24 @@ This addresses a silent failure mode that I discovered while implementing this s
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+    - `_group_chunks` now gives each question one section in retrieval order. Lower-ranked sections are dropped; sections are still reused when there are fewer than `n`.
+    - Scenario questions are clear and each has one defensible answer, so there was no need to upgrade the model to Opus. A few are knowledge questions phrased as scenarios.
+    - Added filter on "objectif-de-la-fiche": 
+      - The first validation run confirmed that course-objective intros ("objectif-de-la-fiche", "objectifs-de-la-fiche") dominated the top-ranked sections (14 of 27 exam sources). 
+      - With one section per question, those questions had nothing factual to stand on: the critic rejected 7 exam questions and the mock exam failed.
+      - So a filter was added. The assessment engine drops those sections after retrieval. Teach retrieval is unchanged.
+      - Results of second validation run (after the filter was added): All 5 quizzes 5/5 (1 rejection in 25), mock exam built 40/40 (1 rejection), no objective sections cited.
+    - Tuned `_RETRIEVAL_K` from 30 to 40: "Droits et devoirs" had exactly 11 usable sections for 11 questions at k=30; k=40 gives it some buffer with a total of 16.
+    - Fixed question to passage alignment:
+      - The k=40 validation run showed the model writing two questions for one passage group and skipping a later one. Sources and kind were attached by position, so 9 of 11 "Droits et devoirs" questions cited the wrong section. The critic caught them, but it is off by default.
+      - To address this, the following updates were made. Each generated item now names its `group`. The engine attaches sources and kind by that number, ignores out-of-range and duplicate items, and retries skipped groups once before raising `QuestionGenerationError`. Prompt version bumped to `quiz-v004`.
+      - Results of the next validation run: all 5 quizzes 5/5 with 0 rejections, mock exam 40/40 with 1 rejection (a genuine grounding gap, not misalignment).
+    - Fixed "Histoire, géographie et culture" retrieving fewer than 8 content sections:
+      - Before this change,one section was reused. So the exam asked twice about the same topic. The query (the theme name) was too broad.
+      - Raising `_RETRIEVAL_K` to 80 would not help because of the 0.3 similarity cutoff. Making that cutoff more generous would hurt the relevance of every other theme.
+      - Histoire theme is now searched with three sub-topic queries ("Histoire de France", "Géographie de la France", "Culture française"), giving 45 usable sections instead of 7. Sections are interleaved round-robin across the queries so no single sub-topic fills the exam. Other themes keep one query.
+      - This does not mean that the Histoire theme might overlap with other themes because the corpus sources by theme are restricted for use by other themes.
+    - Final validation run: Histoire quiz of 8 had 8/8 with 0 rejections; mock exam 40/40 with 0 rejections and no reused section in any theme.
 
 ---
 
@@ -954,7 +972,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - A learner with no history for a theme reports 100% gap, not an error or an empty result.
   - Coverage is per user: one learner's history never appears in another's gaps.
 - Create `src/civica/reflection/coverage.py`:
-  - `get_coverage_gaps(user_id, theme) -> CoverageReport` - deterministic, no LLM. The universe of sections comes from `content_chunks`. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`. **Taught** coverage comes from `planner_trace` rows for the `teach`/`retrieve_corpus` tools, which is why Step 10A's trace table is a hard prerequisite for this part.
+  - `get_coverage_gaps(user_id, theme) -> CoverageReport` - deterministic, no LLM. The universe of sections comes from `content_chunks`, minus the course-objective sections that assessment skips (Step 9C), so they never show as gaps. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`. **Taught** coverage comes from `planner_trace` rows for the `teach`/`retrieve_corpus` tools, which is why Step 10A's trace table is a hard prerequisite for this part.
   - `CoverageReport` is a frozen pydantic model: `theme`, `covered: list[SourceRef]`, `gaps: list[SourceRef]`, `covered_fraction: float`.
 - Bind `get_coverage_gaps` as a planner tool so the planner can deliberately steer toward unseen material instead of re-teaching whatever retrieval happens to surface.
 

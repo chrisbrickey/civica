@@ -1,7 +1,7 @@
 """Shared collection of LLM prompts for the assessment pipeline."""
 
 # Bump PROMPT_VERSION whenever any prompt in PROMPTS changes. Stored with every question and rejection.
-PROMPT_VERSION = "quiz-v003"
+PROMPT_VERSION = "quiz-v004"
 
 PROMPTS: dict[str, str] = {
     "system": (
@@ -14,7 +14,8 @@ PROMPTS: dict[str, str] = {
         "Une question de connaissance porte sur un fait du passage. "
         "Une question de mise en situation decrit un cas concret a resoudre avec le passage. "
         "Reponds uniquement par un tableau JSON, sans texte autour, de la forme "
-        '[{"text": "...", "options": ["...", "...", "...", "..."], "correct_index": 0}]. '
+        '[{"group": 1, "text": "...", "options": ["...", "...", "...", "..."], "correct_index": 0}]. '
+        "group est le numero du groupe de passages sur lequel repose la question. "
         "correct_index est l'indice (0 a 3) de la bonne option."
     ),
     "human": (

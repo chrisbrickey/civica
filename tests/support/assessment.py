@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,13 @@ if TYPE_CHECKING:
 SAMPLE_OPTIONS = ("option-a", "option-b", "option-c", "option-d")
 SAMPLE_SOURCE = SourceRef(page_slug="sample-page", section_id="section-001")
 OPTION_COUNT = len(SAMPLE_OPTIONS)
+SAMPLE_CORRECT_INDEX = 1
 DEFAULT_SECTION_COUNT = 3
+
+# Course-objective intro sections; the only two section_id variants in the corpus.
+OBJECTIVE_SECTION_ID = "objectif-de-la-fiche"
+OBJECTIVES_SECTION_ID = "objectifs-de-la-fiche"
+OBJECTIVE_SECTION_IDS = (OBJECTIVE_SECTION_ID, OBJECTIVES_SECTION_ID)
 
 
 def make_question(
@@ -39,6 +46,21 @@ def make_question(
         correct_index=correct_index,
         sources=sources,
     )
+
+
+def generated_item(text: str, group: int) -> dict[str, object]:
+    """One well-formed question as the model returns it, naming its 1-based passage group."""
+    return {
+        "text": text,
+        "options": list(SAMPLE_OPTIONS),
+        "correct_index": SAMPLE_CORRECT_INDEX,
+        "group": group,
+    }
+
+
+def grouped_generation_reply(*items: tuple[int, str]) -> str:
+    """A generation reply listing (group, text) items in the given order."""
+    return json.dumps([generated_item(text, group) for group, text in items])
 
 
 def make_mock_exam_questions() -> tuple[Question, ...]:
@@ -130,26 +152,37 @@ class RecordingRejectionStore:
         return [r for rejections in self.saves for r in rejections]
 
 
-def make_content_chunk(theme: Theme, index: int) -> ContentChunk:
-    """One retrieved chunk in its own section, with text unique to (theme, index)."""
+def make_content_chunk(
+    theme: Theme, index: int, chunk_index: int = 0, section_id: str | None = None
+) -> ContentChunk:
+    """One retrieved chunk of section `index`, with text unique to (theme, index, chunk_index)."""
     return ContentChunk(
         chunk=Chunk(
             theme=theme,
             page_slug=f"sample-page-{index:03d}",
-            section_id=f"section-{index:03d}",
-            chunk_index=0,
-            content_hash=f"sample-hash-{theme.slug}-{index:03d}",
-            text=f"sample passage {index} about {theme.slug}.",
+            section_id=section_id if section_id is not None else f"section-{index:03d}",
+            chunk_index=chunk_index,
+            content_hash=f"sample-hash-{theme.slug}-{index:03d}-{chunk_index:03d}",
+            text=f"sample passage {index}.{chunk_index} about {theme.slug}.",
         ),
         similarity=0.9,
     )
 
 
 class RecordingRetriever:
-    """Fake SearchFn: records every (query, theme), returns chunks from distinct sections of that theme."""
+    """Fake SearchFn: records each (query, theme) and returns sections ranked 0, 1, ... for that theme.
 
-    def __init__(self, section_count: int = DEFAULT_SECTION_COUNT) -> None:
+    Chunks interleave across sections (s0c0, s1c0, ..., s0c1); `objective_sections` maps rank to objective ID."""
+
+    def __init__(
+        self,
+        section_count: int = DEFAULT_SECTION_COUNT,
+        chunks_per_section: int = 1,
+        objective_sections: Mapping[int, str] | None = None,
+    ) -> None:
         self.section_count = section_count
+        self.chunks_per_section = chunks_per_section
+        self.objective_sections = dict(objective_sections or {})
         self.calls: list[tuple[str, Theme | None]] = []
 
     def __call__(self, query: str, theme: Theme | None) -> list[ContentChunk]:
@@ -158,10 +191,104 @@ class RecordingRetriever:
         return self.chunks(theme)
 
     def chunks(self, theme: Theme) -> list[ContentChunk]:
-        return [make_content_chunk(theme, i) for i in range(self.section_count)]
+        """Every returned chunk, in retrieval (similarity) order."""
+        return [
+            self._chunk(theme, section, part)
+            for part in range(self.chunks_per_section)
+            for section in range(self.section_count)
+        ]
+
+    def section_chunks(self, theme: Theme, section: int) -> list[ContentChunk]:
+        """The chunks of the section ranked `section` (0 is the best match)."""
+        return [self._chunk(theme, section, part) for part in range(self.chunks_per_section)]
+
+    def objective_chunks(self, theme: Theme) -> list[ContentChunk]:
+        """Every chunk of the course-objective sections."""
+        return [c for rank in self.objective_sections for c in self.section_chunks(theme, rank)]
+
+    def content_source_refs(self, theme: Theme) -> list[SourceRef]:
+        """Distinct non-objective sections in retrieval rank order."""
+        objective = {_source_ref(c) for c in self.objective_chunks(theme)}
+        return [ref for ref in self.ranked_source_refs(theme) if ref not in objective]
+
+    def ranked_source_refs(self, theme: Theme) -> list[SourceRef]:
+        """Distinct sections in retrieval rank order."""
+        return list(dict.fromkeys(_source_ref(c) for c in self.chunks(theme)))
 
     def source_refs(self, theme: Theme) -> set[SourceRef]:
-        return {
-            SourceRef(page_slug=c.chunk.page_slug, section_id=c.chunk.section_id)
-            for c in self.chunks(theme)
-        }
+        return set(self.ranked_source_refs(theme))
+
+    def _chunk(self, theme: Theme, section: int, part: int) -> ContentChunk:
+        return make_content_chunk(theme, section, part, self.objective_sections.get(section))
+
+
+def _source_ref(chunk: ContentChunk) -> SourceRef:
+    return SourceRef(page_slug=chunk.chunk.page_slug, section_id=chunk.chunk.section_id)
+
+
+# A (query call index, rank) position in one theme's sub-topic search results.
+Slot = tuple[int, int]
+
+
+class QueryAwareRetriever:
+    """Fake SearchFn: call q of a theme returns distinct sections at slots (q, 0), (q, 1), ...
+
+    `shared_slots` makes a slot repeat another slot's section; `objective_slots` gives it an objective ID."""
+
+    def __init__(
+        self,
+        # Section count for each call in order; later calls get default_section_count.
+        sections_per_query: Sequence[int] = (),
+        default_section_count: int = DEFAULT_SECTION_COUNT,
+        shared_slots: Mapping[Slot, Slot] | None = None,
+        objective_slots: Mapping[Slot, str] | None = None,
+    ) -> None:
+        self.sections_per_query = tuple(sections_per_query)
+        self.default_section_count = default_section_count
+        self.shared_slots = dict(shared_slots or {})
+        self.objective_slots = dict(objective_slots or {})
+        self.calls: list[tuple[str, Theme | None]] = []
+
+    def __call__(self, query: str, theme: Theme | None) -> list[ContentChunk]:
+        assert theme is not None, "assessment retrieval must always be scoped to a theme"
+        call = self.call_count(theme)
+        self.calls.append((query, theme))
+        return [self._chunk(theme, (call, rank)) for rank in range(self.section_count(call))]
+
+    def call_count(self, theme: Theme) -> int:
+        return sum(1 for _, called in self.calls if called == theme)
+
+    def queries(self, theme: Theme) -> list[str]:
+        """The queries sent for `theme`, in call order."""
+        return [query for query, called in self.calls if called == theme]
+
+    def section_count(self, call: int) -> int:
+        if call < len(self.sections_per_query):
+            return self.sections_per_query[call]
+        return self.default_section_count
+
+    def slot_ref(self, slot: Slot) -> SourceRef:
+        """The section returned at `slot`, after any sharing or objective remapping."""
+        return _source_ref(self._chunk(_ANY_THEME, slot))
+
+    def slot_chunk(self, theme: Theme, slot: Slot) -> ContentChunk:
+        return self._chunk(theme, slot)
+
+    def _chunk(self, theme: Theme, slot: Slot) -> ContentChunk:
+        call, rank = self.shared_slots.get(slot, slot)
+        section_id = self.objective_slots.get(slot, f"section-r{rank:03d}")
+        return ContentChunk(
+            chunk=Chunk(
+                theme=theme,
+                page_slug=f"sample-page-q{call:02d}",
+                section_id=section_id,
+                chunk_index=0,
+                content_hash=f"sample-hash-{theme.slug}-q{call:02d}-{section_id}",
+                text=f"sample passage q{call}.r{rank} ({section_id}) about {theme.slug}.",
+            ),
+            similarity=0.9,
+        )
+
+
+# Section identity ignores theme, so slot_ref needs no theme from the caller.
+_ANY_THEME = DROITS_ET_DEVOIRS
