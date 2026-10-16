@@ -19,7 +19,7 @@ from civica.domain.themes import EXAM_QUESTION_COUNTS, HISTOIRE_GEOGRAPHIE_ET_CU
 from civica.domain.user import UserId
 from tests.support.assessment import (
     LoggedAnswer,
-    RecordingAnswerLogger,
+    FakeAnswerLogger,
     answers_with_correct_count,
     make_mock_exam_questions,
     make_question,
@@ -66,7 +66,7 @@ def quiz_answers(quiz_questions: tuple[Question, ...]) -> list[int]:
 
 
 @pytest.fixture()
-def quiz(quiz_questions: tuple[Question, ...], answer_logger: RecordingAnswerLogger) -> Quiz:
+def quiz(quiz_questions: tuple[Question, ...], answer_logger: FakeAnswerLogger) -> Quiz:
     return Quiz(user_id=_USER_ID, questions=quiz_questions, answer_logger=answer_logger)
 
 
@@ -77,7 +77,7 @@ def exam_questions() -> tuple[Question, ...]:
 
 @pytest.fixture()
 def mock_exam(
-    exam_questions: tuple[Question, ...], answer_logger: RecordingAnswerLogger
+    exam_questions: tuple[Question, ...], answer_logger: FakeAnswerLogger
 ) -> MockExam:
     return MockExam(user_id=_USER_ID, questions=exam_questions, answer_logger=answer_logger)
 
@@ -119,7 +119,7 @@ class TestQuizAnswerLogging:
         quiz: Quiz,
         quiz_questions: tuple[Question, ...],
         quiz_answers: list[int],
-        answer_logger: RecordingAnswerLogger,
+        answer_logger: FakeAnswerLogger,
     ) -> None:
         quiz.score(quiz_answers)
 
@@ -191,7 +191,7 @@ class TestMockExamAnswerLogging:
         self,
         mock_exam: MockExam,
         exam_questions: tuple[Question, ...],
-        answer_logger: RecordingAnswerLogger,
+        answer_logger: FakeAnswerLogger,
     ) -> None:
         answers = answers_with_correct_count(exam_questions, _JUST_PASSING_SCORE)
 
@@ -216,7 +216,7 @@ class TestAnswerCountMismatch:
         self,
         quiz: Quiz,
         quiz_answers: list[int],
-        answer_logger: RecordingAnswerLogger,
+        answer_logger: FakeAnswerLogger,
         delta: int,
     ) -> None:
         answers = quiz_answers[:delta] if delta < 0 else [*quiz_answers, 0]
@@ -231,7 +231,7 @@ class TestAnswerCountMismatch:
         self,
         mock_exam: MockExam,
         exam_questions: tuple[Question, ...],
-        answer_logger: RecordingAnswerLogger,
+        answer_logger: FakeAnswerLogger,
         delta: int,
     ) -> None:
         full = answers_with_correct_count(exam_questions, _PERFECT_SCORE)

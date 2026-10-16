@@ -1,4 +1,4 @@
-"""Shared builders and recording fakes for assessment tests (unit and integration)."""
+"""Shared builders and fakes for assessment tests (unit and integration)."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ class LoggedAnswer:
 
 
 @dataclass
-class RecordingAnswerLogger:
+class FakeAnswerLogger:
     """Fake AnswerLogger: records every answer instead of writing quiz_answers rows."""
 
     calls: list[LoggedAnswer] = field(default_factory=list)
@@ -121,7 +121,7 @@ class RecordingAnswerLogger:
 
 
 @dataclass
-class RecordingQuestionStore:
+class FakeQuestionStore:
     """Fake QuestionStore: records each save call as (questions, prompt_version)."""
 
     saves: list[tuple[tuple[Question, ...], str]] = field(default_factory=list)
@@ -139,7 +139,7 @@ class RecordingQuestionStore:
 
 
 @dataclass
-class RecordingRejectionStore:
+class FakeRejectionStore:
     """Fake RejectionStore: records each save call instead of writing rejected_questions rows."""
 
     saves: list[tuple[Rejection, ...]] = field(default_factory=list)
@@ -169,7 +169,7 @@ def make_content_chunk(
     )
 
 
-class RecordingRetriever:
+class FakeRetriever:
     """Fake SearchFn: records each (query, theme) and returns sections ranked 0, 1, ... for that theme.
 
     Chunks interleave across sections (s0c0, s1c0, ..., s0c1); `objective_sections` maps rank to objective ID."""
@@ -230,7 +230,7 @@ def _source_ref(chunk: ContentChunk) -> SourceRef:
 Slot = tuple[int, int]
 
 
-class QueryAwareRetriever:
+class FakeQueryAwareRetriever:
     """Fake SearchFn: call q of a theme returns distinct sections at slots (q, 0), (q, 1), ...
 
     `shared_slots` makes a slot repeat another slot's section; `objective_slots` gives it an objective ID."""

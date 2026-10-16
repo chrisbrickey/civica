@@ -13,7 +13,7 @@ from civica.domain.source_ref import SourceRef
 from civica.domain.themes import PRINCIPES_ET_VALEURS_DE_LA_REPUBLIQUE, Theme
 from civica.domain.user import UserId
 from civica.retrieval.content import ContentChunk
-from tests.support.assessment import OPTION_COUNT, RecordingAnswerLogger, RecordingQuestionStore
+from tests.support.assessment import OPTION_COUNT, FakeAnswerLogger, FakeQuestionStore
 
 _USER_ID = UserId(uuid.UUID(int=42))
 _SAMPLE_THEME = PRINCIPES_ET_VALEURS_DE_LA_REPUBLIQUE
@@ -51,7 +51,7 @@ def _stub_retriever(query: str, theme: Theme | None) -> list[ContentChunk]:
 @pytest.mark.external
 def test_generate_quiz_returns_one_question_per_group_from_real_model() -> None:
     """Real API call: generation succeeds only if every item names a valid group."""
-    question_store = RecordingQuestionStore()
+    question_store = FakeQuestionStore()
 
     quiz = generate_quiz(
         _USER_ID,
@@ -59,7 +59,7 @@ def test_generate_quiz_returns_one_question_per_group_from_real_model() -> None:
         _QUIZ_SIZE,
         retriever=_stub_retriever,
         question_store=question_store,
-        answer_logger=RecordingAnswerLogger(),
+        answer_logger=FakeAnswerLogger(),
     )
 
     expected_sources = [

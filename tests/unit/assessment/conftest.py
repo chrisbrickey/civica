@@ -2,9 +2,9 @@
 
 import pytest
 
-from tests.support.assessment import RecordingAnswerLogger
+from tests.support.assessment import FakeAnswerLogger
 
 
 @pytest.fixture()
-def answer_logger() -> RecordingAnswerLogger:
-    return RecordingAnswerLogger()
+def answer_logger() -> FakeAnswerLogger:
+    return FakeAnswerLogger()
