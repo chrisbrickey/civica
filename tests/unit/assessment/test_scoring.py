@@ -2,7 +2,6 @@
 
 No network calls. No DB spinup."""
 
-import uuid
 
 import pytest
 
@@ -16,7 +15,6 @@ from civica.assessment.scoring import (
 )
 from civica.domain.question import Question
 from civica.domain.themes import EXAM_QUESTION_COUNTS, HISTOIRE_GEOGRAPHIE_ET_CULTURE
-from civica.domain.user import UserId
 from tests.support.assessment import (
     LoggedAnswer,
     FakeAnswerLogger,
@@ -25,12 +23,12 @@ from tests.support.assessment import (
     make_question,
     wrong_index,
 )
+from tests.support.users import USER_ID
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_USER_ID = UserId(uuid.UUID(int=42))
 _QUIZ_THEME = HISTOIRE_GEOGRAPHIE_ET_CULTURE
 _EXAM_SIZE = 40
 _EXPECTED_PASS_MARK = 32
@@ -67,7 +65,7 @@ def quiz_answers(quiz_questions: tuple[Question, ...]) -> list[int]:
 
 @pytest.fixture()
 def quiz(quiz_questions: tuple[Question, ...], answer_logger: FakeAnswerLogger) -> Quiz:
-    return Quiz(user_id=_USER_ID, questions=quiz_questions, answer_logger=answer_logger)
+    return Quiz(user_id=USER_ID, questions=quiz_questions, answer_logger=answer_logger)
 
 
 @pytest.fixture()
@@ -79,7 +77,7 @@ def exam_questions() -> tuple[Question, ...]:
 def mock_exam(
     exam_questions: tuple[Question, ...], answer_logger: FakeAnswerLogger
 ) -> MockExam:
-    return MockExam(user_id=_USER_ID, questions=exam_questions, answer_logger=answer_logger)
+    return MockExam(user_id=USER_ID, questions=exam_questions, answer_logger=answer_logger)
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +123,7 @@ class TestQuizAnswerLogging:
 
         expected = [
             LoggedAnswer(
-                user_id=_USER_ID,
+                user_id=USER_ID,
                 theme=q.theme,
                 question_id=q.question_id,
                 chosen_index=chosen,
@@ -199,7 +197,7 @@ class TestMockExamAnswerLogging:
 
         assert len(answer_logger.calls) == _EXAM_SIZE
         for call, question, chosen in zip(answer_logger.calls, exam_questions, answers, strict=True):
-            assert call.user_id == _USER_ID
+            assert call.user_id == USER_ID
             assert call.theme == question.theme
             assert call.question_id == question.question_id
             assert call.chosen_index == chosen

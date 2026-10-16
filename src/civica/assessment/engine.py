@@ -16,7 +16,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from civica.assessment.critic import CritiqueFn
-from civica.assessment.errors import QuestionGenerationError
+from civica.assessment.errors import InsufficientMaterialError, QuestionGenerationError
 from civica.assessment.prompts import PROMPT_VERSION, PROMPTS
 from civica.assessment.replies import strip_code_fence
 from civica.assessment.scoring import AnswerLogger, MockExam, Quiz
@@ -266,7 +266,7 @@ def _generate_for_theme(
     ranked = _interleave([_sections(retriever(query, theme)) for query in queries])
     chunks = [c for c in ranked if c.chunk.section_id not in _OBJECTIVE_SECTION_IDS]
     if not chunks:
-        raise QuestionGenerationError(f"No testable corpus passages retrieved for theme {theme.slug!r}")
+        raise InsufficientMaterialError(f"No testable corpus passages retrieved for theme {theme.slug!r}")
 
     groups = _group_chunks(chunks, n)
     kinds = _kinds(n, scenario_count)

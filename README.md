@@ -255,6 +255,7 @@ civica/
   │     ├── domain/             # pure business logic, no I/O
   │     ├── embeddings/         # embedding client shared by ingestion and retrieval
   │     ├── explanation/        # corpus-grounded explanations for learner questions
+  │     ├── graph/              # autonomous planner and its review-theme heuristic
   │     ├── ingestion/          # corpus chunking and persistence into pgvector
   │     ├── llm/                # chat-model factory shared by generation engines
   │     ├── memory/             # orchestration of short and long-term memory

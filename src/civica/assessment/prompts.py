@@ -1,4 +1,6 @@
-"""Shared collection of LLM prompts for the assessment pipeline."""
+"""Shared collection of LLM prompts for the assessment pipeline.
+
+A prompt's language reflects the desired language of the LLM output."""
 
 # Bump PROMPT_VERSION whenever any prompt in PROMPTS changes. Stored with every question and rejection.
 PROMPT_VERSION = "quiz-v004"

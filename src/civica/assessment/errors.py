@@ -3,3 +3,7 @@
 
 class QuestionGenerationError(Exception):
     """Raised when questions cannot be generated, so nothing is displayed or persisted."""
+
+
+class InsufficientMaterialError(QuestionGenerationError):
+    """Raised when retrieval yields no testable passages for a theme."""

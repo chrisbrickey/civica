@@ -54,6 +54,9 @@ EXPLANATION_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=2048)
 # could risk cutting off the generated questions, but this would raise QuestionGenerationError so it would not fail silently.
 QUIZ_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=8192)
 
+# Sized for short tool-calling turns: tool arguments and a brief reply, not long generation.
+PLANNER_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=1024)
+
 _clients: dict[ChatProfile, BaseChatModel] = {}
 
 

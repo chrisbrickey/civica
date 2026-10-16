@@ -4,17 +4,10 @@ No network calls. No DB spinup."""
 
 import json
 import socket
-import uuid
 from collections import Counter
 from dataclasses import dataclass, replace
-from typing import Any
 
 import pytest
-from langchain_core.callbacks import CallbackManagerForLLMRun
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import PrivateAttr
 
 from civica.assessment.engine import (
     PROMPT_VERSION,
@@ -22,6 +15,7 @@ from civica.assessment.engine import (
     generate_mock_exam,
     generate_quiz,
 )
+from civica.assessment.errors import InsufficientMaterialError
 from civica.assessment.scoring import MOCK_EXAM_TIME_LIMIT_SECONDS, MockExam, Quiz
 from civica.domain.question import Question, QuestionKind
 from civica.domain.themes import (
@@ -32,27 +26,30 @@ from civica.domain.themes import (
     Theme,
 )
 from civica.domain.source_ref import SourceRef
-from civica.domain.user import UserId
 from civica.retrieval.content import SearchFn
 from tests.support.assessment import (
+    MAX_ITEMS_PER_CALL,
     OBJECTIVE_SECTION_IDS,
     OPTION_COUNT,
     SAMPLE_OPTIONS,
     FakeQueryAwareRetriever,
     FakeAnswerLogger,
+    FakeChatModel,
     FakeQuestionStore,
     FakeRejectionStore,
     FakeRetriever,
     Slot,
     generated_item,
+    generated_item_text,
     grouped_generation_reply,
+    reject_all_critic,
 )
+from tests.support.users import USER_ID
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_USER_ID = UserId(uuid.UUID(int=42))
 _THEME = SYSTEME_INSTITUTIONNEL_ET_POLITIQUE
 _QUIZ_SIZE = 3
 _DEFAULT_QUIZ_SIZE = 5
@@ -61,15 +58,13 @@ _EXAM_KNOWLEDGE_TOTAL = 28
 _EXAM_SCENARIO_TOTAL = 12
 _THEME_COUNT = len(EXAM_QUESTION_COUNTS)
 
-# Largest per-theme count in the exam; the fake model returns this many items by default.
-_MAX_ITEMS_PER_CALL = max(EXAM_QUESTION_COUNTS.values())
 _TOO_FEW_ITEMS = 2
 
 _FEWER_SECTIONS_THAN_QUESTIONS = 2
 _MORE_SECTIONS_THAN_QUESTIONS = 7
 _CHUNKS_PER_SECTION = 2
 # Exceeds every per-theme exam count, so each theme must drop its lower-ranked sections.
-_MORE_SECTIONS_THAN_ANY_THEME = _MAX_ITEMS_PER_CALL + 2
+_MORE_SECTIONS_THAN_ANY_THEME = MAX_ITEMS_PER_CALL + 2
 
 # Course-objective sections ranked first and third, ahead of and between content sections.
 _OBJECTIVE_RANKS = (0, 2)
@@ -110,10 +105,6 @@ _EXAM_FIRST_COUNT = EXAM_QUESTION_COUNTS[_EXAM_FIRST_THEME]
 _EXAM_FIRST_KINDS = [QuestionKind.KNOWLEDGE] * (
     _EXAM_FIRST_COUNT - EXAM_SCENARIO_COUNTS[_EXAM_FIRST_THEME]
 ) + [QuestionKind.SCENARIO] * EXAM_SCENARIO_COUNTS[_EXAM_FIRST_THEME]
-
-
-def _item_text(call_index: int, item_index: int) -> str:
-    return f"sample-generated-question-{call_index:02d}-{item_index:02d}"
 
 
 # Each payload is a single well-formed JSON reply whose items break the required shape.
@@ -164,72 +155,12 @@ def _retry_text(group: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-class _FakeChatModel(BaseChatModel):  # type: ignore[explicit-any]
-    """Fake chat model: replies with well-formed items naming groups 1, 2, ... in order.
-
-    Item texts embed the call index, so each call yields distinct but reproducible questions.
-    `items_by_call` overrides the item count per call; `replies` scripts exact replies by call
-    index (later calls fall back to the default); `canned_text` replaces every reply.
-    """
-
-    items_per_call: int = _MAX_ITEMS_PER_CALL
-    items_by_call: tuple[int, ...] = ()
-    replies: tuple[str, ...] = ()
-    canned_text: str | None = None
-
-    _received: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
-
-    @property
-    def invocation_count(self) -> int:
-        return len(self._received)
-
-    def system_text(self, call_index: int) -> str:
-        """The system message content of one call."""
-        return "\n".join(
-            str(m.content) for m in self._received[call_index] if isinstance(m, SystemMessage)
-        )
-
-    def human_text(self, call_index: int) -> str:
-        """The human message content of one call."""
-        return "\n".join(
-            str(m.content) for m in self._received[call_index] if isinstance(m, HumanMessage)
-        )
-
-    def _reply_for(self, call_index: int) -> str:
-        if self.canned_text is not None:
-            return self.canned_text
-        if call_index < len(self.replies):
-            return self.replies[call_index]
-        count = (
-            self.items_by_call[call_index]
-            if call_index < len(self.items_by_call)
-            else self.items_per_call
-        )
-        return grouped_generation_reply(*((i + 1, _item_text(call_index, i)) for i in range(count)))
-
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        call_index = len(self._received)
-        self._received.append(messages)
-        message = AIMessage(content=self._reply_for(call_index))
-        return ChatResult(generations=[ChatGeneration(message=message)])
-
-    @property
-    def _llm_type(self) -> str:
-        return "sample-fake-chat-model"
-
-
 @dataclass(frozen=True)
 class _Fakes:
     """Every injected dependency of the engine; swap one with dataclasses.replace."""
 
     retriever: FakeRetriever
-    chat_client: _FakeChatModel
+    chat_client: FakeChatModel
     question_store: FakeQuestionStore
     rejection_store: FakeRejectionStore
     answer_logger: FakeAnswerLogger
@@ -244,7 +175,7 @@ class _Fakes:
 def fakes(answer_logger: FakeAnswerLogger) -> _Fakes:
     return _Fakes(
         retriever=FakeRetriever(),
-        chat_client=_FakeChatModel(),
+        chat_client=FakeChatModel(),
         question_store=FakeQuestionStore(),
         rejection_store=FakeRejectionStore(),
         answer_logger=answer_logger,
@@ -276,7 +207,7 @@ def _quiz(
 ) -> Quiz:
     """A quiz on `theme`; `retriever` overrides the fakes' default retriever."""
     return generate_quiz(
-        _USER_ID,
+        USER_ID,
         theme,
         n,
         retriever=retriever if retriever is not None else fakes.retriever,
@@ -290,7 +221,7 @@ def _quiz(
 
 def _exam(fakes: _Fakes, *, retriever: SearchFn | None = None) -> MockExam:
     return generate_mock_exam(
-        _USER_ID,
+        USER_ID,
         retriever=retriever if retriever is not None else fakes.retriever,
         chat_client=fakes.chat_client,
         question_store=fakes.question_store,
@@ -303,7 +234,7 @@ def _exam(fakes: _Fakes, *, retriever: SearchFn | None = None) -> MockExam:
 def _quiz_with_default_critic(fakes: _Fakes) -> Quiz:
     """Like _quiz, but leaves the critic argument out so its default applies."""
     return generate_quiz(
-        _USER_ID,
+        USER_ID,
         _THEME,
         _QUIZ_SIZE,
         retriever=fakes.retriever,
@@ -317,7 +248,7 @@ def _quiz_with_default_critic(fakes: _Fakes) -> Quiz:
 def _exam_with_default_critic(fakes: _Fakes) -> MockExam:
     """Like _exam, but leaves the critic argument out so its default applies."""
     return generate_mock_exam(
-        _USER_ID,
+        USER_ID,
         retriever=fakes.retriever,
         chat_client=fakes.chat_client,
         question_store=fakes.question_store,
@@ -354,7 +285,7 @@ class TestQuizSize:
 
     def test_defaults_to_five_questions(self, fakes: _Fakes) -> None:
         quiz = generate_quiz(
-            _USER_ID,
+            USER_ID,
             _THEME,
             retriever=fakes.retriever,
             chat_client=fakes.chat_client,
@@ -373,7 +304,7 @@ class TestQuizSize:
             assert question.kind is QuestionKind.KNOWLEDGE
 
     def test_quiz_belongs_to_the_requesting_user(self, fakes: _Fakes) -> None:
-        assert _quiz(fakes).user_id == _USER_ID
+        assert _quiz(fakes).user_id == USER_ID
 
 
 class TestQuizRetrievalQuery:
@@ -483,7 +414,7 @@ class TestExtraItemsTruncated:
     def test_keeps_first_n_groups_in_order(self, fakes: _Fakes) -> None:
         questions = _quiz(fakes).questions
 
-        assert [q.text for q in questions] == [_item_text(0, i) for i in range(_QUIZ_SIZE)]
+        assert [q.text for q in questions] == [generated_item_text(0, i) for i in range(_QUIZ_SIZE)]
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +568,7 @@ class TestHistoireSectionInterleaving:
     def test_no_usable_sub_topic_results_raises_without_calling_model(self, fakes: _Fakes) -> None:
         retriever = FakeQueryAwareRetriever(default_section_count=0)
 
-        with pytest.raises(QuestionGenerationError):
+        with pytest.raises(InsufficientMaterialError):
             _quiz(fakes, theme=_HISTOIRE, retriever=retriever)
 
         assert fakes.chat_client.invocation_count == 0
@@ -723,7 +654,7 @@ class TestOnlyCourseObjectiveSectionsRetrieved:
     def test_quiz_raises_without_calling_model(self, fakes: _Fakes) -> None:
         fakes = replace(fakes, retriever=_all_objective_retriever())
 
-        with pytest.raises(QuestionGenerationError):
+        with pytest.raises(InsufficientMaterialError):
             _quiz(fakes)
 
         assert fakes.chat_client.invocation_count == 0
@@ -732,7 +663,7 @@ class TestOnlyCourseObjectiveSectionsRetrieved:
     def test_mock_exam_raises_without_calling_model(self, fakes: _Fakes) -> None:
         fakes = replace(fakes, retriever=_all_objective_retriever())
 
-        with pytest.raises(QuestionGenerationError):
+        with pytest.raises(InsufficientMaterialError):
             _exam(fakes)
 
         assert fakes.chat_client.invocation_count == 0
@@ -780,7 +711,7 @@ class TestCriticOffByDefault:
     def test_quiz_returns_and_saves_every_generated_question(self, fakes: _Fakes) -> None:
         quiz = _quiz_with_default_critic(fakes)
 
-        expected = [_item_text(0, i) for i in range(_QUIZ_SIZE)]
+        expected = [generated_item_text(0, i) for i in range(_QUIZ_SIZE)]
         assert [q.text for q in quiz.questions] == expected
         assert [q.text for q in fakes.question_store.saved_questions] == expected
         assert fakes.rejection_store.rejections == []
@@ -835,8 +766,8 @@ class TestQuestionPersistence:
 
     def test_same_payload_yields_the_same_question_keys(self, fakes: _Fakes) -> None:
         """Stable content-hash keys are what make the store's upsert idempotent across runs."""
-        first = _quiz(replace(fakes, chat_client=_FakeChatModel())).questions
-        second = _quiz(replace(fakes, chat_client=_FakeChatModel())).questions
+        first = _quiz(replace(fakes, chat_client=FakeChatModel())).questions
+        second = _quiz(replace(fakes, chat_client=FakeChatModel())).questions
 
         assert [q.question_id for q in first] == [q.question_id for q in second]
 
@@ -847,7 +778,7 @@ class TestQuestionPersistence:
 
 
 def _scripted(fakes: _Fakes, *replies: str) -> _Fakes:
-    return replace(fakes, chat_client=_FakeChatModel(replies=replies))
+    return replace(fakes, chat_client=FakeChatModel(replies=replies))
 
 
 class TestItemsMatchedByGroupNumber:
@@ -1011,12 +942,16 @@ class TestMissingGroupsRetried:
 
 
 class TestNoRetrievedMaterial:
-    """Without grounding passages the model is never called and nothing is saved."""
+    """Without grounding passages the model is never called, nothing is saved, and the
+    error is InsufficientMaterialError so callers can tell it apart from other failures."""
+
+    def test_insufficient_material_is_a_question_generation_error(self) -> None:
+        assert issubclass(InsufficientMaterialError, QuestionGenerationError)
 
     def test_quiz_raises_without_calling_model(self, fakes: _Fakes) -> None:
         fakes = replace(fakes, retriever=FakeRetriever(section_count=0))
 
-        with pytest.raises(QuestionGenerationError):
+        with pytest.raises(InsufficientMaterialError):
             _quiz(fakes)
 
         assert fakes.chat_client.invocation_count == 0
@@ -1025,18 +960,41 @@ class TestNoRetrievedMaterial:
     def test_mock_exam_raises_without_calling_model(self, fakes: _Fakes) -> None:
         fakes = replace(fakes, retriever=FakeRetriever(section_count=0))
 
-        with pytest.raises(QuestionGenerationError):
+        with pytest.raises(InsufficientMaterialError):
             _exam(fakes)
 
         assert fakes.chat_client.invocation_count == 0
         assert fakes.question_store.saved_questions == []
 
 
+
+class TestCriticRejectsEverything:
+    """A quiz the critic empties is a generation failure, not a lack of material."""
+
+    def test_quiz_raises_question_generation_error_not_insufficient_material(
+        self, fakes: _Fakes
+    ) -> None:
+        with pytest.raises(QuestionGenerationError) as raised:
+            generate_quiz(
+                USER_ID,
+                _THEME,
+                _QUIZ_SIZE,
+                retriever=fakes.retriever,
+                chat_client=fakes.chat_client,
+                question_store=fakes.question_store,
+                answer_logger=fakes.answer_logger,
+                critic=reject_all_critic,
+                rejection_store=fakes.rejection_store,
+            )
+
+        assert not isinstance(raised.value, InsufficientMaterialError)
+        assert fakes.question_store.saved_questions == []
+
 class TestInvalidModelReply:
     """A reply that cannot be turned into the requested questions raises and saves nothing."""
 
     def test_malformed_json_raises(self, fakes: _Fakes) -> None:
-        fakes = replace(fakes, chat_client=_FakeChatModel(canned_text=_MALFORMED_JSON))
+        fakes = replace(fakes, chat_client=FakeChatModel(canned_text=_MALFORMED_JSON))
 
         with pytest.raises(QuestionGenerationError):
             _quiz(fakes)
@@ -1045,7 +1003,7 @@ class TestInvalidModelReply:
 
     @pytest.mark.parametrize("payload", _WRONG_SHAPE_PAYLOADS.values(), ids=_WRONG_SHAPE_PAYLOADS.keys())
     def test_wrong_item_shape_raises(self, fakes: _Fakes, payload: str) -> None:
-        fakes = replace(fakes, chat_client=_FakeChatModel(canned_text=payload))
+        fakes = replace(fakes, chat_client=FakeChatModel(canned_text=payload))
 
         with pytest.raises(QuestionGenerationError):
             _quiz(fakes)
@@ -1054,7 +1012,7 @@ class TestInvalidModelReply:
 
     def test_too_few_items_raises(self, fakes: _Fakes) -> None:
         """Too few items, then nothing on the retry: still short, so it raises."""
-        fakes = replace(fakes, chat_client=_FakeChatModel(items_by_call=(_TOO_FEW_ITEMS, 0)))
+        fakes = replace(fakes, chat_client=FakeChatModel(items_by_call=(_TOO_FEW_ITEMS, 0)))
 
         with pytest.raises(QuestionGenerationError):
             _quiz(fakes)
@@ -1064,10 +1022,10 @@ class TestInvalidModelReply:
 
     def test_mock_exam_failing_on_last_theme_saves_nothing(self, fakes: _Fakes) -> None:
         """A half-built exam must not leak its earlier themes into the bank."""
-        healthy_calls = (_MAX_ITEMS_PER_CALL,) * (_THEME_COUNT - 1)
+        healthy_calls = (MAX_ITEMS_PER_CALL,) * (_THEME_COUNT - 1)
         # The last theme returns nothing on its first call and on its retry.
         fakes = replace(
-            fakes, chat_client=_FakeChatModel(items_by_call=(*healthy_calls, 0, 0))
+            fakes, chat_client=FakeChatModel(items_by_call=(*healthy_calls, 0, 0))
         )
 
         with pytest.raises(QuestionGenerationError):
@@ -1091,7 +1049,7 @@ class TestGeneratedAssessmentLogsAnswers:
 
         calls = fakes.answer_logger.calls
         assert [call.question_id for call in calls] == [q.question_id for q in quiz.questions]
-        assert all(call.user_id == _USER_ID for call in calls)
+        assert all(call.user_id == USER_ID for call in calls)
 
     def test_mock_exam_score_logs_all_forty_answers(self, fakes: _Fakes) -> None:
         exam = _exam(fakes)
