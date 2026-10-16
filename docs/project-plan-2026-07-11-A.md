@@ -868,6 +868,9 @@ This addresses a silent failure mode that I discovered while implementing this s
   - Allowlist guard end-to-end: a fake model that tries to write memory through `record_outcome` with a kind outside `PLANNER_WRITE_ALLOWLIST` causes `MemoryNotAllowed` to surface (the planner cannot smuggle arbitrary writes past the boundary).
   - Mastery guard specifically: a fake model that tries to write `topic_mastery` through `record_outcome` raises `MemoryNotAllowed`, even though that kind is a legitimate target for the in-process `memory.writer.put` used by `update_mastery_node`. The two allowlists must be observably different.
   - Grounding guard: a fake model that calls `teach`/`generate_quiz` for a theme whose fake retriever returns `[]` gets the insufficient-material short-circuit (Step 8), not a fabricated lesson.
+- **Test:** extend `tests/integration/memory/test_writer.py` (integration: real `PostgresStore`, matching the existing `put`/`get` coverage)
+  - `list_records` returns every record past the store's default page size, scoped to the requesting user.
+  - `put_planner` writes an allowlisted kind and raises `MemoryNotAllowed` for `topic_mastery` without touching the store.
 - Create `src/civica/graph/planner.py`:
   - A tool-calling node: bind the tool set to `get_chat_model()`, and in a bounded loop let the model choose the next tool until it emits a final response. This is the "LLM decides its own next step" core, replacing the fixed teach/quiz branch. `MAX_PLANNER_STEPS` (small constant) caps the loop to bound cost and prevent runaway.
   - **Tool set (thin bindings over existing engines - no new business logic):**
@@ -901,8 +904,12 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - A turn halted at `MAX_PLANNER_STEPS` records `halt_reason="max_steps"`; a normally-terminating turn records `halt_reason="final_message"`.
   - An empty-retrieval short-circuit increments the insufficient-material counter with the query and theme that failed.
   - Use an injected fake trace writer (same seam convention as `retriever`/`chat_client`); no DB in the unit test.
+- **Test:** `tests/integration/graph/test_trace.py` (integration: test database, like every other DB writer)
+  - `record_step` and `record_gap` round-trip their rows, including `tool_args` as JSONB and `prompt_version`.
+  - `planner_trace` rows are readable by `user_id` + `thread_id`, in step order; `user_id` must reference an existing user.
+- **Test:** extend `tests/integration/db/test_migrate.py`: `planner_trace` and `retrieval_gaps` exist after migration, and re-running the migration stays idempotent.
 - Extend `src/civica/db/schema.sql` with two small append-only tables (idempotent):
-  - `planner_trace` (`id BIGSERIAL`, `user_id UUID REFERENCES users(user_id)`, `thread_id TEXT`, `step_index INT`, `tool_name TEXT`, `tool_args JSONB`, `halt_reason TEXT`, `created_at TIMESTAMPTZ DEFAULT NOW()`).
+  - `planner_trace` (`id BIGSERIAL`, `user_id UUID REFERENCES users(user_id)`, `thread_id TEXT`, `step_index INT`, `tool_name TEXT`, `tool_args JSONB`, `halt_reason TEXT`, `prompt_version TEXT` (`PLANNER_PROMPTS.version`), `created_at TIMESTAMPTZ DEFAULT NOW()`).
   - `retrieval_gaps` (`id BIGSERIAL`, `theme TEXT`, `query TEXT`, `occurred_at TIMESTAMPTZ DEFAULT NOW()`) written on every empty-retrieval short-circuit. Recurring rows point at corpus, chunking, or query-construction gaps: this is the self-improvement signal for the retrieval layer itself, and it is the one signal nothing else in the plan captures.
 - Create `src/civica/graph/trace.py` with a thin `record_step(...)` / `record_gap(...)` pair following the optional-connection convention. No business logic; these are append-only writers.
 - Trace rows are operator data, not learner memory. They live in plain SQL tables, never in the LangGraph store, so they stay outside the memory allowlist entirely.
@@ -914,6 +921,12 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+    - Router: tests inject an `InMemoryStore` instead of stubbing `get`. New `list_records` reads all of a user's mistake episodes. Remaining ties go to official exam order.
+    - `score_answer` was dropped so the LLM cannot invent answers to inflate mastery. Scoring will happen deterministically after the learner answers.
+    - `user_id` is bound by the caller instead of a tool argument.
+    - `record_outcome` checks `PLANNER_WRITE_ALLOWLIST` and then validates the value. `MemoryNotAllowed` ends the turn; other bad tool arguments go back to the model.
+    - New `InsufficientMaterialError` separates retrieval gaps from critic rejections.
+    - Extra guardrails: quiz size capped at 10, correct answers hidden from the model, and `MAX_PLANNER_STEPS = 6` with a fallback lesson.
 
 ---
 
@@ -925,15 +938,23 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Integration test using real `explanation`/`assessment` code but fake Claude + fake retriever (no network; writes real `quiz_answers` and store rows). Drive the graph through the planner-backed Teach/Quiz flow for a test user with a fake model that emits a realistic tool-call sequence, and assert:
     - A quiz answer written through the graph appears in the raw `quiz_answers` table.
     - `topic_mastery` for the answered theme is updated (via `memory_writer_node`, respecting the allowlist).
-    - `memory_writer` runs before the graph terminates regardless of the planner's path (assert the store row exists after any successful turn).
+    - `memory_writer` runs before the graph terminates regardless of the planner's path, including a turn halted at `MAX_PLANNER_STEPS` (assert the store row exists after any successful turn).
+    - The planner runs on `default_planner_deps()` with only the chat models faked, so the default retrievers (including `retrieve_corpus`) and the Postgres-backed stores are exercised against the test database.
     - The deterministic mock exam path produces 40 questions and reports pass/fail (this path bypasses the planner).
     - **The mock exam path writes 40 `quiz_answers` rows** and `topic_mastery` moves for every theme the exam covered. A mock exam that scores without logging would silently discard the densest signal the system gets.
     - `planner_trace` rows exist for the turn, in tool-call order, and are readable by `user_id` + `thread_id`.
+    - A turn whose retrieval comes back empty writes a `retrieval_gaps` row with its theme and query.
+    - Checkpointer resume: a second invocation on the same `thread_id` sees the state saved by the first (Step 11 relies on this).
+    - Mock exam failure: when the critic cannot fill a theme, `mock_exam_node` retries once, then returns a "try again" message, saving no questions and no `quiz_answers` rows.
+    - Forbidden write: a planner turn that attempts a `topic_mastery` write through `record_outcome` leaves the store untouched, records `halt_reason="forbidden_write"` in `planner_trace`, and the learner gets the fallback lesson rather than an error.
+- **Test (external):** `tests/integration/graph/test_planner_external.py`, marked `@pytest.mark.external`, needs `ANTHROPIC_API_KEY`. One contract test: real Claude with the planner's tools bound returns tool calls matching the tool schemas and ends the turn with a final message.
 - Create `src/civica/graph/nodes.py`:
   - `planner_node` (the tool-calling loop from `planner.py`), plus deterministic nodes the tools and the mock-exam path share: `mock_exam_node`, `update_mastery_node`, `save_session_summary_node`, `memory_writer_node`.
+    - `planner_node` catches `MemoryNotAllowed` from the planner, adds `HaltReason.FORBIDDEN_WRITE` (`"forbidden_write"`) to the trace, and serves the same fallback lesson as a `max_steps` halt. Writes stay fail-closed; the learner never sees an error.
   - Each node is a plain function `(state) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate. The planner reaches that same business logic through its tool bindings, so there is one implementation of each capability, called either autonomously (Teach/Quiz) or deterministically (mock exam).
   - `mock_exam_node` logs every one of the 40 answers to `quiz_answers` (Step 9's rule) and then runs `update_mastery_node` like any other assessed path. The mock exam bypasses the *planner*, never the *logging*.
     - NB: `generate_mock_exam` raises `QuestionGenerationError` when the critic cannot fill a theme, and saves nothing. `mock_exam_node` must handle it (e.g. retry once, then show a "try again" message) rather than crash the graph.
+  - `score_answer_node` scores the learner's submitted choice deterministically and logs it to `quiz_answers`. The planner has no scoring tool (Step 10A), so the model never supplies or scores an answer.
   - `update_mastery_node` is the **only** writer of `topic_mastery`, computing it deterministically from `quiz_answers`. It writes through the in-process `memory.writer.put`, not the planner's `record_outcome`. See the two-allowlist rule in Step 10A.
   - Mistake-driven review: when the planner (via `suggest_review_theme` / `read_learner_state`) targets a theme with an active `mistake_episode`, `retrieve_corpus` reconstructs the retrieval query from the source context recorded on the episode (theme at minimum; `page_slug`/`section_id` when recorded) in the corpus prefix style, so re-teaching pulls the exact passages the learner missed rather than a generic theme sample. `ContentChunk.chunk_index`/`content_hash` (Step 5) give those citations stable identity across sessions. The needed source context flows from Step 9 (`Question.sources`) into Step 7's `MistakeEpisode.sources`.
 - Create `src/civica/graph/graph.py`:

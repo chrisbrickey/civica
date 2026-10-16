@@ -4,7 +4,6 @@ No network calls. No DB spinup."""
 
 import json
 import string
-import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,7 +34,6 @@ from civica.domain.themes import (
     SYSTEME_INSTITUTIONNEL_ET_POLITIQUE,
     Theme,
 )
-from civica.domain.user import UserId
 from civica.retrieval.content import ContentChunk
 from tests.support.assessment import (
     SAMPLE_OPTIONS,
@@ -46,12 +44,12 @@ from tests.support.assessment import (
     grouped_generation_reply,
     make_content_chunk,
 )
+from tests.support.users import USER_ID
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_USER_ID = UserId(uuid.UUID(int=42))
 _THEME = SYSTEME_INSTITUTIONNEL_ET_POLITIQUE
 _EXPECTED_PROMPT_VERSION = "quiz-v004"
 _EXAM_SIZE = 40
@@ -271,7 +269,7 @@ def always_failing_chat() -> _FakeChatModel:
 
 def _quiz(fakes: _Fakes, chat: _FakeChatModel, critic: CritiqueFn | None) -> Quiz:
     return generate_quiz(
-        _USER_ID,
+        USER_ID,
         _THEME,
         _QUIZ_SIZE,
         retriever=fakes.retriever,
@@ -285,7 +283,7 @@ def _quiz(fakes: _Fakes, chat: _FakeChatModel, critic: CritiqueFn | None) -> Qui
 
 def _exam(fakes: _Fakes, critic: CritiqueFn) -> MockExam:
     return generate_mock_exam(
-        _USER_ID,
+        USER_ID,
         retriever=fakes.retriever,
         chat_client=_FakeChatModel(fallback_items=_EXAM_MAX_ITEMS_PER_CALL),
         question_store=fakes.question_store,
