@@ -72,7 +72,7 @@ def _make_content_chunk(text: str, page_slug: str, similarity: float = 0.9) -> C
     )
 
 
-class _RecordingRetriever:
+class _FakeRetriever:
     """Fake SearchFn: records the (query, theme) it was called with, returns a fixed result."""
 
     def __init__(self, result: list[ContentChunk]) -> None:
@@ -84,7 +84,7 @@ class _RecordingRetriever:
         return self.result
 
 
-class _RecordingChatModel(BaseChatModel):  # type: ignore[explicit-any]
+class _FakeChatModel(BaseChatModel):  # type: ignore[explicit-any]
     """Fake chat model: records every prompt it receives, returns a canned AIMessage.
 
     Content and metadata are settable so tests can exercise block-structured and truncated responses.
@@ -118,7 +118,7 @@ class _RecordingChatModel(BaseChatModel):  # type: ignore[explicit-any]
 
     @property
     def _llm_type(self) -> str:
-        return "sample-recording-chat-model"
+        return "sample-fake-chat-model"
 
 
 # ---------------------------------------------------------------------------
@@ -157,18 +157,18 @@ def sample_chunks() -> list[ContentChunk]:
 
 
 @pytest.fixture()
-def retriever(sample_chunks: list[ContentChunk]) -> _RecordingRetriever:
-    return _RecordingRetriever(sample_chunks)
+def retriever(sample_chunks: list[ContentChunk]) -> _FakeRetriever:
+    return _FakeRetriever(sample_chunks)
 
 
 @pytest.fixture()
-def empty_retriever() -> _RecordingRetriever:
-    return _RecordingRetriever([])
+def empty_retriever() -> _FakeRetriever:
+    return _FakeRetriever([])
 
 
 @pytest.fixture()
-def chat_client() -> _RecordingChatModel:
-    return _RecordingChatModel()
+def chat_client() -> _FakeChatModel:
+    return _FakeChatModel()
 
 
 @pytest.fixture()
@@ -202,8 +202,8 @@ class TestPromptGrounding:
 
     def test_prompt_contains_every_retrieved_passage(
         self,
-        retriever: _RecordingRetriever,
-        chat_client: _RecordingChatModel,
+        retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
     ) -> None:
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
@@ -218,8 +218,8 @@ class TestSystemMessageContract:
 
     def test_system_message_contains_grounding_contract(
         self,
-        retriever: _RecordingRetriever,
-        chat_client: _RecordingChatModel,
+        retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
     ) -> None:
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
@@ -229,8 +229,8 @@ class TestSystemMessageContract:
 
     def test_system_message_contains_english_output_contract(
         self,
-        retriever: _RecordingRetriever,
-        chat_client: _RecordingChatModel,
+        retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
     ) -> None:
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
@@ -244,8 +244,8 @@ class TestPromptInjectionBoundary:
 
     def test_user_question_is_in_human_message_and_not_in_system_message(
         self,
-        retriever: _RecordingRetriever,
-        chat_client: _RecordingChatModel,
+        retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
     ) -> None:
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
@@ -263,8 +263,8 @@ class TestExplanationResult:
     def test_returns_model_text_and_retrieved_chunks(
         self,
         sample_chunks: list[ContentChunk],
-        retriever: _RecordingRetriever,
-        chat_client: _RecordingChatModel,
+        retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
     ) -> None:
         result = explain(
             _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client
@@ -276,10 +276,10 @@ class TestExplanationResult:
 
     def test_reads_only_the_text_block_of_a_block_structured_response(
         self,
-        retriever: _RecordingRetriever,
+        retriever: _FakeRetriever,
     ) -> None:
         """A thinking block alongside the answer must not leak into the learner's text."""
-        chat_client = _RecordingChatModel(canned_content=_BLOCK_STRUCTURED_CONTENT)
+        chat_client = _FakeChatModel(canned_content=_BLOCK_STRUCTURED_CONTENT)
 
         result = explain(
             _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client
@@ -293,10 +293,10 @@ class TestTruncatedResponse:
 
     def test_warns_when_the_provider_stopped_at_the_token_cap(
         self,
-        retriever: _RecordingRetriever,
+        retriever: _FakeRetriever,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        chat_client = _RecordingChatModel(canned_metadata=_TRUNCATED_METADATA)
+        chat_client = _FakeChatModel(canned_metadata=_TRUNCATED_METADATA)
 
         with caplog.at_level(logging.WARNING):
             explain(
@@ -307,10 +307,10 @@ class TestTruncatedResponse:
 
     def test_does_not_warn_when_the_response_finished_normally(
         self,
-        retriever: _RecordingRetriever,
+        retriever: _FakeRetriever,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        chat_client = _RecordingChatModel(canned_metadata=_COMPLETE_METADATA)
+        chat_client = _FakeChatModel(canned_metadata=_COMPLETE_METADATA)
 
         with caplog.at_level(logging.WARNING):
             explain(
@@ -327,8 +327,8 @@ class TestRetrieverInvocation:
 
     def test_retriever_called_with_raw_question_and_theme(
         self,
-        retriever: _RecordingRetriever,
-        chat_client: _RecordingChatModel,
+        retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
     ) -> None:
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
@@ -340,8 +340,8 @@ class TestEmptyRetrieval:
 
     def test_empty_retrieval_returns_insufficient_material_without_calling_model(
         self,
-        empty_retriever: _RecordingRetriever,
-        chat_client: _RecordingChatModel,
+        empty_retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
     ) -> None:
         result = explain(
             _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=empty_retriever, chat_client=chat_client
@@ -360,9 +360,9 @@ class TestSimilarityFloor:
         self,
         below_floor_chunk: ContentChunk,
         above_floor_chunk: ContentChunk,
-        chat_client: _RecordingChatModel,
+        chat_client: _FakeChatModel,
     ) -> None:
-        retriever = _RecordingRetriever([below_floor_chunk, above_floor_chunk])
+        retriever = _FakeRetriever([below_floor_chunk, above_floor_chunk])
 
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
@@ -374,9 +374,9 @@ class TestSimilarityFloor:
         self,
         below_floor_chunk: ContentChunk,
         above_floor_chunk: ContentChunk,
-        chat_client: _RecordingChatModel,
+        chat_client: _FakeChatModel,
     ) -> None:
-        retriever = _RecordingRetriever([below_floor_chunk, above_floor_chunk])
+        retriever = _FakeRetriever([below_floor_chunk, above_floor_chunk])
 
         result = explain(
             _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client
@@ -388,10 +388,10 @@ class TestSimilarityFloor:
     def test_chunk_at_exact_floor_is_kept(
         self,
         boundary_chunk: ContentChunk,
-        chat_client: _RecordingChatModel,
+        chat_client: _FakeChatModel,
     ) -> None:
         """The floor is inclusive: similarity == MINIMUM_SIMILARITY passes."""
-        retriever = _RecordingRetriever([boundary_chunk])
+        retriever = _FakeRetriever([boundary_chunk])
 
         result = explain(
             _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client
@@ -404,10 +404,10 @@ class TestSimilarityFloor:
     def test_all_below_floor_returns_insufficient_material_without_calling_model(
         self,
         below_floor_chunk: ContentChunk,
-        chat_client: _RecordingChatModel,
+        chat_client: _FakeChatModel,
     ) -> None:
         """When every retrieved chunk is below the floor, explain() short-circuits like empty retrieval."""
-        retriever = _RecordingRetriever([below_floor_chunk])
+        retriever = _FakeRetriever([below_floor_chunk])
 
         result = explain(
             _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client

@@ -38,11 +38,11 @@ from tests.support.assessment import (
     OBJECTIVE_SECTION_IDS,
     OPTION_COUNT,
     SAMPLE_OPTIONS,
-    QueryAwareRetriever,
-    RecordingAnswerLogger,
-    RecordingQuestionStore,
-    RecordingRejectionStore,
-    RecordingRetriever,
+    FakeQueryAwareRetriever,
+    FakeAnswerLogger,
+    FakeQuestionStore,
+    FakeRejectionStore,
+    FakeRetriever,
     Slot,
     generated_item,
     grouped_generation_reply,
@@ -164,7 +164,7 @@ def _retry_text(group: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-class _RecordingChatModel(BaseChatModel):  # type: ignore[explicit-any]
+class _FakeChatModel(BaseChatModel):  # type: ignore[explicit-any]
     """Fake chat model: replies with well-formed items naming groups 1, 2, ... in order.
 
     Item texts embed the call index, so each call yields distinct but reproducible questions.
@@ -221,18 +221,18 @@ class _RecordingChatModel(BaseChatModel):  # type: ignore[explicit-any]
 
     @property
     def _llm_type(self) -> str:
-        return "sample-recording-chat-model"
+        return "sample-fake-chat-model"
 
 
 @dataclass(frozen=True)
 class _Fakes:
     """Every injected dependency of the engine; swap one with dataclasses.replace."""
 
-    retriever: RecordingRetriever
-    chat_client: _RecordingChatModel
-    question_store: RecordingQuestionStore
-    rejection_store: RecordingRejectionStore
-    answer_logger: RecordingAnswerLogger
+    retriever: FakeRetriever
+    chat_client: _FakeChatModel
+    question_store: FakeQuestionStore
+    rejection_store: FakeRejectionStore
+    answer_logger: FakeAnswerLogger
 
 
 # ---------------------------------------------------------------------------
@@ -241,12 +241,12 @@ class _Fakes:
 
 
 @pytest.fixture()
-def fakes(answer_logger: RecordingAnswerLogger) -> _Fakes:
+def fakes(answer_logger: FakeAnswerLogger) -> _Fakes:
     return _Fakes(
-        retriever=RecordingRetriever(),
-        chat_client=_RecordingChatModel(),
-        question_store=RecordingQuestionStore(),
-        rejection_store=RecordingRejectionStore(),
+        retriever=FakeRetriever(),
+        chat_client=_FakeChatModel(),
+        question_store=FakeQuestionStore(),
+        rejection_store=FakeRejectionStore(),
         answer_logger=answer_logger,
     )
 
@@ -409,7 +409,7 @@ class TestQuizSources:
         """Question i cites the i-th best matching section; lower-ranked sections are not cited."""
         fakes = replace(
             fakes,
-            retriever=RecordingRetriever(
+            retriever=FakeRetriever(
                 section_count=_MORE_SECTIONS_THAN_QUESTIONS, chunks_per_section=_CHUNKS_PER_SECTION
             ),
         )
@@ -422,7 +422,7 @@ class TestQuizSources:
     def test_fewer_sections_than_questions_still_fills_the_batch(self, fakes: _Fakes) -> None:
         """Sections are reused in rank order when too few, and each question still cites one."""
         fakes = replace(
-            fakes, retriever=RecordingRetriever(section_count=_FEWER_SECTIONS_THAN_QUESTIONS)
+            fakes, retriever=FakeRetriever(section_count=_FEWER_SECTIONS_THAN_QUESTIONS)
         )
 
         questions = _quiz(fakes, n=_DEFAULT_QUIZ_SIZE).questions
@@ -440,7 +440,7 @@ class TestQuizPassageGroups:
     @pytest.fixture()
     def ranked_fakes(self, fakes: _Fakes) -> _Fakes:
         """Multi-chunk sections whose chunks interleave in retrieval order."""
-        retriever = RecordingRetriever(
+        retriever = FakeRetriever(
             section_count=_MORE_SECTIONS_THAN_QUESTIONS, chunks_per_section=_CHUNKS_PER_SECTION
         )
         return replace(fakes, retriever=retriever)
@@ -516,7 +516,7 @@ class TestMockExamStructure:
 
     def test_each_question_cites_one_top_ranked_section(self, fakes: _Fakes) -> None:
         fakes = replace(
-            fakes, retriever=RecordingRetriever(section_count=_MORE_SECTIONS_THAN_ANY_THEME)
+            fakes, retriever=FakeRetriever(section_count=_MORE_SECTIONS_THAN_ANY_THEME)
         )
 
         questions = _exam(fakes).questions
@@ -557,13 +557,13 @@ class TestMockExamCalls:
 # ---------------------------------------------------------------------------
 
 
-def _slot_sources(retriever: QueryAwareRetriever, *slots: Slot) -> list[tuple[SourceRef, ...]]:
+def _slot_sources(retriever: FakeQueryAwareRetriever, *slots: Slot) -> list[tuple[SourceRef, ...]]:
     """The expected one-section sources of questions written from these (query, rank) slots."""
     return [(retriever.slot_ref(slot),) for slot in slots]
 
 
 def _histoire_quiz_sources(
-    fakes: _Fakes, retriever: QueryAwareRetriever, n: int = _HISTOIRE_QUIZ_SIZE
+    fakes: _Fakes, retriever: FakeQueryAwareRetriever, n: int = _HISTOIRE_QUIZ_SIZE
 ) -> list[tuple[SourceRef, ...]]:
     return [q.sources for q in _quiz(fakes, n, theme=_HISTOIRE, retriever=retriever).questions]
 
@@ -572,7 +572,7 @@ class TestHistoireSubTopicQueries:
     """Histoire is too broad for one query, so it is searched by several distinct sub-topics."""
 
     def test_quiz_runs_several_distinct_theme_scoped_queries(self, fakes: _Fakes) -> None:
-        retriever = QueryAwareRetriever()
+        retriever = FakeQueryAwareRetriever()
 
         _quiz(fakes, theme=_HISTOIRE, retriever=retriever)
 
@@ -583,7 +583,7 @@ class TestHistoireSubTopicQueries:
         assert len(set(queries)) == len(queries)
 
     def test_other_theme_quiz_still_runs_one_query(self, fakes: _Fakes) -> None:
-        retriever = QueryAwareRetriever()
+        retriever = FakeQueryAwareRetriever()
 
         _quiz(fakes, retriever=retriever)
 
@@ -597,7 +597,7 @@ class TestHistoireSectionInterleaving:
     Expected sources are (query, rank) slots over three queries of three sections each."""
 
     def test_questions_take_sections_round_robin_by_rank(self, fakes: _Fakes) -> None:
-        retriever = QueryAwareRetriever()
+        retriever = FakeQueryAwareRetriever()
 
         sources = _histoire_quiz_sources(fakes, retriever)
 
@@ -605,7 +605,7 @@ class TestHistoireSectionInterleaving:
 
     def test_exhausted_query_is_skipped_in_later_rounds(self, fakes: _Fakes) -> None:
         # The first sub-topic search has a single section; the others have the default count.
-        retriever = QueryAwareRetriever(sections_per_query=(1,))
+        retriever = FakeQueryAwareRetriever(sections_per_query=(1,))
 
         sources = _histoire_quiz_sources(fakes, retriever)
 
@@ -613,7 +613,7 @@ class TestHistoireSectionInterleaving:
 
     def test_shared_section_is_used_once_at_its_first_position(self, fakes: _Fakes) -> None:
         # Query 1's top section is the same as query 0's second section.
-        retriever = QueryAwareRetriever(shared_slots={(1, 0): (0, 1)})
+        retriever = FakeQueryAwareRetriever(shared_slots={(1, 0): (0, 1)})
 
         sources = _histoire_quiz_sources(fakes, retriever)
 
@@ -626,7 +626,7 @@ class TestHistoireSectionInterleaving:
         self, fakes: _Fakes, section_id: str
     ) -> None:
         objective_slots = {(0, 0): section_id, (1, 1): section_id}
-        retriever = QueryAwareRetriever(objective_slots=objective_slots)
+        retriever = FakeQueryAwareRetriever(objective_slots=objective_slots)
 
         sources = _histoire_quiz_sources(fakes, retriever)
 
@@ -635,7 +635,7 @@ class TestHistoireSectionInterleaving:
         assert section_id not in cited_ids
 
     def test_no_usable_sub_topic_results_raises_without_calling_model(self, fakes: _Fakes) -> None:
-        retriever = QueryAwareRetriever(default_section_count=0)
+        retriever = FakeQueryAwareRetriever(default_section_count=0)
 
         with pytest.raises(QuestionGenerationError):
             _quiz(fakes, theme=_HISTOIRE, retriever=retriever)
@@ -644,7 +644,7 @@ class TestHistoireSectionInterleaving:
         assert fakes.question_store.saved_questions == []
 
     def test_mock_exam_histoire_questions_cite_distinct_sections(self, fakes: _Fakes) -> None:
-        retriever = QueryAwareRetriever(default_section_count=_SECTIONS_PER_SUBTOPIC)
+        retriever = FakeQueryAwareRetriever(default_section_count=_SECTIONS_PER_SUBTOPIC)
 
         questions = _exam(fakes, retriever=retriever).questions
 
@@ -658,18 +658,18 @@ class TestHistoireSectionInterleaving:
 # ---------------------------------------------------------------------------
 
 
-def _objective_retriever(section_id: str, section_count: int) -> RecordingRetriever:
+def _objective_retriever(section_id: str, section_count: int) -> FakeRetriever:
     """Multi-chunk sections where _OBJECTIVE_RANKS are course-objective sections."""
-    return RecordingRetriever(
+    return FakeRetriever(
         section_count=section_count,
         chunks_per_section=_CHUNKS_PER_SECTION,
         objective_sections=dict.fromkeys(_OBJECTIVE_RANKS, section_id),
     )
 
 
-def _all_objective_retriever() -> RecordingRetriever:
+def _all_objective_retriever() -> FakeRetriever:
     """Every retrieved section is a course-objective section, mixing both ID variants."""
-    return RecordingRetriever(
+    return FakeRetriever(
         section_count=_ALL_OBJECTIVE_SECTION_COUNT,
         objective_sections=dict(enumerate(OBJECTIVE_SECTION_IDS)),
     )
@@ -835,8 +835,8 @@ class TestQuestionPersistence:
 
     def test_same_payload_yields_the_same_question_keys(self, fakes: _Fakes) -> None:
         """Stable content-hash keys are what make the store's upsert idempotent across runs."""
-        first = _quiz(replace(fakes, chat_client=_RecordingChatModel())).questions
-        second = _quiz(replace(fakes, chat_client=_RecordingChatModel())).questions
+        first = _quiz(replace(fakes, chat_client=_FakeChatModel())).questions
+        second = _quiz(replace(fakes, chat_client=_FakeChatModel())).questions
 
         assert [q.question_id for q in first] == [q.question_id for q in second]
 
@@ -847,7 +847,7 @@ class TestQuestionPersistence:
 
 
 def _scripted(fakes: _Fakes, *replies: str) -> _Fakes:
-    return replace(fakes, chat_client=_RecordingChatModel(replies=replies))
+    return replace(fakes, chat_client=_FakeChatModel(replies=replies))
 
 
 class TestItemsMatchedByGroupNumber:
@@ -871,7 +871,7 @@ class TestItemsMatchedByGroupNumber:
         reversed_reply = grouped_generation_reply(*((g, _group_text(g)) for g in reversed(groups)))
         fakes = replace(
             _scripted(fakes, reversed_reply),
-            retriever=RecordingRetriever(section_count=_MORE_SECTIONS_THAN_ANY_THEME),
+            retriever=FakeRetriever(section_count=_MORE_SECTIONS_THAN_ANY_THEME),
         )
 
         questions = _exam(fakes).questions
@@ -963,7 +963,7 @@ class TestMissingGroupsRetried:
                 grouped_generation_reply(*((g, _group_text(g)) for g in range(1, last))),
                 grouped_generation_reply((1, _retry_text(last))),
             ),
-            retriever=RecordingRetriever(section_count=_MORE_SECTIONS_THAN_ANY_THEME),
+            retriever=FakeRetriever(section_count=_MORE_SECTIONS_THAN_ANY_THEME),
         )
 
     def test_retried_scenario_group_keeps_scenario_kind(self, fakes: _Fakes) -> None:
@@ -1014,7 +1014,7 @@ class TestNoRetrievedMaterial:
     """Without grounding passages the model is never called and nothing is saved."""
 
     def test_quiz_raises_without_calling_model(self, fakes: _Fakes) -> None:
-        fakes = replace(fakes, retriever=RecordingRetriever(section_count=0))
+        fakes = replace(fakes, retriever=FakeRetriever(section_count=0))
 
         with pytest.raises(QuestionGenerationError):
             _quiz(fakes)
@@ -1023,7 +1023,7 @@ class TestNoRetrievedMaterial:
         assert fakes.question_store.saved_questions == []
 
     def test_mock_exam_raises_without_calling_model(self, fakes: _Fakes) -> None:
-        fakes = replace(fakes, retriever=RecordingRetriever(section_count=0))
+        fakes = replace(fakes, retriever=FakeRetriever(section_count=0))
 
         with pytest.raises(QuestionGenerationError):
             _exam(fakes)
@@ -1036,7 +1036,7 @@ class TestInvalidModelReply:
     """A reply that cannot be turned into the requested questions raises and saves nothing."""
 
     def test_malformed_json_raises(self, fakes: _Fakes) -> None:
-        fakes = replace(fakes, chat_client=_RecordingChatModel(canned_text=_MALFORMED_JSON))
+        fakes = replace(fakes, chat_client=_FakeChatModel(canned_text=_MALFORMED_JSON))
 
         with pytest.raises(QuestionGenerationError):
             _quiz(fakes)
@@ -1045,7 +1045,7 @@ class TestInvalidModelReply:
 
     @pytest.mark.parametrize("payload", _WRONG_SHAPE_PAYLOADS.values(), ids=_WRONG_SHAPE_PAYLOADS.keys())
     def test_wrong_item_shape_raises(self, fakes: _Fakes, payload: str) -> None:
-        fakes = replace(fakes, chat_client=_RecordingChatModel(canned_text=payload))
+        fakes = replace(fakes, chat_client=_FakeChatModel(canned_text=payload))
 
         with pytest.raises(QuestionGenerationError):
             _quiz(fakes)
@@ -1054,7 +1054,7 @@ class TestInvalidModelReply:
 
     def test_too_few_items_raises(self, fakes: _Fakes) -> None:
         """Too few items, then nothing on the retry: still short, so it raises."""
-        fakes = replace(fakes, chat_client=_RecordingChatModel(items_by_call=(_TOO_FEW_ITEMS, 0)))
+        fakes = replace(fakes, chat_client=_FakeChatModel(items_by_call=(_TOO_FEW_ITEMS, 0)))
 
         with pytest.raises(QuestionGenerationError):
             _quiz(fakes)
@@ -1067,7 +1067,7 @@ class TestInvalidModelReply:
         healthy_calls = (_MAX_ITEMS_PER_CALL,) * (_THEME_COUNT - 1)
         # The last theme returns nothing on its first call and on its retry.
         fakes = replace(
-            fakes, chat_client=_RecordingChatModel(items_by_call=(*healthy_calls, 0, 0))
+            fakes, chat_client=_FakeChatModel(items_by_call=(*healthy_calls, 0, 0))
         )
 
         with pytest.raises(QuestionGenerationError):

@@ -45,10 +45,10 @@ def _load_isolated_embedder_module(name: str) -> ModuleType:
     return module
 
 
-def _recording_client(constructions: list[str]) -> type:
+def _fake_client(constructions: list[str]) -> type:
     """A fake OpenAIEmbeddings that records the model it was built with."""
 
-    class _RecordingOpenAIEmbeddings:
+    class _FakeOpenAIEmbeddings:
         def __init__(self, model: str) -> None:
             constructions.append(model)
 
@@ -58,7 +58,7 @@ def _recording_client(constructions: list[str]) -> type:
         def embed_query(self, text: str) -> list[float]:
             return _SAMPLE_QUERY_VECTOR
 
-    return _RecordingOpenAIEmbeddings
+    return _FakeOpenAIEmbeddings
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +88,7 @@ class TestNoKeyImport:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         constructions: list[str] = []
         module = _load_isolated_embedder_module("civica_embeddings_embedder_no_key")
-        monkeypatch.setattr(module, "OpenAIEmbeddings", _recording_client(constructions))
+        monkeypatch.setattr(module, "OpenAIEmbeddings", _fake_client(constructions))
 
         embedder = module.make_embedder(_SAMPLE_MODEL)
 
@@ -106,7 +106,7 @@ class TestClientConstructionOnFirstEmbed:
         module = _load_isolated_embedder_module(
             "civica_embeddings_embedder_client_construction"
         )
-        monkeypatch.setattr(module, "OpenAIEmbeddings", _recording_client(constructions))
+        monkeypatch.setattr(module, "OpenAIEmbeddings", _fake_client(constructions))
         embedder = module.make_embedder(_SAMPLE_MODEL)
         assert constructions == []
 
