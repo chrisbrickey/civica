@@ -6,14 +6,8 @@ import json
 import string
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 import pytest
-from langchain_core.callbacks import CallbackManagerForLLMRun
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import PrivateAttr
 
 from civica.assessment import prompts
 from civica.assessment.critic import CritiqueFn, LlmCritic, Verdict
@@ -38,6 +32,7 @@ from civica.retrieval.content import ContentChunk
 from tests.support.assessment import (
     SAMPLE_OPTIONS,
     FakeAnswerLogger,
+    FakeChatModel,
     FakeQuestionStore,
     FakeRejectionStore,
     FakeRetriever,
@@ -78,7 +73,6 @@ _EXAM_THEMES = list(EXAM_QUESTION_COUNTS)
 _EXAM_FAILING_THEME = _EXAM_THEMES[0]
 # The last item of a theme is a scenario question.
 _EXAM_FAILING_POSITION = EXAM_QUESTION_COUNTS[_EXAM_FAILING_THEME] - 1
-_EXAM_MAX_ITEMS_PER_CALL = max(EXAM_QUESTION_COUNTS.values())
 
 _MALFORMED_CRITIC_REPLIES = {
     "not-json": "this is not json [",
@@ -126,49 +120,9 @@ def _fail(reason: str) -> Verdict:
 # ---------------------------------------------------------------------------
 
 
-class _FakeChatModel(BaseChatModel):  # type: ignore[explicit-any]
-    """Fake chat model shared by generator and critic: returns `replies` in order.
-
-    Once the script runs out it emits `fallback_items` generated questions with texts unique
-    to the call, or fails loudly when `fallback_items` is 0.
-    """
-
-    replies: tuple[str, ...] = ()
-    fallback_items: int = 0
-
-    _received: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
-
-    @property
-    def invocation_count(self) -> int:
-        return len(self._received)
-
-    def prompt_text(self, call_index: int) -> str:
-        """Every message of one call joined, so assertions do not depend on message layout."""
-        return "\n".join(str(m.content) for m in self._received[call_index])
-
-    def _reply_for(self, call_index: int) -> str:
-        if call_index < len(self.replies):
-            return self.replies[call_index]
-        assert self.fallback_items, f"unexpected model call #{call_index + 1}: script exhausted"
-        return _generation_reply(
-            *(f"sample-generated-question-{call_index:02d}-{i:02d}" for i in range(self.fallback_items))
-        )
-
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        call_index = len(self._received)
-        self._received.append(messages)
-        message = AIMessage(content=self._reply_for(call_index))
-        return ChatResult(generations=[ChatGeneration(message=message)])
-
-    @property
-    def _llm_type(self) -> str:
-        return "sample-fake-chat-model"
+def _scripted_chat(*, replies: tuple[str, ...]) -> FakeChatModel:
+    """A chat model that returns `replies` in order and fails loudly if asked for more."""
+    return FakeChatModel(replies=replies, fail_when_exhausted=True)
 
 
 @dataclass(frozen=True)
@@ -232,9 +186,9 @@ def fakes(answer_logger: FakeAnswerLogger) -> _Fakes:
 
 
 @pytest.fixture()
-def recovering_chat() -> _FakeChatModel:
+def recovering_chat() -> FakeChatModel:
     """Generation with one ungrounded item, critic fails it, regeneration fixes it, critic passes."""
-    return _FakeChatModel(
+    return _scripted_chat(
         replies=(
             _generation_reply(_FIRST_TEXT, _UNGROUNDED_TEXT, _THIRD_TEXT),
             _critic_reply(_PASS, _fail(_UNGROUNDED_REASON), _PASS),
@@ -245,7 +199,7 @@ def recovering_chat() -> _FakeChatModel:
 
 
 @pytest.fixture()
-def always_failing_chat() -> _FakeChatModel:
+def always_failing_chat() -> FakeChatModel:
     """The middle item fails every critic pass; extra script proves the loop stops on its own."""
     regenerations: list[str] = []
     for attempt in range(2, MAX_REFINE_ATTEMPTS + 4):
@@ -253,7 +207,7 @@ def always_failing_chat() -> _FakeChatModel:
             _generation_reply(f"{_REGENERATED_TEXT}-{attempt}"),
             _critic_reply(_fail(_reason(attempt))),
         ]
-    return _FakeChatModel(
+    return _scripted_chat(
         replies=(
             _generation_reply(_FIRST_TEXT, _UNGROUNDED_TEXT, _THIRD_TEXT),
             _critic_reply(_PASS, _fail(_reason(1)), _PASS),
@@ -267,7 +221,7 @@ def always_failing_chat() -> _FakeChatModel:
 # ---------------------------------------------------------------------------
 
 
-def _quiz(fakes: _Fakes, chat: _FakeChatModel, critic: CritiqueFn | None) -> Quiz:
+def _quiz(fakes: _Fakes, chat: FakeChatModel, critic: CritiqueFn | None) -> Quiz:
     return generate_quiz(
         USER_ID,
         _THEME,
@@ -285,7 +239,7 @@ def _exam(fakes: _Fakes, critic: CritiqueFn) -> MockExam:
     return generate_mock_exam(
         USER_ID,
         retriever=fakes.retriever,
-        chat_client=_FakeChatModel(fallback_items=_EXAM_MAX_ITEMS_PER_CALL),
+        chat_client=FakeChatModel(),
         question_store=fakes.question_store,
         answer_logger=fakes.answer_logger,
         critic=critic,
@@ -308,7 +262,7 @@ def _sample_question(label: str, correct_index: int = 0) -> Question:
 
 def _critique_prompt(questions: Sequence[Question]) -> str:
     """Run LlmCritic once over `questions` (group i is chunk i) and return its prompt text."""
-    chat = _FakeChatModel(replies=(_critic_reply(*[_PASS] * len(questions)),))
+    chat = _scripted_chat(replies=(_critic_reply(*[_PASS] * len(questions)),))
     groups = [[make_content_chunk(_THEME, i)] for i in range(len(questions))]
     LlmCritic(chat)(_THEME, questions, groups)
     return chat.prompt_text(0)
@@ -336,28 +290,28 @@ class TestMalformedItemIsReplaced:
     """An item the critic fails is regenerated once and never reaches the learner."""
 
     def test_malformed_item_never_returned(
-        self, fakes: _Fakes, recovering_chat: _FakeChatModel
+        self, fakes: _Fakes, recovering_chat: FakeChatModel
     ) -> None:
         quiz = _quiz(fakes, recovering_chat, LlmCritic(recovering_chat))
 
         assert _UNGROUNDED_TEXT not in [q.text for q in quiz.questions]
 
     def test_returns_only_critic_passed_questions_in_group_order(
-        self, fakes: _Fakes, recovering_chat: _FakeChatModel
+        self, fakes: _Fakes, recovering_chat: FakeChatModel
     ) -> None:
         quiz = _quiz(fakes, recovering_chat, LlmCritic(recovering_chat))
 
         assert [q.text for q in quiz.questions] == [_FIRST_TEXT, _REGENERATED_TEXT, _THIRD_TEXT]
 
     def test_model_called_for_generate_critique_regenerate_critique(
-        self, fakes: _Fakes, recovering_chat: _FakeChatModel
+        self, fakes: _Fakes, recovering_chat: FakeChatModel
     ) -> None:
         _quiz(fakes, recovering_chat, LlmCritic(recovering_chat))
 
         assert recovering_chat.invocation_count == 4
 
     def test_regenerated_question_keeps_original_kind_and_sources(
-        self, fakes: _Fakes, recovering_chat: _FakeChatModel
+        self, fakes: _Fakes, recovering_chat: FakeChatModel
     ) -> None:
         quiz = _quiz(fakes, recovering_chat, LlmCritic(recovering_chat))
 
@@ -366,7 +320,7 @@ class TestMalformedItemIsReplaced:
         assert regenerated.sources == _sources(_FAILING_POSITION)
 
     def test_regeneration_prompt_holds_only_the_failed_group(
-        self, fakes: _Fakes, recovering_chat: _FakeChatModel
+        self, fakes: _Fakes, recovering_chat: FakeChatModel
     ) -> None:
         _quiz(fakes, recovering_chat, LlmCritic(recovering_chat))
 
@@ -377,7 +331,7 @@ class TestMalformedItemIsReplaced:
                 assert _passage(_THEME, position) not in regeneration_prompt
 
     def test_only_passed_questions_are_saved(
-        self, fakes: _Fakes, recovering_chat: _FakeChatModel
+        self, fakes: _Fakes, recovering_chat: FakeChatModel
     ) -> None:
         quiz = _quiz(fakes, recovering_chat, LlmCritic(recovering_chat))
 
@@ -387,7 +341,7 @@ class TestMalformedItemIsReplaced:
         assert fakes.question_store.saved_prompt_versions == {PROMPT_VERSION}
 
     def test_rejection_recorded_with_theme_reason_attempt_and_version(
-        self, fakes: _Fakes, recovering_chat: _FakeChatModel
+        self, fakes: _Fakes, recovering_chat: FakeChatModel
     ) -> None:
         _quiz(fakes, recovering_chat, LlmCritic(recovering_chat))
 
@@ -402,21 +356,21 @@ class TestPersistentlyFailingItemIsDropped:
     """An item that fails every pass is dropped after MAX_REFINE_ATTEMPTS; a short quiz is fine."""
 
     def test_model_calls_are_bounded(
-        self, fakes: _Fakes, always_failing_chat: _FakeChatModel
+        self, fakes: _Fakes, always_failing_chat: FakeChatModel
     ) -> None:
         _quiz(fakes, always_failing_chat, LlmCritic(always_failing_chat))
 
         assert always_failing_chat.invocation_count == _BOUNDED_CALL_COUNT
 
     def test_quiz_is_short_and_keeps_only_passing_items(
-        self, fakes: _Fakes, always_failing_chat: _FakeChatModel
+        self, fakes: _Fakes, always_failing_chat: FakeChatModel
     ) -> None:
         quiz = _quiz(fakes, always_failing_chat, LlmCritic(always_failing_chat))
 
         assert [q.text for q in quiz.questions] == [_FIRST_TEXT, _THIRD_TEXT]
 
     def test_dropped_item_is_not_saved(
-        self, fakes: _Fakes, always_failing_chat: _FakeChatModel
+        self, fakes: _Fakes, always_failing_chat: FakeChatModel
     ) -> None:
         quiz = _quiz(fakes, always_failing_chat, LlmCritic(always_failing_chat))
 
@@ -425,7 +379,7 @@ class TestPersistentlyFailingItemIsDropped:
         assert [q.text for q in saved] == [_FIRST_TEXT, _THIRD_TEXT]
 
     def test_every_failed_pass_is_recorded_with_its_attempt(
-        self, fakes: _Fakes, always_failing_chat: _FakeChatModel
+        self, fakes: _Fakes, always_failing_chat: FakeChatModel
     ) -> None:
         _quiz(fakes, always_failing_chat, LlmCritic(always_failing_chat))
 
@@ -442,7 +396,7 @@ class TestCriticDisabled:
     def test_returns_and_saves_every_generated_question_without_rejections(
         self, fakes: _Fakes
     ) -> None:
-        chat = _FakeChatModel(
+        chat = _scripted_chat(
             replies=(_generation_reply(_FIRST_TEXT, _UNGROUNDED_TEXT, _THIRD_TEXT),)
         )
 
@@ -462,7 +416,7 @@ class TestCriticSeesGroupMatchedQuestions:
     def test_out_of_order_reply_is_critiqued_and_returned_in_group_order(
         self, fakes: _Fakes
     ) -> None:
-        chat = _FakeChatModel(
+        chat = _scripted_chat(
             replies=(
                 grouped_generation_reply((3, _THIRD_TEXT), (1, _FIRST_TEXT), (2, _UNGROUNDED_TEXT)),
                 _critic_reply(_PASS, _PASS, _PASS),
@@ -475,7 +429,7 @@ class TestCriticSeesGroupMatchedQuestions:
         assert [q.sources for q in quiz.questions] == [_sources(i) for i in range(_QUIZ_SIZE)]
 
     def test_regeneration_missing_its_group_is_retried_once(self, fakes: _Fakes) -> None:
-        chat = _FakeChatModel(
+        chat = _scripted_chat(
             replies=(
                 _generation_reply(_FIRST_TEXT, _UNGROUNDED_TEXT, _THIRD_TEXT),
                 _critic_reply(_PASS, _fail(_UNGROUNDED_REASON), _PASS),
@@ -555,7 +509,7 @@ class TestLlmCriticVerdicts:
         reply = _critic_reply(*verdicts)
         if fenced:
             reply = f"```json\n{reply}\n```"
-        chat = _FakeChatModel(replies=(reply,))
+        chat = _scripted_chat(replies=(reply,))
         questions = [_sample_question("a"), _sample_question("b")]
         groups = [[make_content_chunk(_THEME, 0)], [make_content_chunk(_THEME, 1)]]
 
@@ -563,7 +517,7 @@ class TestLlmCriticVerdicts:
         assert chat.invocation_count == 1
 
     def test_wrong_verdict_count_raises(self) -> None:
-        chat = _FakeChatModel(replies=(_critic_reply(_PASS),))
+        chat = _scripted_chat(replies=(_critic_reply(_PASS),))
         questions = [_sample_question("a"), _sample_question("b")]
         groups = [[make_content_chunk(_THEME, 0)], [make_content_chunk(_THEME, 1)]]
 
@@ -574,7 +528,7 @@ class TestLlmCriticVerdicts:
         "reply", _MALFORMED_CRITIC_REPLIES.values(), ids=_MALFORMED_CRITIC_REPLIES.keys()
     )
     def test_malformed_reply_raises(self, reply: str) -> None:
-        chat = _FakeChatModel(replies=(reply,))
+        chat = _scripted_chat(replies=(reply,))
         questions = [_sample_question("a"), _sample_question("b")]
         groups = [[make_content_chunk(_THEME, 0)], [make_content_chunk(_THEME, 1)]]
 
