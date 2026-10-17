@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from civica.assessment.critic import CritiqueFn
 from civica.assessment.errors import InsufficientMaterialError, QuestionGenerationError
-from civica.assessment.prompts import PROMPT_VERSION, PROMPTS
+from civica.assessment.prompts import QUIZ_PROMPTS
 from civica.assessment.replies import strip_code_fence
 from civica.assessment.scoring import AnswerLogger, MockExam, Quiz
 from civica.assessment.store import (
@@ -42,7 +42,6 @@ from civica.retrieval.content import ContentChunk, SearchFn, search
 
 __all__ = [
     "MAX_REFINE_ATTEMPTS",
-    "PROMPT_VERSION",
     "QuestionGenerationError",
     "generate_mock_exam",
     "generate_quiz",
@@ -144,10 +143,10 @@ def _build_messages(
         label = "mise en situation" if kind is QuestionKind.SCENARIO else "connaissance"
         passages = "\n".join(c.chunk.text for c in group)
         blocks.append(f"Groupe {number} (question de {label}) :\n{passages}")
-    human = PROMPTS["human"].format(
+    human = QUIZ_PROMPTS.human(
         theme=theme.display_name_fr, count=len(groups), groups="\n\n".join(blocks)
     )
-    return [SystemMessage(content=PROMPTS["system"]), HumanMessage(content=human)]
+    return [SystemMessage(content=QUIZ_PROMPTS.system), HumanMessage(content=human)]
 
 
 def _parse_items(reply: str) -> list[_GeneratedItem]:
@@ -242,7 +241,7 @@ def _refine(
                 accepted[position] = question
             else:
                 failed.append(position)
-                rejections.append(Rejection(PROMPT_VERSION, theme, verdict.reason, attempt))
+                rejections.append(Rejection(QUIZ_PROMPTS.version, theme, verdict.reason, attempt))
         if rejections:
             services.rejection_store.save(rejections)
         if not failed or attempt > MAX_REFINE_ATTEMPTS:
@@ -312,7 +311,7 @@ def generate_quiz(
     questions = _generate_for_theme(theme, n, 0, retriever=retriever, services=services)
     if not questions:
         raise QuestionGenerationError(f"No question passed the critic for theme {theme.slug!r}")
-    store.save(questions, PROMPT_VERSION)
+    store.save(questions, QUIZ_PROMPTS.version)
     return Quiz(user_id=user_id, questions=questions, answer_logger=answer_logger)
 
 
@@ -344,5 +343,5 @@ def generate_mock_exam(
                 f"Only {len(themed)} of {count} questions passed the critic for theme {theme.slug!r}"
             )
         questions.extend(themed)
-    store.save(questions, PROMPT_VERSION)
+    store.save(questions, QUIZ_PROMPTS.version)
     return MockExam(user_id=user_id, questions=tuple(questions), answer_logger=answer_logger)

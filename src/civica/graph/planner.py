@@ -31,7 +31,7 @@ from civica.assessment.store import (
 from civica.domain.themes import EXAM_QUESTION_COUNTS, Theme
 from civica.domain.user import UserId
 from civica.explanation.engine import MINIMUM_SIMILARITY, Explanation, explain
-from civica.graph.prompts import PROMPTS
+from civica.graph.prompts import PLANNER_PROMPTS
 from civica.graph.router import suggest_review_theme as review_heuristic
 from civica.llm.client import PLANNER_PROFILE, get_chat_model
 from civica.memory.records import LearnerProfile, MistakeEpisode, TopicMastery
@@ -239,7 +239,7 @@ def run_planner(
     tools = {tool.name: tool for tool in _build_tools(user_id, deps, turn)}
     model = deps.planner_model.bind_tools(list(tools.values()))
     messages: list[BaseMessage] = [
-        SystemMessage(content=PROMPTS["system"].format(mode=mode.value)),
+        SystemMessage(content=PLANNER_PROMPTS.system(mode=mode.value)),
         HumanMessage(content=learner_message),
     ]
     for step in range(1, MAX_PLANNER_STEPS + 1):

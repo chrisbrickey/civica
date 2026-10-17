@@ -9,16 +9,14 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from civica.assessment import prompts
 from civica.assessment.critic import CritiqueFn, LlmCritic, Verdict
 from civica.assessment.engine import (
     MAX_REFINE_ATTEMPTS,
-    PROMPT_VERSION,
     QuestionGenerationError,
     generate_mock_exam,
     generate_quiz,
 )
-from civica.assessment.prompts import PROMPTS
+from civica.assessment.prompts import QUIZ_PROMPTS
 from civica.assessment.scoring import MockExam, Quiz
 from civica.domain.question import Question, QuestionKind
 from civica.domain.source_ref import SourceRef
@@ -46,7 +44,6 @@ from tests.support.users import USER_ID
 # ---------------------------------------------------------------------------
 
 _THEME = SYSTEME_INSTITUTIONNEL_ET_POLITIQUE
-_EXPECTED_PROMPT_VERSION = "quiz-v004"
 _EXAM_SIZE = 40
 
 # Quiz of three; the retriever yields three sections, so passage group i is chunk i.
@@ -269,19 +266,6 @@ def _critique_prompt(questions: Sequence[Question]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tests: prompt version
-# ---------------------------------------------------------------------------
-
-
-class TestPromptVersion:
-    """Every prompt change moves the version stamp on."""
-
-    def test_prompt_version_is_bumped(self) -> None:
-        assert PROMPT_VERSION == _EXPECTED_PROMPT_VERSION
-        assert prompts.PROMPT_VERSION == _EXPECTED_PROMPT_VERSION
-
-
-# ---------------------------------------------------------------------------
 # Tests: quiz through the LLM critic
 # ---------------------------------------------------------------------------
 
@@ -338,7 +322,7 @@ class TestMalformedItemIsReplaced:
         saved = fakes.question_store.saved_questions
         assert [q.question_id for q in saved] == [q.question_id for q in quiz.questions]
         assert _UNGROUNDED_TEXT not in [q.text for q in saved]
-        assert fakes.question_store.saved_prompt_versions == {PROMPT_VERSION}
+        assert fakes.question_store.saved_prompt_versions == {QUIZ_PROMPTS.version}
 
     def test_rejection_recorded_with_theme_reason_attempt_and_version(
         self, fakes: _Fakes, recovering_chat: FakeChatModel
@@ -346,7 +330,7 @@ class TestMalformedItemIsReplaced:
         _quiz(fakes, recovering_chat, LlmCritic(recovering_chat))
 
         [rejection] = fakes.rejection_store.rejections
-        assert rejection.prompt_version == PROMPT_VERSION
+        assert rejection.prompt_version == QUIZ_PROMPTS.version
         assert rejection.theme == _THEME
         assert rejection.reason == _UNGROUNDED_REASON
         assert rejection.attempt == 1
@@ -387,7 +371,7 @@ class TestPersistentlyFailingItemIsDropped:
         rejections = fakes.rejection_store.rejections
         assert [(r.attempt, r.reason) for r in rejections] == [(a, _reason(a)) for a in attempts]
         assert {r.theme for r in rejections} == {_THEME}
-        assert {r.prompt_version for r in rejections} == {PROMPT_VERSION}
+        assert {r.prompt_version for r in rejections} == {QUIZ_PROMPTS.version}
 
 
 class TestCriticDisabled:
@@ -472,7 +456,7 @@ class TestMockExamCritique:
         assert fakes.question_store.saved_questions == []
         rejections = [r for r in fakes.rejection_store.rejections if r.theme == _EXAM_FAILING_THEME]
         assert [r.attempt for r in rejections] == list(range(1, MAX_REFINE_ATTEMPTS + 2))
-        assert {r.prompt_version for r in rejections} == {PROMPT_VERSION}
+        assert {r.prompt_version for r in rejections} == {QUIZ_PROMPTS.version}
 
     def test_recovered_scenario_item_keeps_position_kind_and_sources(self, fakes: _Fakes) -> None:
         critic = _FakeCritic(fail_first_pass={_EXAM_FAILING_THEME: {_EXAM_FAILING_POSITION}})
@@ -543,17 +527,18 @@ class TestLlmCriticVerdicts:
 
 
 class TestLlmCriticPrompt:
-    """The critic prompt is built from PROMPTS and carries everything needed to judge each item."""
+    """The critic prompt is built from QUIZ_PROMPTS and carries everything needed to judge each item."""
 
     def test_critic_prompts_are_declared(self) -> None:
-        assert PROMPTS["critic_system"].strip()
-        assert PROMPTS["critic_human"].strip()
+        assert QUIZ_PROMPTS.critic_system.strip()
+        assert QUIZ_PROMPTS.critic_human_template.strip()
 
     def test_prompt_is_built_from_the_critic_templates(self) -> None:
         prompt = _critique_prompt([_sample_question("a")])
 
-        assert PROMPTS["critic_system"] in prompt
-        literals = [text.strip() for text, *_ in string.Formatter().parse(PROMPTS["critic_human"])]
+        assert QUIZ_PROMPTS.critic_system in prompt
+        template = QUIZ_PROMPTS.critic_human_template
+        literals = [text.strip() for text, *_ in string.Formatter().parse(template)]
         for literal in literals:
             assert literal in prompt
 

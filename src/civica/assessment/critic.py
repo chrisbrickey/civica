@@ -10,7 +10,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from civica.assessment.errors import QuestionGenerationError
-from civica.assessment.prompts import PROMPTS
+from civica.assessment.prompts import QUIZ_PROMPTS
 from civica.assessment.replies import strip_code_fence
 from civica.domain.question import Question
 from civica.domain.themes import Theme
@@ -68,10 +68,10 @@ def _build_messages(
         _format_item(number, question, group)
         for number, (question, group) in enumerate(zip(questions, groups, strict=True), start=1)
     )
-    human = PROMPTS["critic_human"].format(
+    human = QUIZ_PROMPTS.critic_human(
         theme=theme.display_name_fr, count=len(questions), items=items
     )
-    return [SystemMessage(content=PROMPTS["critic_system"]), HumanMessage(content=human)]
+    return [SystemMessage(content=QUIZ_PROMPTS.critic_system), HumanMessage(content=human)]
 
 
 def _parse_verdicts(reply: str, n: int) -> list[Verdict]:

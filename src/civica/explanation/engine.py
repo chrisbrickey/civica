@@ -10,19 +10,11 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict
 
 from civica.domain.themes import Theme
+from civica.explanation.prompts import EXPLANATION_PROMPTS
 from civica.llm.client import EXPLANATION_PROFILE, get_chat_model
 from civica.retrieval.content import ContentChunk, SearchFn, search
 
 logger = logging.getLogger(__name__)
-
-PROMPTS: dict[str, str] = {
-    "system": (
-        "You are a coach helping a learner prepare for the French naturalization civics exam. "
-        "Use only the provided passages. Do not draw on outside knowledge. "
-        "Respond in English, retaining key French vocabulary the learner will need to recognize on the exam."
-    ),
-    "human": "Learner question: {question}\n\nOfficial passages:\n{passages}",
-}
 
 _INSUFFICIENT_MATERIAL_MESSAGE = (
     "There is insufficient official material to answer this question."
@@ -43,7 +35,7 @@ class Explanation(BaseModel):  # type: ignore[explicit-any]
 
 def _build_human_message(user_question: str, chunks: list[ContentChunk]) -> HumanMessage:
     passages = "\n\n".join(chunk.chunk.text for chunk in chunks)
-    content = PROMPTS["human"].format(question=user_question, passages=passages)
+    content = EXPLANATION_PROMPTS.human(question=user_question, passages=passages)
     return HumanMessage(content=content)
 
 
@@ -75,7 +67,7 @@ def explain(
 
     client = chat_client if chat_client is not None else get_chat_model(EXPLANATION_PROFILE)
     messages: list[BaseMessage] = [
-        SystemMessage(content=PROMPTS["system"]),
+        SystemMessage(content=EXPLANATION_PROMPTS.system),
         _build_human_message(user_question, chunks),
     ]
     response = client.invoke(messages)
