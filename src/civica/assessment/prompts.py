@@ -2,11 +2,30 @@
 
 A prompt's language reflects the desired language of the LLM output."""
 
-# Bump PROMPT_VERSION whenever any prompt in PROMPTS changes. Stored with every question and rejection.
-PROMPT_VERSION = "quiz-v004"
+from dataclasses import dataclass
 
-PROMPTS: dict[str, str] = {
-    "system": (
+
+@dataclass(frozen=True)
+class QuizPrompts:
+    """Generator and critic prompts, versioned together since questions and rejections share one stamp."""
+
+    version: str
+    system: str
+    human_template: str
+    critic_system: str
+    critic_human_template: str
+
+    def human(self, *, theme: str, count: int, groups: str) -> str:
+        return self.human_template.format(theme=theme, count=count, groups=groups)
+
+    def critic_human(self, *, theme: str, count: int, items: str) -> str:
+        return self.critic_human_template.format(theme=theme, count=count, items=items)
+
+
+# Bump version whenever any prompt here changes. Stored with every question and rejection.
+QUIZ_PROMPTS = QuizPrompts(
+    version="quiz-v004",
+    system=(
         "Tu es un concepteur de questions pour l'examen civique de naturalisation francaise. "
         "Utilise uniquement les passages officiels fournis, sans connaissances externes. "
         "Redige en francais des questions a choix multiples avec exactement 4 options, "
@@ -20,12 +39,12 @@ PROMPTS: dict[str, str] = {
         "group est le numero du groupe de passages sur lequel repose la question. "
         "correct_index est l'indice (0 a 3) de la bonne option."
     ),
-    "human": (
+    human_template=(
         "Theme : {theme}\n\n"
         "Ecris exactement {count} questions, une par groupe de passages numerote, dans l'ordre "
         "des groupes. Chaque question s'appuie uniquement sur son groupe.\n\n{groups}"
     ),
-    "critic_system": (
+    critic_system=(
         "Tu es un verificateur de questions pour l'examen civique de naturalisation francaise. "
         "Pour chaque question, juge-la uniquement a partir des passages officiels fournis, "
         "sans connaissances externes. Une question est acceptee seulement si : "
@@ -40,9 +59,9 @@ PROMPTS: dict[str, str] = {
         "passed vaut true si la question est acceptee, sinon false. "
         "reason explique brievement le probleme quand passed vaut false."
     ),
-    "critic_human": (
+    critic_human_template=(
         "Theme : {theme}\n\n"
         "Verifie exactement {count} questions, dans l'ordre, chacune avec son groupe de passages.\n\n"
         "{items}"
     ),
-}
+)

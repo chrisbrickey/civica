@@ -10,12 +10,12 @@ from dataclasses import dataclass, replace
 import pytest
 
 from civica.assessment.engine import (
-    PROMPT_VERSION,
     QuestionGenerationError,
     generate_mock_exam,
     generate_quiz,
 )
 from civica.assessment.errors import InsufficientMaterialError
+from civica.assessment.prompts import QUIZ_PROMPTS
 from civica.assessment.scoring import MOCK_EXAM_TIME_LIMIT_SECONDS, MockExam, Quiz
 from civica.domain.question import Question, QuestionKind
 from civica.domain.themes import (
@@ -745,7 +745,7 @@ class TestQuestionPersistence:
     """Every returned question is saved exactly once, stamped with the current prompt version."""
 
     def test_prompt_version_is_declared(self) -> None:
-        assert PROMPT_VERSION.strip()
+        assert QUIZ_PROMPTS.version.strip()
 
     def test_quiz_questions_saved_once_with_prompt_version(self, fakes: _Fakes) -> None:
         questions = _quiz(fakes).questions
@@ -753,7 +753,7 @@ class TestQuestionPersistence:
         saved_ids = Counter(q.question_id for q in fakes.question_store.saved_questions)
         assert saved_ids == Counter(q.question_id for q in questions)
         assert all(count == 1 for count in saved_ids.values())
-        assert fakes.question_store.saved_prompt_versions == {PROMPT_VERSION}
+        assert fakes.question_store.saved_prompt_versions == {QUIZ_PROMPTS.version}
 
     def test_mock_exam_questions_saved_once_with_prompt_version(self, fakes: _Fakes) -> None:
         questions = _exam(fakes).questions
@@ -762,7 +762,7 @@ class TestQuestionPersistence:
         assert saved_ids == Counter(q.question_id for q in questions)
         assert len(saved_ids) == _EXAM_SIZE
         assert all(count == 1 for count in saved_ids.values())
-        assert fakes.question_store.saved_prompt_versions == {PROMPT_VERSION}
+        assert fakes.question_store.saved_prompt_versions == {QUIZ_PROMPTS.version}
 
     def test_same_payload_yields_the_same_question_keys(self, fakes: _Fakes) -> None:
         """Stable content-hash keys are what make the store's upsert idempotent across runs."""

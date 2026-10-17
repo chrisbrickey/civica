@@ -844,7 +844,11 @@ This addresses a silent failure mode that I discovered while implementing this s
       - Histoire theme is now searched with three sub-topic queries ("Histoire de France", "Géographie de la France", "Culture française"), giving 45 usable sections instead of 7. Sections are interleaved round-robin across the queries so no single sub-topic fills the exam. Other themes keep one query.
       - This does not mean that the Histoire theme might overlap with other themes because the corpus sources by theme are restricted for use by other themes.
     - Final validation run: Histoire quiz of 8 had 8/8 with 0 rejections; mock exam 40/40 with 0 rejections and no reused section in any theme.
-
+    - Strengthened prompt safety
+      - Replaced loose prompt dicts with dataclasses (`QUIZ_PROMPTS`, `PLANNER_PROMPTS`, `EXPLANATION_PROMPTS`) that carry their version and typed render methods. Now typos fail the type checker. 
+      - Added a test that pins each version of a prompt beside a hash of its prompt text. Now an edit to a prompt without a version bump fails the suite. No prompt text changed.
+      - Guard prompt templates in tests so that placeholder and render-argument mismatches fail the suite.
+      
 ---
 
 ## Step 10A: Autonomous planner (tools + tool-calling loop)
@@ -1109,6 +1113,7 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
 - Create `src/civica/reflection/strategy_policy.py`:
   - `select_strategy(user_id, theme) -> TeachingStrategy` and `record_reward(user_id, theme, strategy, mastery_gain)` - a small multi-armed-bandit policy. Reward is the measured `topic_mastery` change on the next quiz for that theme (the before/after signal already lives in `quiz_answers` + `topic_mastery`). The planner's `teach` tool asks the policy which strategy to use and passes it into the explanation prompt; `memory_writer` records the reward after the follow-up quiz. The teaching policy now changes based on outcomes - the second self-improving feature.
   - **Reward hygiene (required, not optional).** Compute the mastery-gain reward only from answers on items the learner has seen before, i.e. items with a scheduling history from Step 12. A brand-new generated question carries unknown difficulty, so its outcome reflects the item as much as the teaching. Mixing those in lets item noise swamp the strategy signal and the bandit converges on luck. Step 10A's comprehension check supplies the dense immediate reward; this rule decides which of those answers count.
+  - Strategy variants of the explanation prompts are injected as prompt sets. Add a `PromptSet` Protocol (`version: str`) in `llm/prompts.py` so the policy, `teach`, and the reflection report accept any prompt set through one interface. The existing frozen prompt-set dataclasses satisfy it structurally, with no inheritance; give each strategy variant its own version so rewards and rejections stay attributable.
   - The reward depends on `topic_mastery` being deterministically derived (Step 10A/10B). If the planner could write its own mastery, this reward would be self-graded and the bandit would optimize against a number it controls. That is the concrete payoff of the two-allowlist rule.
 - **Global-learning note (deferred - requires a Product Owner decision):** promoting item difficulty and high-value strategy signals from per-user to a *shared* namespace would let the coach improve for every learner, not just the current one. It is also the prerequisite for the cross-learner difficulty calibration that Step 12 deferred: p-correct only means "difficulty" when many learners answer the same item. This conflicts with the "all persistent state is namespaced by `user_id`" rule, so it is intentionally out of scope until the owner sanctions a reserved global namespace (e.g. `user_id="__global__"`) with its own allowlist entry. Flagged here, not built.
 
