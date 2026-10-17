@@ -3,19 +3,15 @@
 No network calls. No DB spinup."""
 
 import logging
-from typing import Any
 
 import pytest
-from langchain_core.callbacks import CallbackManagerForLLMRun
-from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import PrivateAttr
 
 from civica.domain.chunk import Chunk
 from civica.domain.themes import PRINCIPES_ET_VALEURS_DE_LA_REPUBLIQUE, Theme
 from civica.explanation.engine import MINIMUM_SIMILARITY, Explanation, explain
 from civica.retrieval.content import ContentChunk
+from tests.support.llm import FakeChatModelBase
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -84,8 +80,8 @@ class _FakeRetriever:
         return self.result
 
 
-class _FakeChatModel(BaseChatModel):  # type: ignore[explicit-any]
-    """Fake chat model: records every prompt it receives, returns a canned AIMessage.
+class _FakeChatModel(FakeChatModelBase):
+    """Fake chat model: returns one canned AIMessage for every call.
 
     Content and metadata are settable so tests can exercise block-structured and truncated responses.
     """
@@ -93,32 +89,8 @@ class _FakeChatModel(BaseChatModel):  # type: ignore[explicit-any]
     canned_content: str | list[dict[str, str]] = _SAMPLE_RESPONSE_TEXT
     canned_metadata: dict[str, str] = {}
 
-    _received: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
-
-    @property
-    def invocation_count(self) -> int:
-        return len(self._received)
-
-    @property
-    def received_messages(self) -> list[list[BaseMessage]]:
-        return self._received
-
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        self._received.append(messages)
-        message = AIMessage(
-            content=self.canned_content, response_metadata=dict(self.canned_metadata)
-        )
-        return ChatResult(generations=[ChatGeneration(message=message)])
-
-    @property
-    def _llm_type(self) -> str:
-        return "sample-fake-chat-model"
+    def _reply_for(self, call_index: int) -> AIMessage:
+        return AIMessage(content=self.canned_content, response_metadata=dict(self.canned_metadata))
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +179,7 @@ class TestPromptGrounding:
     ) -> None:
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
-        prompt_text = _concatenated_text(chat_client.received_messages[0])
+        prompt_text = _concatenated_text(chat_client.received[0])
 
         assert _SAMPLE_PASSAGE_ONE in prompt_text
         assert _SAMPLE_PASSAGE_TWO in prompt_text
@@ -223,7 +195,7 @@ class TestSystemMessageContract:
     ) -> None:
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
-        system_text = str(_system_message(chat_client.received_messages[0]).content)
+        system_text = str(_system_message(chat_client.received[0]).content)
 
         assert _GROUNDING_CONTRACT in system_text
 
@@ -234,7 +206,7 @@ class TestSystemMessageContract:
     ) -> None:
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
-        system_text = str(_system_message(chat_client.received_messages[0]).content)
+        system_text = str(_system_message(chat_client.received[0]).content)
 
         assert _ENGLISH_CONTRACT in system_text
 
@@ -249,7 +221,7 @@ class TestPromptInjectionBoundary:
     ) -> None:
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
-        messages = chat_client.received_messages[0]
+        messages = chat_client.received[0]
         human_text = str(_human_message(messages).content)
         system_text = str(_system_message(messages).content)
 
@@ -366,7 +338,7 @@ class TestSimilarityFloor:
 
         explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
 
-        prompt_text = _concatenated_text(chat_client.received_messages[0])
+        prompt_text = _concatenated_text(chat_client.received[0])
         assert _ABOVE_FLOOR_PASSAGE in prompt_text
         assert _BELOW_FLOOR_PASSAGE not in prompt_text
 
@@ -398,7 +370,7 @@ class TestSimilarityFloor:
         )
 
         assert boundary_chunk in result.context_chunks
-        prompt_text = _concatenated_text(chat_client.received_messages[0])
+        prompt_text = _concatenated_text(chat_client.received[0])
         assert _BOUNDARY_PASSAGE in prompt_text
 
     def test_all_below_floor_returns_insufficient_material_without_calling_model(

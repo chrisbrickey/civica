@@ -5,13 +5,9 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import PrivateAttr
+from langchain_core.messages import AIMessage
 
 from civica.assessment.critic import Verdict
 from civica.domain.chunk import Chunk
@@ -20,6 +16,7 @@ from civica.domain.source_ref import SourceRef
 from civica.domain.themes import DROITS_ET_DEVOIRS, EXAM_QUESTION_COUNTS, Theme
 from civica.domain.user import UserId
 from civica.retrieval.content import ContentChunk
+from tests.support.llm import FakeChatModelBase
 
 if TYPE_CHECKING:
     # Type-only import keeps this module importable by tests that never touch rejections.
@@ -79,7 +76,7 @@ def generated_item_text(call_index: int, item_index: int) -> str:
     return f"sample-generated-question-{call_index:02d}-{item_index:02d}"
 
 
-class FakeChatModel(BaseChatModel):  # type: ignore[explicit-any]
+class FakeChatModel(FakeChatModelBase):
     """Fake chat model: replies with well-formed items naming groups 1, 2, ... in order.
 
     Item texts embed the call index, so each call yields distinct but reproducible questions.
@@ -91,52 +88,24 @@ class FakeChatModel(BaseChatModel):  # type: ignore[explicit-any]
     items_by_call: tuple[int, ...] = ()
     replies: tuple[str, ...] = ()
     canned_text: str | None = None
+    # Fail with an AssertionError naming the call once `replies` run out, instead of defaulting.
+    fail_when_exhausted: bool = False
 
-    _received: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
+    def _reply_for(self, call_index: int) -> AIMessage:
+        return AIMessage(content=self._reply_text(call_index))
 
-    @property
-    def invocation_count(self) -> int:
-        return len(self._received)
-
-    def system_text(self, call_index: int) -> str:
-        """The system message content of one call."""
-        return "\n".join(
-            str(m.content) for m in self._received[call_index] if isinstance(m, SystemMessage)
-        )
-
-    def human_text(self, call_index: int) -> str:
-        """The human message content of one call."""
-        return "\n".join(
-            str(m.content) for m in self._received[call_index] if isinstance(m, HumanMessage)
-        )
-
-    def _reply_for(self, call_index: int) -> str:
+    def _reply_text(self, call_index: int) -> str:
         if self.canned_text is not None:
             return self.canned_text
         if call_index < len(self.replies):
             return self.replies[call_index]
+        assert not self.fail_when_exhausted, f"unexpected model call #{call_index + 1}: script exhausted"
         count = (
             self.items_by_call[call_index]
             if call_index < len(self.items_by_call)
             else self.items_per_call
         )
         return grouped_generation_reply(*((i + 1, generated_item_text(call_index, i)) for i in range(count)))
-
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        call_index = len(self._received)
-        self._received.append(messages)
-        message = AIMessage(content=self._reply_for(call_index))
-        return ChatResult(generations=[ChatGeneration(message=message)])
-
-    @property
-    def _llm_type(self) -> str:
-        return "sample-fake-chat-model"
 
 
 def reject_all_critic(
