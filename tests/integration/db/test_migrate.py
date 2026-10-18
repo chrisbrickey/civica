@@ -6,6 +6,10 @@ They are NOT marked @pytest.mark.external because local docker Postgres is a nor
 test dependency, not a remote service.
 """
 
+import psycopg
+import psycopg.rows
+import pytest
+
 from civica.db.migrate import apply_schema
 from civica.db.pool import get_pool
 
@@ -28,3 +32,18 @@ def test_apply_schema_is_idempotent() -> None:
     apply_schema() is idempotent so calling it twice should not raise."""
     apply_schema()
     apply_schema()
+
+
+_PLANNER_TELEMETRY_TABLES = ("planner_trace", "retrieval_gaps")
+
+
+@pytest.mark.parametrize("table", _PLANNER_TELEMETRY_TABLES)
+def test_apply_schema_creates_planner_telemetry_tables(
+    db_schema: psycopg.Connection[psycopg.rows.TupleRow], table: str
+) -> None:
+    """The planner trace and retrieval gap tables exist after migration, and survive a re-run."""
+    apply_schema(conn=db_schema)
+
+    row = db_schema.execute("SELECT to_regclass(%s)", (table,)).fetchone()
+    assert row is not None
+    assert row[0] is not None

@@ -265,7 +265,7 @@ def _generate_for_theme(
     ranked = _interleave([_sections(retriever(query, theme)) for query in queries])
     chunks = [c for c in ranked if c.chunk.section_id not in _OBJECTIVE_SECTION_IDS]
     if not chunks:
-        raise InsufficientMaterialError(f"No testable corpus passages retrieved for theme {theme.slug!r}")
+        raise InsufficientMaterialError(theme, queries)
 
     groups = _group_chunks(chunks, n)
     kinds = _kinds(n, scenario_count)

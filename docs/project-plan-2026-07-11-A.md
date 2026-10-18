@@ -851,7 +851,7 @@ This addresses a silent failure mode that I discovered while implementing this s
       
 ---
 
-## Step 10A: Autonomous planner (tools + tool-calling loop)
+## ✅ Step 10A: Autonomous planner (tools + tool-calling loop)
 
 **Goal:** 
 - An autonomous LLM planner that decides its own next action over a bounded tool set for the Teach and Quiz flows. 
@@ -898,6 +898,10 @@ This addresses a silent failure mode that I discovered while implementing this s
   - **Comprehension check after teach.** Instruct the planner in its system prompt to follow a `teach` call with a single `generate_quiz(theme, n=1)` drawn from the just-taught passage before ending the turn. This needs no new tool or business logic (the tools already compose), it closes the teach-assess loop inside one turn, and it gives Step 13's bandit a dense immediate reward instead of one that waits for the next quiz session. Test it as a prompt convention, not a hard code path: the planner may skip it when the learner asked a direct question.
     - NB: With `n=1` a single critic rejection leaves nothing to ask. If `generate_quiz` raises `QuestionGenerationError`, end the turn after the lesson without the check rather than erroring.
   - Guardrails (state them; the tests above enforce them): bounded loop (`MAX_PLANNER_STEPS`) with the halt fallback above; writes only via `record_outcome` behind `PLANNER_WRITE_ALLOWLIST`; numeric mastery never LLM-written; facts only via the corpus-grounded `teach`/`generate_quiz` tools, which short-circuit on empty retrieval so the planner cannot free-associate; the untrusted learner message is interpolated only into the human turn, never the system prompt (Step 8's prompt-injection boundary).
+  - Live validation: one Teach turn against real agent on the dev database where the learner asked to work on their weakest area.
+    - The planner called `read_learner_state`, `suggest_review_theme`, `teach` and `generate_quiz(n=1)`, then ended with `final_message`. That is 5 trace rows, 5 of the 6 allowed steps, no writes attempted and no retrieval gaps.
+    - The lesson was grounded in the corpus. `teach` took about 11s, and the check question plus the final reply took about 4s.
+    - The final reply asked only the check question, so Step 11 must show the lesson, the question and the reply together. The reply also promised to "check it and log the result", which is the graph's job (Step 10B); tighten that wording at the next planner prompt change.
 
 **Planner trace + insufficient-material telemetry**
 
@@ -929,8 +933,9 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
     - `score_answer` was dropped so the LLM cannot invent answers to inflate mastery. Scoring will happen deterministically after the learner answers.
     - `user_id` is bound by the caller instead of a tool argument.
     - `record_outcome` checks `PLANNER_WRITE_ALLOWLIST` and then validates the value. `MemoryNotAllowed` ends the turn; other bad tool arguments go back to the model.
-    - New `InsufficientMaterialError` separates retrieval gaps from critic rejections.
     - Extra guardrails: quiz size capped at 10, correct answers hidden from the model, and `MAX_PLANNER_STEPS = 6` with a fallback lesson.
+    - `planner_trace` adds a `turn_id`, since one `thread_id` spans many turns. Each turn writes one row per tool call, then one row with the halt reason (including `forbidden_write`, recorded before `MemoryNotAllowed` is re-raised).
+    - New `InsufficientMaterialError` separates retrieval gaps from critic rejections and carries the queries tried. Gaps are also logged for empty `retrieve_corpus` results and the fallback lesson.
 
 ---
 
@@ -954,7 +959,8 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - **Test (external):** `tests/integration/graph/test_planner_external.py`, marked `@pytest.mark.external`, needs `ANTHROPIC_API_KEY`. One contract test: real Claude with the planner's tools bound returns tool calls matching the tool schemas and ends the turn with a final message.
 - Create `src/civica/graph/nodes.py`:
   - `planner_node` (the tool-calling loop from `planner.py`), plus deterministic nodes the tools and the mock-exam path share: `mock_exam_node`, `update_mastery_node`, `save_session_summary_node`, `memory_writer_node`.
-    - `planner_node` catches `MemoryNotAllowed` from the planner, adds `HaltReason.FORBIDDEN_WRITE` (`"forbidden_write"`) to the trace, and serves the same fallback lesson as a `max_steps` halt. Writes stay fail-closed; the learner never sees an error.
+    - `planner_node` passes the graph's `thread_id` to `run_planner(..., thread_id=...)`.
+    - `planner_node` catches `MemoryNotAllowed` from the planner and serves the same fallback lesson as a `max_steps` halt. `run_planner` has already written the `forbidden_write` terminal row to the trace (Step 10A). Writes stay fail-closed; the learner never sees an error.
   - Each node is a plain function `(state) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate. The planner reaches that same business logic through its tool bindings, so there is one implementation of each capability, called either autonomously (Teach/Quiz) or deterministically (mock exam).
   - `mock_exam_node` logs every one of the 40 answers to `quiz_answers` (Step 9's rule) and then runs `update_mastery_node` like any other assessed path. The mock exam bypasses the *planner*, never the *logging*.
     - NB: `generate_mock_exam` raises `QuestionGenerationError` when the critic cannot fill a theme, and saves nothing. `mock_exam_node` must handle it (e.g. retry once, then show a "try again" message) rather than crash the graph.

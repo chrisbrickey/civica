@@ -57,3 +57,28 @@ CREATE TABLE IF NOT EXISTS rejected_questions (
 );
 CREATE INDEX IF NOT EXISTS rejected_questions_prompt_version_idx
   ON rejected_questions(prompt_version);
+
+CREATE TABLE IF NOT EXISTS planner_trace (
+  id BIGSERIAL PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(user_id),
+  thread_id TEXT NOT NULL,
+  turn_id UUID NOT NULL,
+  step_index INT NOT NULL,
+  tool_name TEXT,
+  tool_args JSONB,
+  halt_reason TEXT,
+  prompt_version TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Each turn ends in one row with a halt_reason and no tool.
+  CHECK ((tool_name IS NULL) <> (halt_reason IS NULL))
+);
+CREATE INDEX IF NOT EXISTS planner_trace_turn_idx
+  ON planner_trace(user_id, thread_id, turn_id, step_index);
+
+CREATE TABLE IF NOT EXISTS retrieval_gaps (
+  id BIGSERIAL PRIMARY KEY,
+  theme TEXT NOT NULL,
+  query TEXT NOT NULL,
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS retrieval_gaps_theme_idx ON retrieval_gaps(theme);
