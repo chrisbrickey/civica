@@ -255,7 +255,7 @@ civica/
   │     ├── domain/             # pure business logic, no I/O
   │     ├── embeddings/         # embedding client shared by ingestion and retrieval
   │     ├── explanation/        # corpus-grounded explanations for learner questions
-  │     ├── graph/              # autonomous planner and its review-theme heuristic
+  │     ├── graph/              # autonomous planner, review-theme heuristic, planner trace
   │     ├── ingestion/          # corpus chunking and persistence into pgvector
   │     ├── llm/                # chat-model factory shared by generation engines
   │     ├── memory/             # orchestration of short and long-term memory
@@ -278,6 +278,8 @@ Schema is located at `src/civica/db/schema.sql`.
 - `generated_questions`: persisted question bank, keyed by content hash and stamped with `prompt_version`
 - `rejected_questions`: append-only log of questions rejected by critic including metadata
 - `quiz_answers`: every scored answer
+- `planner_trace`: append-only log of each planner tool call and the halt reason per turn
+- `retrieval_gaps`: append-only log of theme and query for any empty retrievals
 
 
 ### Reference Material

@@ -1,7 +1,7 @@
 """Scripted tool-calling chat model and message builders for planner tests."""
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.language_models import LanguageModelInput
@@ -14,6 +14,8 @@ from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
+
+from civica.graph.trace import RetrievalGap, TraceStep
 
 from tests.support.assessment import (
     FakeAnswerLogger,
@@ -90,6 +92,20 @@ class FakePlannerModel(FakeChatModelBase):
         return "sample-fake-planner-model"
 
 
+@dataclass
+class FakeTraceWriter:
+    """Keeps every step and retrieval gap in the order they were recorded."""
+
+    steps: list[TraceStep] = field(default_factory=list)
+    gaps: list[RetrievalGap] = field(default_factory=list)
+
+    def record_step(self, step: TraceStep) -> None:
+        self.steps.append(step)
+
+    def record_gap(self, gap: RetrievalGap) -> None:
+        self.gaps.append(gap)
+
+
 @dataclass(frozen=True)
 class PlannerFakes:
     """Every planner seam except the planner model; swap one with dataclasses.replace."""
@@ -100,3 +116,4 @@ class PlannerFakes:
     question_store: FakeQuestionStore
     answer_logger: FakeAnswerLogger
     rejection_store: FakeRejectionStore
+    trace: FakeTraceWriter

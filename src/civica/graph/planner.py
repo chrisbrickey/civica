@@ -3,6 +3,7 @@
 The user id is bound in a closure, so the model can never choose whose memory it touches.
 """
 
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -20,7 +21,7 @@ from langgraph.store.base import BaseStore
 
 from civica.assessment.critic import CritiqueFn
 from civica.assessment.engine import generate_quiz
-from civica.assessment.errors import QuestionGenerationError
+from civica.assessment.errors import InsufficientMaterialError, QuestionGenerationError
 from civica.assessment.scoring import AnswerLogger, Quiz
 from civica.assessment.store import (
     PostgresQuestionStore,
@@ -33,10 +34,17 @@ from civica.domain.user import UserId
 from civica.explanation.engine import MINIMUM_SIMILARITY, Explanation, explain
 from civica.graph.prompts import PLANNER_PROMPTS
 from civica.graph.router import suggest_review_theme as review_heuristic
+from civica.graph.trace import (
+    HaltReason,
+    PostgresTraceWriter,
+    RetrievalGap,
+    TraceStep,
+    TraceWriter,
+)
 from civica.llm.client import PLANNER_PROFILE, get_chat_model
 from civica.memory.records import LearnerProfile, MistakeEpisode, TopicMastery
 from civica.memory.store import get_store
-from civica.memory.writer import get, list_records, put_planner
+from civica.memory.writer import MemoryNotAllowed, get, list_records, put_planner
 from civica.progress.quiz_log import log_answer
 from civica.retrieval.content import ContentChunk, SearchFn, search
 
@@ -52,11 +60,6 @@ PROFILE_KEY = "current"
 class PlannerMode(StrEnum):
     TEACH = "teach"
     QUIZ = "quiz"
-
-
-class HaltReason(StrEnum):
-    FINAL_MESSAGE = "final_message"
-    MAX_STEPS = "max_steps"
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,7 @@ class PlannerDeps:
     question_store: QuestionStore
     answer_logger: AnswerLogger
     rejection_store: RejectionStore
+    trace: TraceWriter
     content_model: BaseChatModel | None = None
     retriever: SearchFn | None = None
     critic: CritiqueFn | None = None
@@ -114,6 +118,7 @@ def default_planner_deps() -> PlannerDeps:
         question_store=PostgresQuestionStore(),
         answer_logger=log_answer,
         rejection_store=PostgresRejectionStore(),
+        trace=PostgresTraceWriter(),
     )
 
 
@@ -152,9 +157,14 @@ def _format_quiz(quiz: Quiz) -> str:
 
 
 def _teach(deps: PlannerDeps, theme: Theme, focus: str) -> Explanation:
+    """Explain a focus; an ungrounded lesson is logged as a retrieval gap."""
     if deps.retriever is None:
-        return explain(focus, theme, chat_client=deps.content_model)
-    return explain(focus, theme, retriever=deps.retriever, chat_client=deps.content_model)
+        lesson = explain(focus, theme, chat_client=deps.content_model)
+    else:
+        lesson = explain(focus, theme, retriever=deps.retriever, chat_client=deps.content_model)
+    if not lesson.context_chunks:
+        deps.trace.record_gap(RetrievalGap(theme=theme, query=focus))
+    return lesson
 
 
 def _make_quiz(deps: PlannerDeps, user_id: UserId, theme: Theme, n: int) -> Quiz:
@@ -185,7 +195,10 @@ def _build_tools(user_id: UserId, deps: PlannerDeps, turn: _TurnState) -> list[B
     def retrieve_corpus(theme: str, query: str) -> str:
         """Retrieve official corpus passages for a theme slug and a query."""
         retriever = deps.retriever or _corpus_search
-        chunks = retriever(query, Theme.from_slug(theme))
+        parsed = Theme.from_slug(theme)
+        chunks = retriever(query, parsed)
+        if not chunks:
+            deps.trace.record_gap(RetrievalGap(theme=parsed, query=query))
         return "\n\n".join(c.chunk.text for c in chunks) or "No passages found."
 
     def teach(theme: str, focus: str) -> str:
@@ -198,6 +211,10 @@ def _build_tools(user_id: UserId, deps: PlannerDeps, turn: _TurnState) -> list[B
         """Generate n multiple-choice questions for a theme slug."""
         try:
             quiz = _make_quiz(deps, user_id, Theme.from_slug(theme), n)
+        except InsufficientMaterialError as error:
+            for query in error.queries:
+                deps.trace.record_gap(RetrievalGap(theme=error.theme, query=query))
+            return f"No quiz could be generated: {error}"
         except QuestionGenerationError as error:
             return f"No quiz could be generated: {error}"
         turn.quiz = quiz
@@ -232,10 +249,19 @@ def _fallback_lesson(user_id: UserId, deps: PlannerDeps) -> Explanation:
 
 
 def run_planner(
-    user_id: UserId, learner_message: str, mode: PlannerMode, deps: PlannerDeps
+    user_id: UserId, learner_message: str, mode: PlannerMode, deps: PlannerDeps, *, thread_id: str
 ) -> PlannerResult:
     """Run the tool loop for one learner turn, halting after MAX_PLANNER_STEPS model calls."""
     turn = _TurnState()
+    turn_id = uuid.uuid4()
+
+    def write_row(tool: ToolCall | None, halt_reason: HaltReason | None) -> None:
+        deps.trace.record_step(TraceStep(
+            user_id=user_id, thread_id=thread_id, turn_id=turn_id, step_index=len(turn.calls),
+            tool_name=tool.name if tool else None, tool_args=tool.args if tool else None,
+            halt_reason=halt_reason, prompt_version=PLANNER_PROMPTS.version,
+        ))
+
     tools = {tool.name: tool for tool in _build_tools(user_id, deps, turn)}
     model = deps.planner_model.bind_tools(list(tools.values()))
     messages: list[BaseMessage] = [
@@ -245,6 +271,7 @@ def run_planner(
     for step in range(1, MAX_PLANNER_STEPS + 1):
         response = model.invoke(messages)
         if not isinstance(response, AIMessage) or not response.tool_calls:
+            write_row(None, HaltReason.FINAL_MESSAGE)
             return PlannerResult(
                 reply=response.text, halt_reason=HaltReason.FINAL_MESSAGE,
                 tool_calls=tuple(turn.calls), lesson=turn.lesson, quiz=turn.quiz,
@@ -254,11 +281,18 @@ def run_planner(
         messages.append(response)
         for call in response.tool_calls:
             args: dict[str, object] = dict(call["args"])
-            turn.calls.append(ToolCall(name=call["name"], args=args))
-            output = _run_tool(tools[call["name"]], args) if call["name"] in tools else "Error: unknown tool"
+            tool_call = ToolCall(name=call["name"], args=args)
+            write_row(tool_call, None)
+            turn.calls.append(tool_call)
+            try:
+                output = _run_tool(tools[call["name"]], args) if call["name"] in tools else "Error: unknown tool"
+            except MemoryNotAllowed:
+                write_row(None, HaltReason.FORBIDDEN_WRITE)
+                raise
             messages.append(ToolMessage(content=output, tool_call_id=call["id"] or ""))
 
     lesson = _fallback_lesson(user_id, deps)
+    write_row(None, HaltReason.MAX_STEPS)
     return PlannerResult(
         reply=lesson.text, halt_reason=HaltReason.MAX_STEPS,
         tool_calls=tuple(turn.calls), lesson=lesson, quiz=turn.quiz,

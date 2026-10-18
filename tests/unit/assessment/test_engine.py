@@ -957,6 +957,17 @@ class TestNoRetrievedMaterial:
         assert fakes.chat_client.invocation_count == 0
         assert fakes.question_store.saved_questions == []
 
+    @pytest.mark.parametrize("theme", [_THEME, _HISTOIRE])
+    def test_error_carries_the_theme_and_the_queries_tried(self, fakes: _Fakes, theme: Theme) -> None:
+        retriever = FakeRetriever(section_count=0)
+
+        with pytest.raises(InsufficientMaterialError) as raised:
+            _quiz(fakes, theme=theme, retriever=retriever)
+
+        assert raised.value.theme == theme
+        assert raised.value.queries == tuple(query for query, _ in retriever.calls)
+        assert raised.value.queries
+
     def test_mock_exam_raises_without_calling_model(self, fakes: _Fakes) -> None:
         fakes = replace(fakes, retriever=FakeRetriever(section_count=0))
 

@@ -10,7 +10,7 @@ from tests.support.assessment import (
     FakeRejectionStore,
     FakeRetriever,
 )
-from tests.support.planner import PlannerFakes
+from tests.support.planner import FakeTraceWriter, PlannerFakes
 
 
 @pytest.fixture()
@@ -22,4 +22,5 @@ def planner_fakes(store: InMemoryStore) -> PlannerFakes:
         question_store=FakeQuestionStore(),
         answer_logger=FakeAnswerLogger(),
         rejection_store=FakeRejectionStore(),
+        trace=FakeTraceWriter(),
     )
