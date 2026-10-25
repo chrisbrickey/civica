@@ -739,7 +739,7 @@ This addresses a silent failure mode that I discovered while implementing this s
   - `prompt_version`: a short constant declared beside the generation prompt in the module `PROMPTS` dict and bumped by hand whenever that prompt changes. Stamping it costs one column and turns every later prompt edit into a measurable A/B rather than a guess. Step 9B pairs it with persisted critic-rejection reasons so rejection rate per prompt version becomes the accumulating quality signal.
   - `generate_quiz` may prefer persisted items that are due for a learner before generating new ones once the bank is warm (behind the `PREFER_SCHEDULED_QUESTIONS` flag, default `False`; Step 12 flips it on after its scheduling check-in).
   - Add the `generated_questions` table to `schema.sql` (idempotent `CREATE TABLE IF NOT EXISTS`).
-  - **Every scored answer is logged.** `MockExam.score(answers)` and the quiz scoring path both write one `quiz_answers` row per answer via Step 7B's `log_answer`. A mock exam is 40 answers in one sitting and is the densest mastery signal the system ever receives; it must not bypass the log. Step 10B's `mock_exam_node` inherits this rule.
+  - **Every scored answer is logged.** `MockExam.score(answers)` and the quiz scoring path both write one `quiz_answers` row per answer via Step 7B's `log_answer`. A mock exam is 40 answers in one sitting and is the densest mastery signal the system ever receives; it must not bypass the log. Step 10's `mock_exam_node` inherits this rule.
 
 - **Check In:** 
   - Confirm with the user that the implementation is satisfactory.
@@ -939,41 +939,54 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 10B: LangGraph graph wiring
+## Step 10B: Refactor the planner loop into graph nodes
 
-**Goal:** Assemble the LLM planner (developed in previous section) and the deterministic mock-exam path into a single compiled LangGraph that always runs `memory_writer` before any terminal write.
+**Goal:** 
+- Refactor the planner's tool-calling loop to use a more standardized architecture of LangGraph nodes (less custom python), while maintaining every existing guardrail (step bound, halt fallback, allowlist-guarded writes, trace rows, retrieval gaps). 
+- This step only builds the planner subgraph. A subsequent step assembles the full graph with Postgres persistence.
 
-- **Test:** `tests/integration/graph/test_graph.py`
-  - Integration test using real `explanation`/`assessment` code but fake Claude + fake retriever (no network; writes real `quiz_answers` and store rows). Drive the graph through the planner-backed Teach/Quiz flow for a test user with a fake model that emits a realistic tool-call sequence, and assert:
-    - A quiz answer written through the graph appears in the raw `quiz_answers` table.
-    - `topic_mastery` for the answered theme is updated (via `memory_writer_node`, respecting the allowlist).
-    - `memory_writer` runs before the graph terminates regardless of the planner's path, including a turn halted at `MAX_PLANNER_STEPS` (assert the store row exists after any successful turn).
-    - The planner runs on `default_planner_deps()` with only the chat models faked, so the default retrievers (including `retrieve_corpus`) and the Postgres-backed stores are exercised against the test database.
-    - The deterministic mock exam path produces 40 questions and reports pass/fail (this path bypasses the planner).
-    - **The mock exam path writes 40 `quiz_answers` rows** and `topic_mastery` moves for every theme the exam covered. A mock exam that scores without logging would silently discard the densest signal the system gets.
-    - `planner_trace` rows exist for the turn, in tool-call order, and are readable by `user_id` + `thread_id`.
-    - A turn whose retrieval comes back empty writes a `retrieval_gaps` row with its theme and query.
-    - Checkpointer resume: a second invocation on the same `thread_id` sees the state saved by the first (Step 11 relies on this).
-    - Mock exam failure: when the critic cannot fill a theme, `mock_exam_node` retries once, then returns a "try again" message, saving no questions and no `quiz_answers` rows.
-    - Forbidden write: a planner turn that attempts a `topic_mastery` write through `record_outcome` leaves the store untouched, records `halt_reason="forbidden_write"` in `planner_trace`, and the learner gets the fallback lesson rather than an error.
-- **Test (external):** `tests/integration/graph/test_planner_external.py`, marked `@pytest.mark.external`, needs `ANTHROPIC_API_KEY`. One contract test: real Claude with the planner's tools bound returns tool calls matching the tool schemas and ends the turn with a final message.
+- **Test:** `tests/unit/graph/test_planner_graph.py` (unit: compiled planner subgraph with a fake chat model, `InMemorySaver`, `InMemoryStore`, and the injected fake trace writer; no DB). Move the 10A loop tests here so they drive the subgraph instead of `run_planner`:
+  - A fake model that requests `suggest_review_theme` then `teach` invokes both tools in order with the arguments the model supplied, and the turn ends when the model emits a final message (no tool call).
+  - A fake model that always emits a tool call is halted at `MAX_PLANNER_STEPS`: the learner receives the fallback lesson (not an error and not a partial trace).
+  - Allowlist guard: a `record_outcome` write of a kind outside `PLANNER_WRITE_ALLOWLIST`, including `topic_mastery`, leaves the store untouched, records `halt_reason="forbidden_write"`, and routes to the fallback lesson.
+  - Grounding guard: `teach`/`generate_quiz` on a theme whose fake retriever returns `[]` gets the insufficient-material short-circuit, not a fabricated lesson.
+  - Trace: one `planner_trace` row per tool call in order, then one terminal row with `final_message`, `max_steps`, or `forbidden_write`. Each turn gets its own `turn_id`.
+  - Retrieval gaps: the existing 10A gap tests (empty teach, empty fallback lesson, empty `retrieve_corpus`, empty quiz) pass against the subgraph.
+  - The step counter resets per turn: a second turn on the same thread gets the full `MAX_PLANNER_STEPS` budget.
+- Update `src/civica/graph/planner.py`:
+  - Remove the Python loop in `run_planner`; there is one loop implementation, and it is the graph. Tool bindings (`_build_tools`), `read_learner_state`, `default_planner_deps`, and their unit tests stay as they are.
+  - `_TurnState` (lesson, quiz, calls) moves into graph state.
 - Create `src/civica/graph/nodes.py`:
-  - `planner_node` (the tool-calling loop from `planner.py`), plus deterministic nodes the tools and the mock-exam path share: `mock_exam_node`, `update_mastery_node`, `save_session_summary_node`, `memory_writer_node`.
-    - `planner_node` passes the graph's `thread_id` to `run_planner(..., thread_id=...)`.
-    - `planner_node` catches `MemoryNotAllowed` from the planner and serves the same fallback lesson as a `max_steps` halt. `run_planner` has already written the `forbidden_write` terminal row to the trace (Step 10A). Writes stay fail-closed; the learner never sees an error.
-  - Each node is a plain function `(state) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate. The planner reaches that same business logic through its tool bindings, so there is one implementation of each capability, called either autonomously (Teach/Quiz) or deterministically (mock exam).
-  - `mock_exam_node` logs every one of the 40 answers to `quiz_answers` (Step 9's rule) and then runs `update_mastery_node` like any other assessed path. The mock exam bypasses the *planner*, never the *logging*.
-    - NB: `generate_mock_exam` raises `QuestionGenerationError` when the critic cannot fill a theme, and saves nothing. `mock_exam_node` must handle it (e.g. retry once, then show a "try again" message) rather than crash the graph.
-  - `score_answer_node` scores the learner's submitted choice deterministically and logs it to `quiz_answers`. The planner has no scoring tool (Step 10A), so the model never supplies or scores an answer.
-  - `update_mastery_node` is the **only** writer of `topic_mastery`, computing it deterministically from `quiz_answers`. It writes through the in-process `memory.writer.put`, not the planner's `record_outcome`. See the two-allowlist rule in Step 10A.
-  - Mistake-driven review: when the planner (via `suggest_review_theme` / `read_learner_state`) targets a theme with an active `mistake_episode`, `retrieve_corpus` reconstructs the retrieval query from the source context recorded on the episode (theme at minimum; `page_slug`/`section_id` when recorded) in the corpus prefix style, so re-teaching pulls the exact passages the learner missed rather than a generic theme sample. `ContentChunk.chunk_index`/`content_hash` (Step 5) give those citations stable identity across sessions. The needed source context flows from Step 9 (`Question.sources`) into Step 7's `MistakeEpisode.sources`.
-- Create `src/civica/graph/graph.py`:
-  - `build_graph() -> CompiledGraph` - compiles the graph with the shared `PostgresSaver` as checkpointer and the shared `PostgresStore` as store.
-  - Topology: Teach and Quiz enter `planner_node`, which loops via a `tools_condition` conditional edge (call a tool → return to planner) until the model emits a final response, then flows to `memory_writer`. Mock exam enters `mock_exam_node` directly (no planner). `memory_writer` is a required edge before any terminal write on every path.
-- **Check In:** Stop and confirm with user that the implementation is satisfactory. Confirm that the graph runs end-to-end from the CLI: Prompt the use to exercise an autonomous Teach turn and confirm the planner's tool-call trace is sensible.
+  - `planner_model`: one model call with the tools bound; increments the per-turn step counter in state.
+  - `planner_tools`: runs the requested tools, writes one trace row per call, and appends the tool results. Catches `MemoryNotAllowed`, records `forbidden_write`, and routes to `fallback_lesson`. Writes stay fail-closed; the learner never sees an error.
+  - `fallback_lesson`: `suggest_review_theme` plus a plain `teach` on that theme, used for `max_steps` and `forbidden_write`.
+  - Conditional edges: `tools_condition` routes a tool call to `planner_tools` and a final message to the exit; the step bound routes to `fallback_lesson` when `MAX_PLANNER_STEPS` is reached.
+  - `user_id` and `thread_id` come from the graph config, never from tool arguments (Step 10A).
+  - Each node is a plain function `(state) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate.
+- **Check In:** Stop and confirm with the user that the subgraph keeps every 10A guardrail before wiring persistence.
 
 - **README:**
-  - Add `src/civica/graph/` (`nodes`, `graph`) to the project structure diagram, completing the `graph/` package begun in Step 10A.
+  - Add a "Learner graph" section to Architecture, starting with the planner loop diagram (adjust it if the built nodes differ):
+    ```
+                ┌─────────────────┐   tool call    ┌───────────────┐
+     enter ────►│  planner_model  ├───────────────►│ planner_tools │
+                │                 │◄───────────────┤               │
+                └───┬─────────┬───┘    result      └───────┬───────┘
+                    │         │ MAX_PLANNER_STEPS          │ forbidden write
+      final message │         ▼                            ▼
+                    │    ┌─────────────────────────────────────┐
+                    │    │           fallback_lesson           │
+                    │    └──────────────────┬──────────────────┘
+                    ▼                       ▼
+                  exit                    exit
+    ```
+  - Under the diagram, explain the loop in plain terms: `planner_model` makes one model call, `planner_tools` runs the tools it asked for, and the two repeat until the model sends a final message. The loop stops after `MAX_PLANNER_STEPS`, and a write outside the planner's allowlist ends the turn; both serve a fallback lesson instead of an error.
+  - Add a note about: "Choice of graph node architecture for planner loop". Rationale for selection of graph-native loop (as opposed to wrapping custom python in a single node or event stream):
+    - Progress is checkpointed after every tool step, so a crash can resume mid-turn.
+    - Each step can be streamed to the UI as it happens (`teach` takes about 11s).
+    - The graph can pause before a tool runs (human-in-the-loop interrupts).
+    - It is the standard LangGraph agent pattern, and each step is visible in LangGraph tooling.
+  - Add `nodes` to `src/civica/graph/` in the project structure diagram.
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -981,37 +994,160 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 10C: Persistent study plan + corpus coverage tracker
+## Step 10C: Graph assembly + persistence
 
-**Goal:** Give the planner a durable agenda it owns across sessions, and a deterministic answer to "how much of this theme has the learner actually seen?". Both are additive planner tools over the Step 10A/10B foundation.
+**Goal:** Teach/Quiz turn runs end to end against the dev database. To support this, compile the full graph on Postgres (checkpointer + store) with an input router and a `memory_writer` terminal node.
 
-**Rationale:** After Step 10B the planner's autonomy lives entirely inside a single turn. Across sessions it re-derives everything from mastery numbers, so it can loop on the same familiar passages forever and has no agenda to explain. Mastery says *how well*; coverage says *how much*; the study plan says *what we are doing and why*. Together they are the difference between "the LLM picks the next tool" and "the agent runs a plan it owns," which is the stated purpose of this project.
+- **Test:** `tests/integration/graph/test_graph.py`
+  - Integration test using real `explanation`/`assessment` code but fake Claude + fake retriever (no network; writes real store rows). Drive the graph through a planner-backed Teach/Quiz turn for a test user with a fake model that emits a realistic tool-call sequence, and assert:
+    - `memory_writer` runs before the graph terminates regardless of the planner's path, including a turn halted at `MAX_PLANNER_STEPS` (assert the store row exists after any successful turn).
+    - The planner runs on `default_planner_deps()` with only the chat models faked, so the default retrievers (including `retrieve_corpus`) and the Postgres-backed stores are exercised against the test database.
+    - `planner_trace` rows exist for the turn, in tool-call order, and are readable by `user_id` + `thread_id`.
+    - A turn whose retrieval comes back empty writes a `retrieval_gaps` row with its theme and query.
+    - Checkpointer resume: a second invocation on the same `thread_id` sees the state saved by the first (Step 11 relies on this).
+    - The per-turn message history is reset at the start of each turn, so the checkpoint does not grow with every turn.
+    - Forbidden write: a planner turn that attempts a `topic_mastery` write through `record_outcome` leaves the store untouched, records `halt_reason="forbidden_write"` in `planner_trace`, and the learner gets the fallback lesson rather than an error.
+- **Test (external):** `tests/integration/graph/test_planner_external.py`, marked `@pytest.mark.external`, needs `ANTHROPIC_API_KEY`. One contract test: real Claude with the planner's tools bound returns tool calls matching the tool schemas and ends the turn with a final message.
+- Create `src/civica/graph/graph.py`:
+  - `build_graph() -> CompiledGraph` - compiles the graph with the shared `PostgresSaver` as checkpointer and the shared `PostgresStore` as store.
+  - `route_input`: graph input is a tagged union by kind (`message`, later `answer`, `mock_start`, `mock_submit`). This step handles `message` only, which enters the planner subgraph.
+  - `memory_writer` writes the session summary and is the required last node on every path.
+- Planner prompt: stop the final reply from promising to "check it and log the result". Scoring and logging are the graph's job.
+- Create `src/civica/scripts/run_turn.py`: runs one Teach turn for a dev user, streaming each step and printing the `planner_trace` rows.
+- **Check In:** Stop and confirm with user that the implementation is satisfactory. Prompt the user to run `run_turn.py` for an autonomous Teach turn and confirm the planner's tool-call trace is sensible.
 
-**Part 1: Persistent study plan (`STUDY_PLAN` memory kind)**
+- **README:**
+  - In the "Learner graph" section, add the routing diagram above the planner loop. This step has only the `message` row (other steps add the other rows):
+    ```
+    START ─► route_input
+               │
+               ├─ message (teach / quiz) ─► planner loop (below) ─────────────────────► memory_writer ─► END
+               ├─ answer ────────────────► score_answer ──────► update_mastery ──────► memory_writer ─► END
+               ├─ mock_start ────────────► mock_exam_generate ───────────────────────► memory_writer ─► END
+               └─ mock_submit ───────────► mock_exam_score ───► update_mastery ──────► memory_writer ─► END
+    ```
+  - State that every turn enters through `route_input`, every path ends at `memory_writer`, and study plan, coverage and mistake-driven review are planner tools, not separate nodes.
+  - Add `graph` to `src/civica/graph/` in the project structure diagram.
+  - Document `run_turn.py` under Usage.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+
+---
+
+## Step 10D: Answers + derived mastery
+
+**Goal:** Let the learner answer a quiz question in a later turn, log it, record mistakes, and recompute mastery deterministically. The planner has no scoring tool (Step 10A), so the model never supplies or scores an answer.
+
+- **Test:** extend `tests/integration/graph/test_graph.py`
+  - A quiz created in one turn is kept in checkpointed state, and an `answer` input on the next turn scores it.
+  - A quiz answer written through the graph appears in the raw `quiz_answers` table.
+  - A wrong answer writes a `MistakeEpisode` carrying the question's `sources`.
+  - `topic_mastery` for the answered theme is updated, through the in-process `memory.writer.put`, never through `record_outcome`.
+- **Test:** `tests/unit/graph/test_mastery.py`: mastery is the correct share of the learner's last 20 answers on the theme (fewer answers use what exists; no answers leaves mastery unwritten).
+- Add to `src/civica/graph/nodes.py`:
+  - `score_answer`: scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (Step 9). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
+  - `update_mastery`: the **only** writer of `topic_mastery`, computed from `quiz_answers`. See the two-allowlist rule in Step 10A.
+  - Route: `answer` -> `score_answer` -> `update_mastery` -> `memory_writer`.
+- **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right.
+
+- **README:**
+  - Add the `answer` row to the routing diagram (see Step 10C), and a line that answers are scored without the LLM and `update_mastery` is the only node that writes `topic_mastery`.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+
+---
+
+## Step 10E: Mock exam path
+
+**Goal:** A deterministic 40-question mock exam that bypasses the *planner*, never the *logging*.
+
+- **Test:** extend `tests/integration/graph/test_graph.py`
+  - `mock_start` produces 40 questions held in checkpointed state (this path bypasses the planner).
+  - `mock_submit` reports pass/fail and **writes 40 `quiz_answers` rows**, and `topic_mastery` moves for every theme the exam covered. A mock exam that scores without logging would silently discard the densest signal the system gets.
+  - Mock exam failure: when the critic cannot fill a theme, `mock_exam_generate` retries once, then returns a "try again" message, saving no questions and no `quiz_answers` rows.
+- Add to `src/civica/graph/nodes.py`:
+  - `mock_exam_generate`: calls `generate_mock_exam`. It raises `QuestionGenerationError` when the critic cannot fill a theme and saves nothing; retry once, then show a "try again" message rather than crash the graph.
+  - `mock_exam_score`: scores via `MockExam.score`, which logs all 40 answers and then runs `update_mastery` like any other assessed path.
+  - Routes: `mock_start` -> `mock_exam_generate` -> `memory_writer`; `mock_submit` -> `mock_exam_score` -> `update_mastery` -> `memory_writer`.
+- **Check In:** Stop and confirm with user that the implementation is satisfactory.
+
+- **README:**
+  - Add the `mock_start` and `mock_submit` rows to the routing diagram. Add a line that the mock exam skips the planner: one call creates 40 questions, a second scores the answers.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+
+---
+
+## Step 10F: Mistake-driven review retrieval
+
+**Goal:** When the planner re-teaches a theme the learner got wrong, pull the exact passages they missed rather than a generic theme sample.
+
+- **Test:** extend `tests/unit/graph/test_planner.py`
+  - For a theme with an active `mistake_episode` that records `page_slug`/`section_id`, `retrieve_corpus` and `teach` query with that source context in the corpus prefix style.
+  - With no active episode, or an episode without sources, the query falls back to the theme.
+- Update the planner's tool bindings: when the planner (via `suggest_review_theme` / `read_learner_state`) targets a theme with an active `mistake_episode`, reconstruct the retrieval query from the episode's sources (theme at minimum; `page_slug`/`section_id` when recorded). `ContentChunk.chunk_index`/`content_hash` (Step 5) give those citations stable identity across sessions. The source context flows from Step 9 (`Question.sources`) into Step 7's `MistakeEpisode.sources`, written by Step 10D.
+- **Check In:** Stop and confirm with user that the implementation is satisfactory.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+
+---
+
+## Step 10G: Persistent study plan
+
+**Goal:** Give the planner a durable agenda it owns across sessions.
+
+**Rationale (shared with subsequent step):** 
+- The planner's autonomy lives entirely inside a single turn. 
+- Across sessions it re-derives everything from mastery numbers, so it can loop on the same familiar passages forever and has no agenda to explain. 
+- Mastery says *how well*; coverage says *how much*; the study plan says *what we are doing and why*. Together they are the difference between "the LLM picks the next tool" and "the agent runs a plan it owns," which is the stated purpose of this project.
 
 - **Test:** extend `tests/unit/memory/test_records.py` and `tests/integration/memory/test_writer.py`
   - `StudyPlan` round-trips through `model_dump(mode="json")` / `model_validate`, with `theme` fields dumping as slugs (the Theme-as-slug rule).
   - A `StudyPlan` written through `record_outcome` succeeds now that `STUDY_PLAN` is in `PLANNER_WRITE_ALLOWLIST`, while `topic_mastery` through the same path still raises `MemoryNotAllowed`. Widening the planner's scope by one kind must not widen it by two.
 - Add to `memory/records.py`: `MemoryKind.STUDY_PLAN = "study_plan"` and a frozen `StudyPlan` record: `focus_themes: list[Theme]`, `next_action: str` (bounded prose, `max_length=500`), `rationale: str` (bounded prose, `max_length=500`), `updated_at: datetime`. One per user, constant key `"current"` (same convention as `LearnerProfile`).
 - Add `STUDY_PLAN` to `PLANNER_WRITE_ALLOWLIST` (Step 10A) by hand. This is a deliberate widening: the plan is exactly the kind of narrative, revisable state an agent should own, and it carries no numeric score the agent could inflate in its own favor.
-- Planner tools: `read_study_plan(user_id) -> StudyPlan | None` (read at the start of every Teach/Quiz turn) and `revise_study_plan(...)` routed through `record_outcome`. The system prompt instructs the planner to read the plan first, act consistently with it, and revise it when the learner's state has moved.
+- Planner tools: `read_study_plan() -> StudyPlan | None` (read at the start of every Teach/Quiz turn) and `revise_study_plan(...)` routed through `record_outcome`. The system prompt instructs the planner to read the plan first, act consistently with it, and revise it when the learner's state has moved.
+- **Check In:** Stop and confirm with the user that the study-plan record shape is right.
 
-**Part 2: Corpus coverage tracker**
+- **README:**
+  - Note the new `study_plan` memory namespace alongside the original four.
 
-- **Test:** `tests/integration/reflection/test_coverage.py` (integration: seeds real `quiz_answers`, `generated_questions`, and `planner_trace` rows)
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+
+---
+
+## Step 10H: Corpus coverage tracker
+
+**Goal:** Provide a deterministic answer to "how much of this theme has the learner actually seen?".
+
+**Why a new table:** `planner_trace` rows hold only the tool arguments (`theme`, `focus`), never the sections a lesson used, so "taught" coverage cannot be derived from the trace. The passages are known when `teach` returns (`Explanation` carries them), so they are recorded then.
+
+- **Test:** extend `tests/integration/db/test_migrate.py`: `lesson_sources` exists after migration, and re-running the migration stays idempotent.
+- **Test:** extend `tests/unit/graph/test_planner_graph.py`: a grounded `teach` writes one `lesson_sources` row per cited section through the injected fake writer; an insufficient-material lesson writes none.
+- **Test:** `tests/integration/reflection/test_coverage.py` (integration: seeds real `quiz_answers`, `generated_questions`, and `lesson_sources` rows)
   - For a theme with N total `(page_slug, section_id)` pairs in `content_chunks`, a learner taught or quizzed on two of them reports exactly those two as covered and the rest as gaps.
   - A learner with no history for a theme reports 100% gap, not an error or an empty result.
   - Coverage is per user: one learner's history never appears in another's gaps.
+- Extend `src/civica/db/schema.sql` with an append-only `lesson_sources` table (idempotent): `id BIGSERIAL`, `user_id UUID REFERENCES users(user_id)`, `thread_id TEXT`, `turn_id UUID`, `page_slug TEXT`, `section_id TEXT`, `created_at TIMESTAMPTZ DEFAULT NOW()`. Written next to the trace writer, following the optional-connection convention.
 - Create `src/civica/reflection/coverage.py`:
-  - `get_coverage_gaps(user_id, theme) -> CoverageReport` - deterministic, no LLM. The universe of sections comes from `content_chunks`, minus the course-objective sections that assessment skips (Step 9C), so they never show as gaps. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`. **Taught** coverage comes from `planner_trace` rows for the `teach`/`retrieve_corpus` tools, which is why Step 10A's trace table is a hard prerequisite for this part.
+  - `get_coverage_gaps(user_id, theme) -> CoverageReport` - deterministic, no LLM. The universe of sections comes from `content_chunks`, minus the course-objective sections that assessment skips (Step 9C), so they never show as gaps. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`. **Taught** coverage comes from `lesson_sources`.
   - `CoverageReport` is a frozen pydantic model: `theme`, `covered: list[SourceRef]`, `gaps: list[SourceRef]`, `covered_fraction: float`.
 - Bind `get_coverage_gaps` as a planner tool so the planner can deliberately steer toward unseen material instead of re-teaching whatever retrieval happens to surface.
-
-- **Check In:** Stop and confirm with the user that the study-plan record shape and the coverage definition are right. Specifically confirm that "taught" derived from the planner trace is an acceptable proxy, since it counts a passage as covered the moment it is retrieved into a lesson, not when the learner demonstrates they read it.
+- **Check In:** Stop and confirm with the user that the coverage definition is right. "Taught" counts a section as covered once a grounded lesson cites it, not when the learner shows they read it.
 
 - **README:**
   - Add `src/civica/reflection/` to the project structure diagram (first use; Step 12 extends it).
-  - Note the new `study_plan` memory namespace alongside the original four.
+  - Add `lesson_sources` to the Postgres tables list.
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -1032,8 +1168,8 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Mode picker: **Teach**, **Quiz**, **Mock Exam**.
   - **Teach**: free-text input → `graph.invoke({..., "mode": "teach"})` → the autonomous planner (Step 10) decides its next action (pick a review theme, re-teach a missed passage, or answer the learner's question) → renders the explanation + citations.
   - **Quiz**: `graph.invoke({..., "mode": "quiz"})` → the planner selects the theme and generates the next MCQ; the UI captures the user's choice, submits, and renders correct/incorrect + short explanation.
-  - **Autonomy transparency:** surface the planner's chosen next action in the UI (a short "why this next" line, e.g. "Reviewing *Laïcité* - you missed a question here last session"). Source it from the current `StudyPlan.rationale` (Step 10C), falling back to the last `planner_trace` step for the turn (Step 10A) when no plan exists yet. Read it from the planner's final state; do not add branching logic in the UI. This makes the agent's autonomous choice legible to the learner rather than opaque.
-  - **Coverage readout:** show the learner's `covered_fraction` per theme (Step 10C), e.g. "you have not seen 40% of this theme yet." This is user-visible value on its own and it makes the agent's coverage-driven choices legible alongside its mastery-driven ones.
+  - **Autonomy transparency:** surface the planner's chosen next action in the UI (a short "why this next" line, e.g. "Reviewing *Laïcité* - you missed a question here last session"). Source it from the current `StudyPlan.rationale`, falling back to the last `planner_trace` step for the turn when no plan exists yet. Read it from the planner's final state; do not add branching logic in the UI. This makes the agent's autonomous choice legible to the learner rather than opaque.
+  - **Coverage readout:** show the learner's `covered_fraction` per theme, e.g. "you have not seen 40% of this theme yet." This is user-visible value on its own and it makes the agent's coverage-driven choices legible alongside its mastery-driven ones.
   - **Mock Exam**: countdown timer (client-side using `st.empty()` refresh), 40-question progression, final pass/fail + per-theme breakdown. This mode calls the deterministic mock-exam path, not the planner.
   - Each Streamlit "turn" invokes the graph with a `thread_id = f"{user_id}:{mode}"` so `PostgresSaver` restores state.
 
@@ -1094,7 +1230,7 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
 
 **Reflection dashboard (chore, 0 points):**
 
-- Create `src/civica/scripts/reflection_report.py`: prints bank health (item counts by box, mastered fraction, generation-vs-reuse ratio), critic rejection rate grouped by `prompt_version` (Step 9B), recurring `retrieval_gaps` (Step 10A), and per-theme coverage (Step 10C). Add a mode that runs a scripted synthetic learner through the loops so the behavior can be exercised without months of real answers.
+- Create `src/civica/scripts/reflection_report.py`: prints bank health (item counts by box, mastered fraction, generation-vs-reuse ratio), critic rejection rate grouped by `prompt_version`, recurring `retrieval_gaps`, and per-theme coverage. Add a mode that runs a scripted synthetic learner through the loops so the behavior can be exercised without months of real answers.
 - Rationale: the check-in above and Step 13's both say "until the signal is trusted," and without this script that judgment is unfalsifiable. Chore, so no points and no new tests of its own, but the suite must be green at the step boundary.
 
 - **README:**
@@ -1120,7 +1256,7 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
   - `select_strategy(user_id, theme) -> TeachingStrategy` and `record_reward(user_id, theme, strategy, mastery_gain)` - a small multi-armed-bandit policy. Reward is the measured `topic_mastery` change on the next quiz for that theme (the before/after signal already lives in `quiz_answers` + `topic_mastery`). The planner's `teach` tool asks the policy which strategy to use and passes it into the explanation prompt; `memory_writer` records the reward after the follow-up quiz. The teaching policy now changes based on outcomes - the second self-improving feature.
   - **Reward hygiene (required, not optional).** Compute the mastery-gain reward only from answers on items the learner has seen before, i.e. items with a scheduling history from Step 12. A brand-new generated question carries unknown difficulty, so its outcome reflects the item as much as the teaching. Mixing those in lets item noise swamp the strategy signal and the bandit converges on luck. Step 10A's comprehension check supplies the dense immediate reward; this rule decides which of those answers count.
   - Strategy variants of the explanation prompts are injected as prompt sets. Add a `PromptSet` Protocol (`version: str`) in `llm/prompts.py` so the policy, `teach`, and the reflection report accept any prompt set through one interface. The existing frozen prompt-set dataclasses satisfy it structurally, with no inheritance; give each strategy variant its own version so rewards and rejections stay attributable.
-  - The reward depends on `topic_mastery` being deterministically derived (Step 10A/10B). If the planner could write its own mastery, this reward would be self-graded and the bandit would optimize against a number it controls. That is the concrete payoff of the two-allowlist rule.
+  - The reward depends on `topic_mastery` being deterministically derived. If the planner could write its own mastery, this reward would be self-graded and the bandit would optimize against a number it controls. That is the concrete payoff of the two-allowlist rule.
 - **Global-learning note (deferred - requires a Product Owner decision):** promoting item difficulty and high-value strategy signals from per-user to a *shared* namespace would let the coach improve for every learner, not just the current one. It is also the prerequisite for the cross-learner difficulty calibration that Step 12 deferred: p-correct only means "difficulty" when many learners answer the same item. This conflicts with the "all persistent state is namespaced by `user_id`" rule, so it is intentionally out of scope until the owner sanctions a reserved global namespace (e.g. `user_id="__global__"`) with its own allowlist entry. Flagged here, not built.
 
 - **Check In:** Confirm the strategy set and the cold-start rule with the user before wiring the bandit into the `teach` tool.
@@ -1148,11 +1284,17 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
 8. **Step 8 - Explanation engine:** needs Step 5 (retrieval); independent of memory
 9. **Step 9 - Assessment engine (core + persisted question bank):** needs Step 5 (retrieval) and Step 7B (persist quiz log); independent of the graph. `generate_quiz`/`generate_mock_exam` plus the `generated_questions` table; the persisted bank is the one thing Step 12 requires from this step.
    - **Step 9B - Grounding + correctness gate:** needs Step 9; a quality/safety layer (question critic), not self-improvement. Independently shippable and deferrable if the Step 9 quality check-in already looks strong.
-10. **Step 10 - Autonomous planner + graph (10A, 10B, 10C):** needs Steps 7, 7B, 8, 9; last piece of the back end.
+10. **Step 10 - Autonomous planner + graph (10A to 10H):** needs Steps 7, 7B, 8, 9; last piece of the back end.
     - **Step 10A - Autonomous planner:** pure back end, unit-tested with a fake model. The mastery heuristic is demoted to a tool; the planner (LLM tool-calling loop) becomes the controller for Teach/Quiz. Also lands the two-allowlist write boundary, the halt fallback, `planner_trace`, and `retrieval_gaps`.
-    - **Step 10B - LangGraph graph wiring:** needs Step 10A; integration/DB-backed assembly of the planner + deterministic mock-exam path into one compiled graph with `memory_writer` as the mandatory terminal edge.
-    - **Step 10C - Study plan + coverage tracker:** needs Step 10B (a working graph to extend) and Step 10A's `planner_trace` (coverage derives "taught" from it). Additive planner tools; this is what makes the autonomy persist across sessions rather than within a turn.
-11. **Step 11 - Streamlit UI:** needs Steps 6 and 10C; delivers the user-facing MVP, surfacing the planner's chosen next action, its study-plan rationale, and per-theme coverage
+    - **Step 10B - Refactor the planner loop into graph nodes:** needs Step 10A; moves the tool loop into LangGraph nodes (`planner_model`, `planner_tools`, `fallback_lesson`) with every 10A guardrail kept. Unit-tested with a fake model.
+    - **Step 10C - Graph assembly + persistence:** needs Step 10B; compiles the full graph on `PostgresSaver` + `PostgresStore` with `route_input` and `memory_writer` as the mandatory last node. Adds the `run_turn.py` dev script.
+    - **Step 10D - Answers + derived mastery:** needs Step 10C; scores answers, writes mistake episodes, and derives `topic_mastery` deterministically.
+    - **Step 10E - Mock exam path:** needs Step 10D; deterministic 40-question exam that bypasses the planner but not the logging.
+    - **Step 10F - Mistake-driven review retrieval:** needs Step 10D (mistake episodes with sources).
+    - **Step 10G - Persistent study plan:** needs Step 10C. Additive planner tools; this is what makes the autonomy persist across sessions rather than within a turn.
+    - **Step 10H - Corpus coverage tracker:** needs Step 10D (`quiz_answers` from the graph); adds `lesson_sources` so "taught" coverage has real section data.
+    - Steps 10F, 10G and 10H can be built in any order.
+11. **Step 11 - Streamlit UI:** needs Steps 6, 10E, 10G and 10H; delivers the user-facing MVP, surfacing the planner's chosen next action, its study-plan rationale, and per-theme coverage
 12. **Step 12 - Self-improvement via per-learner scheduling:** **in MVP.** Needs Step 9 (persisted bank) and Step 7B (`quiz_answers`) only; no planner dependency, so it can be built in parallel with Step 10 and turned on after Step 11 ships. Included in MVP because the project's stated purpose is an agent that improves over time, and per-learner scheduling is the cheapest loop that visibly does that with one real learner. Ships with the reflection-report chore that makes its check-in evidence-based.
 13. **Step 13 - Self-improvement on teaching strategy:** **post-MVP.** The second self-improvement step. Needs Step 10 (planner consumes the chosen strategy) and a trusted Step 12 scheduling signal, plus the reward-hygiene rule.
 
