@@ -939,7 +939,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 10B: Refactor the planner loop into graph nodes
+## ✅ Step 10B: Refactor the planner loop into graph nodes
 
 **Goal:** 
 - Refactor the planner's tool-calling loop to use a more standardized architecture of LangGraph nodes (less custom python), while maintaining every existing guardrail: step bound, halt fallback, allowlist-guarded writes, trace rows, retrieval gaps.
@@ -1002,6 +1002,12 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any diversions from the plan.
+    - Subgraph contract: `build_planner_graph(deps)` returns an uncompiled `StateGraph` so that the caller picks the checkpointer and store. Input is `{learner_message, mode}`. Final state carries `reply`, `halt_reason`, `tool_calls`, `lesson`, and `quiz_questions`. The plan did not name these key. The moved tests assert the same values.
+    - `PlannerContext` (`user_id`) lives in `planner.py` to avoid a circular import. `nodes.py` re-exports it. Tool building moved to `build_planner_tools(deps)` because tools no longer close over a `user_id`. So one tool set can be built per graph and bound to both the model and the `ToolNode`. The lesson helper is now the public `teach_theme` because `fallback_lesson` in `nodes.py` reuses it.
+    - `planner_model` and `fallback_lesson` are built by small factories closing over `deps` because LangGraph passes nodes only `(state, runtime)` and `deps` (models, stores) cannot go in checkpointed state. Nodes read `thread_id` from `runtime.execution_info` because a node that takes both `runtime` and `config` does not type-check against langgraph's `add_node` overloads. The tool wrapper reads it from the `ToolRuntime` config, which `ToolRuntime` exposes directly.
+    - `planner_model` appends a reply's calls to `tool_calls` in listing order before tools run so that the order never depends on concurrent wrappers. Calls in a reply that hits `MAX_PLANNER_STEPS` are not run, recorded, or traced, matching 10A: the trace and `tool_calls` list only calls that actually ran.
+    - `router.suggest_review_theme` now reads mastery with one `list_records` call instead of a `get` per theme. Same result, one read. It also stops `InMemoryStore` from creating empty namespaces on missed reads, which the forbidden-write test checks.
+    - Added a test that a turn's lesson, quiz questions, and tool calls do not leak into the next turn on the same thread. The plan's tests checked only that messages and the step count reset, so a stale lesson could have been served on a later turn unnoticed.
 
 ---
 
@@ -1020,7 +1026,8 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
     - Forbidden write: a planner turn that attempts a `topic_mastery` write through `record_outcome` leaves the store untouched, records `halt_reason="forbidden_write"` in `planner_trace`, and the learner gets the fallback lesson rather than an error.
 - **Test (external):** `tests/integration/graph/test_planner_external.py`, marked `@pytest.mark.external`, needs `ANTHROPIC_API_KEY`. One contract test: real Claude with the planner's tools bound returns tool calls matching the tool schemas and ends the turn with a final message.
 - Create `src/civica/graph/graph.py`:
-  - `build_graph() -> CompiledGraph` - compiles the graph with the shared `PostgresSaver` as checkpointer and the shared `PostgresStore` as store. Callers pass `user_id` in the runtime `context` and `thread_id` in the config (Step 10B).
+  - `build_graph() -> CompiledGraph` - compiles the graph with the shared `PostgresSaver` as checkpointer and the shared `PostgresStore` as store. Callers pass `user_id` in the runtime `context` (`PlannerContext`) and `thread_id` in the config (Step 10B). The planner loop comes from the uncompiled `build_planner_graph(deps)`.
+  - Planner state holds pydantic `Explanation` and `Question` objects. The default checkpoint serializer accepts them; if `LANGGRAPH_STRICT_MSGPACK` is ever enabled, register their modules in `allowed_msgpack_modules`.
   - `route_input`: graph input is a tagged union by kind (`message`, later `answer`, `mock_start`, `mock_submit`). This step handles `message` only, which enters the planner subgraph.
   - `memory_writer` writes the session summary and is the required last node on every path.
 - Planner prompt: stop the final reply from promising to "check it and log the result". Scoring and logging are the graph's job.
@@ -1058,7 +1065,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `topic_mastery` for the answered theme is updated, through the in-process `memory.writer.put`, never through `record_outcome`.
 - **Test:** `tests/unit/graph/test_mastery.py`: mastery is the correct share of the learner's last 20 answers on the theme (fewer answers use what exists; no answers leaves mastery unwritten).
 - Add to `src/civica/graph/nodes.py`:
-  - `score_answer`: rebuilds the `Quiz` from the checkpointed questions with `deps.answer_logger` (Step 10B keeps only serializable data in state), then scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (Step 9). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
+  - `score_answer`: rebuilds the `Quiz` from the checkpointed `quiz_questions` with `deps.answer_logger` (Step 10B keeps only serializable data in state), then scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (Step 9). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
   - `update_mastery`: the **only** writer of `topic_mastery`, computed from `quiz_answers`. See the two-allowlist rule in Step 10A.
   - Route: `answer` -> `score_answer` -> `update_mastery` -> `memory_writer`.
 - **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right.

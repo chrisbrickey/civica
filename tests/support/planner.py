@@ -15,7 +15,9 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 
+from civica.domain.themes import DROITS_ET_DEVOIRS
 from civica.graph.trace import RetrievalGap, TraceStep
+from civica.memory.records import MistakeEpisode
 
 from tests.support.assessment import (
     FakeAnswerLogger,
@@ -26,6 +28,12 @@ from tests.support.assessment import (
 )
 from tests.support.llm import FakeChatModelBase
 
+GOAL = "sample-goal"
+SAMPLE_KEY = "sample-key-001"
+SAMPLE_QUESTION_ID = "sample-question-id-001"
+DEFAULT_THEME = DROITS_ET_DEVOIRS
+MISTAKE = MistakeEpisode(theme=DEFAULT_THEME, question_id=SAMPLE_QUESTION_ID)
+
 # Shapes bind_tools accepts, mirroring BaseChatModel.bind_tools.
 ToolLike = dict[str, Any] | type | Callable[..., Any] | BaseTool  # type: ignore[explicit-any]
 
@@ -33,6 +41,11 @@ ToolLike = dict[str, Any] | type | Callable[..., Any] | BaseTool  # type: ignore
 def tool_call(name: str, call_id: str, **args: object) -> AIMessage:
     """A planner-model turn that requests exactly one tool call."""
     return AIMessage(content="", tool_calls=[{"name": name, "args": dict(args), "id": call_id}])
+
+
+def parallel_tool_calls(*replies: AIMessage) -> AIMessage:
+    """One planner-model turn that requests every tool call of `replies`, in listing order."""
+    return AIMessage(content="", tool_calls=[call for reply in replies for call in reply.tool_calls])
 
 
 def final_message(text: str) -> AIMessage:

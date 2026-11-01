@@ -5,7 +5,7 @@ from langgraph.store.base import BaseStore
 from civica.domain.themes import EXAM_QUESTION_COUNTS, Theme
 from civica.domain.user import UserId
 from civica.memory.records import MistakeEpisode, TopicMastery
-from civica.memory.writer import get, list_records
+from civica.memory.writer import list_records
 
 
 def suggest_review_theme(user_id: UserId, *, store: BaseStore | None = None) -> Theme:
@@ -15,9 +15,11 @@ def suggest_review_theme(user_id: UserId, *, store: BaseStore | None = None) -> 
         episode.theme.slug for episode in list_records(user_id, MistakeEpisode, store)
     }
 
+    # One list read instead of a request per theme
+    recorded = {record.theme: record.mastery for record in list_records(user_id, TopicMastery, store)}
+
     def key(theme: Theme) -> tuple[float, bool]:
-        record = get(user_id, theme.slug, TopicMastery, store)
-        mastery = record.mastery if record else 0.0
+        mastery = recorded.get(theme, 0.0)
         weight = EXAM_QUESTION_COUNTS[theme] / total
         return weight * (1 - mastery), theme.slug in mistake_slugs
 

@@ -25,9 +25,8 @@ as opposed to optimization of chunk embedding and retrieval. See [Luminary RAG a
 
 _NB: MVP uses embeddings of the official study materials in conjunction with an LLM to develop questions and answers. Use of the official `liste des questions de connaissance` (list of knowledge questions) is deferred to post-MVP due to lack of an official answer key._
 
-## Architecture
+## Architecture Under Development
 
-### Pipelines Under Development
 ```
                                       ┌───────┐
                                       │  UI   │
@@ -59,6 +58,32 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
                               └────────────────────────┘          └────────────────────────────────────┘
 
 ```
+
+### Planner Graph
+
+```
+                           ┌─────────────────┐   tool call    ┌───────────────┐
+ enter ─► start_turn ─────►│  planner_model  ├───────────────►│ planner_tools │
+                           │                 │◄───────────────┤               │
+                           └───┬─────────┬───┘    result      └───────┬───────┘
+                               │         │ MAX_PLANNER_STEPS          │ forbidden write
+                 final message │         ▼                            ▼
+                               │    ┌─────────────────────────────────────┐
+                               │    │           fallback_lesson           │
+                               │    └──────────────────┬──────────────────┘
+                               ▼                       ▼
+                             exit                    exit
+```
+
+`start_turn` clears the previous turn's messages and step count.
+`planner_model` makes one model call and `planner_tools` runs the tools it asked for. The two repeat until the model sends a final message. 
+A fallback lesson will be served if `MAX_PLANNER_STEPS` is exceeded or if there is a write outside the planner's allowlist.
+
+The loop is built from LangGraph nodes rather than custom Python to ensure:
+- Progress is checkpointed after every tool step, so a crash can resume mid-turn.
+- Each step can be streamed to the UI as it happens.
+- The graph can pause before a tool runs (human-in-the-loop interrupts).
+- Each step is visible in LangGraph tooling.
 
 ### Technology
 
@@ -255,7 +280,7 @@ civica/
   │     ├── domain/             # pure business logic, no I/O
   │     ├── embeddings/         # embedding client shared by ingestion and retrieval
   │     ├── explanation/        # corpus-grounded explanations for learner questions
-  │     ├── graph/              # autonomous planner, review-theme heuristic, planner trace
+  │     ├── graph/              # LLM planner that picks what to teach or quiz next
   │     ├── ingestion/          # corpus chunking and persistence into pgvector
   │     ├── llm/                # chat-model factory shared by generation engines
   │     ├── memory/             # orchestration of short and long-term memory
