@@ -942,50 +942,61 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 ## Step 10B: Refactor the planner loop into graph nodes
 
 **Goal:** 
-- Refactor the planner's tool-calling loop to use a more standardized architecture of LangGraph nodes (less custom python), while maintaining every existing guardrail (step bound, halt fallback, allowlist-guarded writes, trace rows, retrieval gaps). 
+- Refactor the planner's tool-calling loop to use a more standardized architecture of LangGraph nodes (less custom python), while maintaining every existing guardrail: step bound, halt fallback, allowlist-guarded writes, trace rows, retrieval gaps.
 - This step only builds the planner subgraph. A subsequent step assembles the full graph with Postgres persistence.
 
-- **Test:** `tests/unit/graph/test_planner_graph.py` (unit: compiled planner subgraph with a fake chat model, `InMemorySaver`, `InMemoryStore`, and the injected fake trace writer; no DB). Move the 10A loop tests here so they drive the subgraph instead of `run_planner`:
-  - A fake model that requests `suggest_review_theme` then `teach` invokes both tools in order with the arguments the model supplied, and the turn ends when the model emits a final message (no tool call).
-  - A fake model that always emits a tool call is halted at `MAX_PLANNER_STEPS`: the learner receives the fallback lesson (not an error and not a partial trace).
-  - Allowlist guard: a `record_outcome` write of a kind outside `PLANNER_WRITE_ALLOWLIST`, including `topic_mastery`, leaves the store untouched, records `halt_reason="forbidden_write"`, and routes to the fallback lesson.
-  - Grounding guard: `teach`/`generate_quiz` on a theme whose fake retriever returns `[]` gets the insufficient-material short-circuit, not a fabricated lesson.
-  - Trace: one `planner_trace` row per tool call in order, then one terminal row with `final_message`, `max_steps`, or `forbidden_write`. Each turn gets its own `turn_id`.
-  - Retrieval gaps: the existing 10A gap tests (empty teach, empty fallback lesson, empty `retrieve_corpus`, empty quiz) pass against the subgraph.
-  - The step counter resets per turn: a second turn on the same thread gets the full `MAX_PLANNER_STEPS` budget.
+- **Test:** `tests/unit/graph/test_planner_graph.py` (unit: compiled planner subgraph with a fake planner model (`FakePlannerModel`) injected through `PlannerDeps`, `InMemorySaver`, `InMemoryStore`, and the injected fake trace writer; no DB).
+  - Every test in `tests/unit/graph/test_planner.py` that calls `run_planner` moves to this file and invokes the compiled planner subgraph instead, passing `user_id` in the runtime `context` and `thread_id` in the config. Assertions on `PlannerResult` fields (reply, halt reason, tool calls, lesson, quiz) read the same values from the final graph state.
+  - `test_planner.py` keeps only the tests that do not run the loop: `read_learner_state` and the check that `MAX_PLANNER_STEPS` fits a teach-and-check turn.
+  - The tests in this file must cover these behaviors. The last two are new in this step; the rest are 10A checks, updated where this step changes behavior:
+    - A fake model that requests `suggest_review_theme` then `teach` invokes both tools in order with the arguments the model supplied, and the turn ends when the model emits a final message (no tool call).
+    - A fake model that always emits a tool call is halted at `MAX_PLANNER_STEPS`: the learner receives the fallback lesson (not an error and not a partial trace).
+    - Allowlist guard: a `record_outcome` write of a kind outside `PLANNER_WRITE_ALLOWLIST`, including `topic_mastery`, leaves the store untouched, records `halt_reason="forbidden_write"`, and serves the fallback lesson without raising.
+    - Grounding guard: `teach`/`generate_quiz` on a theme whose fake retriever returns `[]` gets the insufficient-material short-circuit, not a fabricated lesson.
+    - Trace: one `planner_trace` row per tool call, with `step_index` in tool-call order, then one terminal row with `final_message`, `max_steps`, or `forbidden_write`. Each turn gets its own `turn_id`. A reply with several tool calls numbers them in the model's listing order, whatever order the rows were written.
+    - Retrieval gaps: the existing 10A gap tests (empty teach, empty fallback lesson, empty `retrieve_corpus`, empty quiz) pass against the subgraph.
+    - The step counter resets per turn: a second turn on the same thread gets the full `MAX_PLANNER_STEPS` budget.
+    - A generated quiz's questions are kept in state, and the model's tool output still hides the correct answer.
 - Update `src/civica/graph/planner.py`:
-  - Remove the Python loop in `run_planner`; there is one loop implementation, and it is the graph. Tool bindings (`_build_tools`), `read_learner_state`, `default_planner_deps`, and their unit tests stay as they are.
-  - `_TurnState` (lesson, quiz, calls) moves into graph state.
+  - Remove `run_planner`, `PlannerResult`, and `_TurnState`. There should be one loop implementation and it is the graph.
+  - Tools read `user_id` from an injected `ToolRuntime` instead of a closure, because the full graph is compiled once for all learners. The model still never sees a `user_id` argument (Step 10A).
+  - `teach` and `generate_quiz` return `Command(update=...)` to put the lesson or quiz questions in state.
+  - `read_learner_state`, `default_planner_deps`, and their unit tests stay as they are.
 - Create `src/civica/graph/nodes.py`:
-  - `planner_model`: one model call with the tools bound; increments the per-turn step counter in state.
-  - `planner_tools`: runs the requested tools, writes one trace row per call, and appends the tool results. Catches `MemoryNotAllowed`, records `forbidden_write`, and routes to `fallback_lesson`. Writes stay fail-closed; the learner never sees an error.
-  - `fallback_lesson`: `suggest_review_theme` plus a plain `teach` on that theme, used for `max_steps` and `forbidden_write`.
-  - Conditional edges: `tools_condition` routes a tool call to `planner_tools` and a final message to the exit; the step bound routes to `fallback_lesson` when `MAX_PLANNER_STEPS` is reached.
-  - `user_id` and `thread_id` come from the graph config, never from tool arguments (Step 10A).
-  - Each node is a plain function `(state) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate.
+  - `build_planner_graph(deps)`: a `StateGraph` with a `context_schema` carrying `user_id`.
+  - `start_turn`: resets per-turn state. Clears messages with `RemoveMessage(REMOVE_ALL_MESSAGES)`, sets the model-call counter to 0, clears tool calls, lesson, and quiz questions, and starts a new `turn_id`.
+  - `planner_model`: adds the system prompt at call time (not stored in `messages`), makes one model call with the tools bound, and increments the counter. A reply with no tool call writes the `final_message` trace row.
+  - `planner_tools`: the prebuilt `ToolNode`, with `handle_tool_errors=(ValueError, ToolException)` so bad arguments go back to the model as text, and a `wrap_tool_call` hook that writes one trace row per call and turns `MemoryNotAllowed` into a `forbidden_write` halt in state. Writes stay fail-closed; the learner never sees an error.
+  - `fallback_lesson`: `suggest_review_theme` plus a plain `teach` on that theme, used for `max_steps` and `forbidden_write`. Writes the terminal trace row.
+  - Conditional edges: after `planner_model`, the step bound routes to `fallback_lesson` when `MAX_PLANNER_STEPS` is reached; otherwise `tools_condition` routes a tool call to `planner_tools` and a final message to the exit. After `planner_tools`, a forbidden write routes to `fallback_lesson`; anything else returns to `planner_model`.
+  - `thread_id` comes from the graph config and `user_id` from the runtime `context`, never from tool arguments (Step 10A).
+  - State holds only checkpointer-serializable data. The quiz is kept as its questions, since `Quiz` holds an answer-logger function.
+  - Each node is a plain function `(state, runtime) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate.
+  - Known differences from 10A: a forbidden write no longer raises (`put_planner` still raises; `planner_tools` catches it). `ToolNode` runs the tool calls of one model reply concurrently, so other calls in a reply containing a forbidden write still run. Trace rows may be inserted in any order, so each row's `step_index` is computed, not counted: the number of tool calls in earlier replies of the turn plus the call's position in the current reply. Sorting by `step_index` gives cause-and-effect order across replies and the model's listing order within a reply.
 - **Check In:** Stop and confirm with the user that the subgraph keeps every 10A guardrail before wiring persistence.
 
 - **README:**
   - Add a "Learner graph" section to Architecture, starting with the planner loop diagram (adjust it if the built nodes differ):
     ```
-                ┌─────────────────┐   tool call    ┌───────────────┐
-     enter ────►│  planner_model  ├───────────────►│ planner_tools │
-                │                 │◄───────────────┤               │
-                └───┬─────────┬───┘    result      └───────┬───────┘
-                    │         │ MAX_PLANNER_STEPS          │ forbidden write
-      final message │         ▼                            ▼
-                    │    ┌─────────────────────────────────────┐
-                    │    │           fallback_lesson           │
-                    │    └──────────────────┬──────────────────┘
-                    ▼                       ▼
-                  exit                    exit
+                               ┌─────────────────┐   tool call    ┌───────────────┐
+     enter ─► start_turn ─────►│  planner_model  ├───────────────►│ planner_tools │
+                               │                 │◄───────────────┤               │
+                               └───┬─────────┬───┘    result      └───────┬───────┘
+                                   │         │ MAX_PLANNER_STEPS          │ forbidden write
+                     final message │         ▼                            ▼
+                                   │    ┌─────────────────────────────────────┐
+                                   │    │           fallback_lesson           │
+                                   │    └──────────────────┬──────────────────┘
+                                   ▼                       ▼
+                                 exit                    exit
     ```
-  - Under the diagram, explain the loop in plain terms: `planner_model` makes one model call, `planner_tools` runs the tools it asked for, and the two repeat until the model sends a final message. The loop stops after `MAX_PLANNER_STEPS`, and a write outside the planner's allowlist ends the turn; both serve a fallback lesson instead of an error.
+  - Under the diagram, explain the loop in plain terms: `start_turn` clears the previous turn's messages and step count, `planner_model` makes one model call, `planner_tools` runs the tools it asked for, and the two repeat until the model sends a final message. The loop stops after `MAX_PLANNER_STEPS`, and a write outside the planner's allowlist ends the turn; both serve a fallback lesson instead of an error.
   - Add a note about: "Choice of graph node architecture for planner loop". Rationale for selection of graph-native loop (as opposed to wrapping custom python in a single node or event stream):
     - Progress is checkpointed after every tool step, so a crash can resume mid-turn.
     - Each step can be streamed to the UI as it happens (`teach` takes about 11s).
     - The graph can pause before a tool runs (human-in-the-loop interrupts).
     - It is the standard LangGraph agent pattern, and each step is visible in LangGraph tooling.
+    - Built from LangGraph's prebuilt `ToolNode` and `tools_condition` rather than a hand-written tool loop.
   - Add `nodes` to `src/civica/graph/` in the project structure diagram.
 
 - **Update this plan:**
@@ -1002,14 +1013,14 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Integration test using real `explanation`/`assessment` code but fake Claude + fake retriever (no network; writes real store rows). Drive the graph through a planner-backed Teach/Quiz turn for a test user with a fake model that emits a realistic tool-call sequence, and assert:
     - `memory_writer` runs before the graph terminates regardless of the planner's path, including a turn halted at `MAX_PLANNER_STEPS` (assert the store row exists after any successful turn).
     - The planner runs on `default_planner_deps()` with only the chat models faked, so the default retrievers (including `retrieve_corpus`) and the Postgres-backed stores are exercised against the test database.
-    - `planner_trace` rows exist for the turn, in tool-call order, and are readable by `user_id` + `thread_id`.
+    - `planner_trace` rows exist for the turn and are readable by `user_id` + `thread_id`, in tool-call order when sorted by `step_index` (Step 10B; insert order is not guaranteed, so trace readers order by `step_index`, never `id` or `created_at`).
     - A turn whose retrieval comes back empty writes a `retrieval_gaps` row with its theme and query.
     - Checkpointer resume: a second invocation on the same `thread_id` sees the state saved by the first (Step 11 relies on this).
-    - The per-turn message history is reset at the start of each turn, so the checkpoint does not grow with every turn.
+    - The per-turn message history is reset at the start of each turn (by `start_turn`, Step 10B), so the checkpoint does not grow with every turn.
     - Forbidden write: a planner turn that attempts a `topic_mastery` write through `record_outcome` leaves the store untouched, records `halt_reason="forbidden_write"` in `planner_trace`, and the learner gets the fallback lesson rather than an error.
 - **Test (external):** `tests/integration/graph/test_planner_external.py`, marked `@pytest.mark.external`, needs `ANTHROPIC_API_KEY`. One contract test: real Claude with the planner's tools bound returns tool calls matching the tool schemas and ends the turn with a final message.
 - Create `src/civica/graph/graph.py`:
-  - `build_graph() -> CompiledGraph` - compiles the graph with the shared `PostgresSaver` as checkpointer and the shared `PostgresStore` as store.
+  - `build_graph() -> CompiledGraph` - compiles the graph with the shared `PostgresSaver` as checkpointer and the shared `PostgresStore` as store. Callers pass `user_id` in the runtime `context` and `thread_id` in the config (Step 10B).
   - `route_input`: graph input is a tagged union by kind (`message`, later `answer`, `mock_start`, `mock_submit`). This step handles `message` only, which enters the planner subgraph.
   - `memory_writer` writes the session summary and is the required last node on every path.
 - Planner prompt: stop the final reply from promising to "check it and log the result". Scoring and logging are the graph's job.
@@ -1041,13 +1052,13 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 **Goal:** Let the learner answer a quiz question in a later turn, log it, record mistakes, and recompute mastery deterministically. The planner has no scoring tool (Step 10A), so the model never supplies or scores an answer.
 
 - **Test:** extend `tests/integration/graph/test_graph.py`
-  - A quiz created in one turn is kept in checkpointed state, and an `answer` input on the next turn scores it.
+  - The quiz questions created in one turn are kept in checkpointed state, and an `answer` input on the next turn scores them.
   - A quiz answer written through the graph appears in the raw `quiz_answers` table.
   - A wrong answer writes a `MistakeEpisode` carrying the question's `sources`.
   - `topic_mastery` for the answered theme is updated, through the in-process `memory.writer.put`, never through `record_outcome`.
 - **Test:** `tests/unit/graph/test_mastery.py`: mastery is the correct share of the learner's last 20 answers on the theme (fewer answers use what exists; no answers leaves mastery unwritten).
 - Add to `src/civica/graph/nodes.py`:
-  - `score_answer`: scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (Step 9). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
+  - `score_answer`: rebuilds the `Quiz` from the checkpointed questions with `deps.answer_logger` (Step 10B keeps only serializable data in state), then scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (Step 9). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
   - `update_mastery`: the **only** writer of `topic_mastery`, computed from `quiz_answers`. See the two-allowlist rule in Step 10A.
   - Route: `answer` -> `score_answer` -> `update_mastery` -> `memory_writer`.
 - **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right.
@@ -1168,7 +1179,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Mode picker: **Teach**, **Quiz**, **Mock Exam**.
   - **Teach**: free-text input → `graph.invoke({..., "mode": "teach"})` → the autonomous planner (Step 10) decides its next action (pick a review theme, re-teach a missed passage, or answer the learner's question) → renders the explanation + citations.
   - **Quiz**: `graph.invoke({..., "mode": "quiz"})` → the planner selects the theme and generates the next MCQ; the UI captures the user's choice, submits, and renders correct/incorrect + short explanation.
-  - **Autonomy transparency:** surface the planner's chosen next action in the UI (a short "why this next" line, e.g. "Reviewing *Laïcité* - you missed a question here last session"). Source it from the current `StudyPlan.rationale`, falling back to the last `planner_trace` step for the turn when no plan exists yet. Read it from the planner's final state; do not add branching logic in the UI. This makes the agent's autonomous choice legible to the learner rather than opaque.
+  - **Autonomy transparency:** surface the planner's chosen next action in the UI (a short "why this next" line, e.g. "Reviewing *Laïcité* - you missed a question here last session"). Source it from the current `StudyPlan.rationale`, falling back to the last `planner_trace` step for the turn (highest `step_index`) when no plan exists yet. Read it from the planner's final state; do not add branching logic in the UI. This makes the agent's autonomous choice legible to the learner rather than opaque.
   - **Coverage readout:** show the learner's `covered_fraction` per theme, e.g. "you have not seen 40% of this theme yet." This is user-visible value on its own and it makes the agent's coverage-driven choices legible alongside its mastery-driven ones.
   - **Mock Exam**: countdown timer (client-side using `st.empty()` refresh), 40-question progression, final pass/fail + per-theme breakdown. This mode calls the deterministic mock-exam path, not the planner.
   - Each Streamlit "turn" invokes the graph with a `thread_id = f"{user_id}:{mode}"` so `PostgresSaver` restores state.
@@ -1286,7 +1297,7 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
    - **Step 9B - Grounding + correctness gate:** needs Step 9; a quality/safety layer (question critic), not self-improvement. Independently shippable and deferrable if the Step 9 quality check-in already looks strong.
 10. **Step 10 - Autonomous planner + graph (10A to 10H):** needs Steps 7, 7B, 8, 9; last piece of the back end.
     - **Step 10A - Autonomous planner:** pure back end, unit-tested with a fake model. The mastery heuristic is demoted to a tool; the planner (LLM tool-calling loop) becomes the controller for Teach/Quiz. Also lands the two-allowlist write boundary, the halt fallback, `planner_trace`, and `retrieval_gaps`.
-    - **Step 10B - Refactor the planner loop into graph nodes:** needs Step 10A; moves the tool loop into LangGraph nodes (`planner_model`, `planner_tools`, `fallback_lesson`) with every 10A guardrail kept. Unit-tested with a fake model.
+    - **Step 10B - Refactor the planner loop into graph nodes:** needs Step 10A; moves the tool loop into LangGraph nodes (`start_turn`, `planner_model`, `planner_tools` as a prebuilt `ToolNode`, `fallback_lesson`) with every 10A guardrail kept. Unit-tested with a fake planner model injected through `PlannerDeps`.
     - **Step 10C - Graph assembly + persistence:** needs Step 10B; compiles the full graph on `PostgresSaver` + `PostgresStore` with `route_input` and `memory_writer` as the mandatory last node. Adds the `run_turn.py` dev script.
     - **Step 10D - Answers + derived mastery:** needs Step 10C; scores answers, writes mistake episodes, and derives `topic_mastery` deterministically.
     - **Step 10E - Mock exam path:** needs Step 10D; deterministic 40-question exam that bypasses the planner but not the logging.
