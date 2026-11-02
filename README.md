@@ -197,7 +197,7 @@ TBD
 ```
   uv run pytest       # runs unit, integration, and type checking tests
 ```
-_NB: Type checking runs as one pytest test (`tests/test_typecheck.py`), so `uv run pytest` fails if `mypy --strict` reports any errors._
+_NB: Type checking runs as one pytest test (`tests/unit/test_typecheck.py`), so `uv run pytest` fails if `mypy --strict` reports any errors._
 
 
 **Run external tests (network calls confirm API contract)**
