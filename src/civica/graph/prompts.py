@@ -18,7 +18,7 @@ class PlannerPrompts:
 
 # Bump version whenever any prompt here changes.
 PLANNER_PROMPTS = PlannerPrompts(
-    version="planner-v001",
+    version="planner-v002",
     system_template=(
         "You are a coach helping a learner prepare for the French naturalization civics exam. "
         "Current mode: {mode}. "

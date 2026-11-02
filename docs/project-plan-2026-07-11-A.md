@@ -936,6 +936,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
     - Extra guardrails: quiz size capped at 10, correct answers hidden from the model, and `MAX_PLANNER_STEPS = 6` with a fallback lesson.
     - `planner_trace` adds a `turn_id`, since one `thread_id` spans many turns. Each turn writes one row per tool call, then one row with the halt reason (including `forbidden_write`, recorded before `MemoryNotAllowed` is re-raised).
     - New `InsufficientMaterialError` separates retrieval gaps from critic rejections and carries the queries tried. Gaps are also logged for empty `retrieve_corpus` results and the fallback lesson.
+    - Planner modes are named `LESSON` and `QUIZ` (not `TEACH` and `QUIZ`) to avoid confusion with the `teach` tool, which the planner may call in either mode.
 
 ---
 

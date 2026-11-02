@@ -53,7 +53,7 @@ PROFILE_KEY = "current"
 
 
 class PlannerMode(StrEnum):
-    TEACH = "teach"
+    LESSON = "lesson"
     QUIZ = "quiz"
 
 
