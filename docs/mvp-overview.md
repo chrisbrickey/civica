@@ -42,7 +42,7 @@ Same architecture (40 Q, 45 min, 80% pass, five themes with identical weighting)
 
 ## MVP Scope
 - Multiple Users: every store operation is namespaced by `user_id` (validated when user creates username; light passphrase check)
-- UI surface: single Streamlit web app (no CLI)
+- UI surface: single web app (no CLI). Logins last 14 days and survive browser refreshes and server restarts, which is why Streamlit is not a great fit.
 - Target exam: naturalization written civic exam (not CSP, not CR)
 - Content acquisition: Manually downloaded PDFs plus a one-shot capture of the ministry's web-only thematic sheets, all landing under `data/raw/`. No runtime scraping at query time.
 - Explanation language: English (about French-language exam content)
@@ -50,7 +50,7 @@ Same architecture (40 Q, 45 min, 80% pass, five themes with identical weighting)
 
 ## MVP Features
 
-- **Memory-aware coaching:** remembers weak themes, recurring misconceptions, preferred explanation depth, and study cadence across sessions
+- **Memory-aware coaching:** remembers weak themes and recurring misconceptions
 - **Autonomous planning:** an LLM planner decides its own next action each turn over a bounded, guarded tool set, and keeps a durable study plan across sessions. Its choice is surfaced to the learner as a short "why this next" line.
 - **Guided study by theme:** the five official themes, with a per-theme coverage readout of how much material the learner has actually seen
 - **Quizzes:** the coach gives LLM-generated questions on request or on its own initiative, using the official French thematic content as source with explanations grounded in the official material*
@@ -79,7 +79,9 @@ Mock Exam will be a deterministic path because the official format is fixed and 
 onboarding
     │
     ▼
-route ─► planner ⇄ tools ──────────────────────────► memory_writer
+route_input
+    │
+    ├──► planner ⇄ tools ──────────────────────────► memory_writer
     │        (coach)       │                              ▲
     │                      │  suggest_review_theme        │
     │                      │  retrieve_corpus / teach     │
@@ -89,13 +91,13 @@ route ─► planner ⇄ tools ────────────────�
     │                      │  get_coverage_gaps           │
     │                      │  record_outcome  (only write)│
     │                                                     │
-    └──► mock_exam ──► update_mastery ──► save_session_summary
+    └──► mock_exam ──► update_mastery ────────────────────┘
 ```
 
 Notes:
 - `retrieve_learner_memory` is NOT a node. It is a helper the planner's tools call.
 - `memory_writer` is a dedicated node that enforces the write allowlist before any durable long-term write. It runs on every path.
-- The planner replaces the earlier deterministic `route` node. The mastery-weighted priority heuristic survives as `suggest_review_theme`, one tool the planner may call for a strong default, so the deterministic signal stays testable underneath the autonomy.
+- The planner replaces the earlier deterministic `route` node that picked a theme. `route_input` only dispatches each turn by input kind (chat message or mock exam action) and makes no teaching decisions. The mastery-weighted priority heuristic survives as `suggest_review_theme`, one tool the planner may call for a strong default, so the deterministic signal stays testable underneath the autonomy.
 - **Two allowlists.** `MEMORY_WRITE_ALLOWLIST` governs in-process writers. A narrower, hand-enumerated `PLANNER_WRITE_ALLOWLIST` governs what the LLM may write through `record_outcome`: episodic and narrative records only. Numeric state (`topic_mastery`) is always derived deterministically from the quiz log, never written by the model.
 - The planner loop is bounded by `MAX_PLANNER_STEPS`. On halt it falls back to a plain lesson, never an error.
 
@@ -187,8 +189,8 @@ data/
 ## Memory Model
 
 Split retrieval by purpose:
-- **Content retrieval:** grounded facts from the corpus (`pgvector`). Used by `teach` and `evaluate`.
-- **Personalization retrieval:** learner-specific context from the LangGraph store. Used by `route`, `teach`, and `quiz`.
+- **Content retrieval:** grounded facts from the corpus (`pgvector`). Used by the planner's tools for lessons, questions, and answer feedback.
+- **Personalization retrieval:** learner-specific context from the LangGraph store. Used by the planner and its tools.
 
 ### Memory Layers
 
@@ -199,7 +201,7 @@ Split retrieval by purpose:
 | Raw quiz log                    | Own Postgres table (not in LangGraph state) | Append-only history of every answered question                 |
 
 Five record types for long-term records:
-- **`learner_profile`:** target permit (naturalization), study cadence, preferred explanation depth, preferred correction tone; stable and rarely changes
+- **`learner_profile`:** user goals; stable and rarely changes
 - **`topic_mastery`:** one record per theme (5 total): score estimate, confidence, last-updated timestamp. Derived from the quiz log, never written by the LLM.
 - **`mistake_episode`:** clustered misconceptions (not raw wrong answers) - each with evidence pointers back to the raw quiz log
 - **`session_summary`:** compact recap of what improved and what to revisit next
@@ -239,7 +241,7 @@ Memory policy = what earns a memory, how confidence is tracked, and when old mem
 
 I chose python `3.12` for multiple reasons.
 
-- Ecosystem-ready: Dependencies work well with 3.12 (e.g., LangGraph, Streamlit, psycopg, pgvector, langchain-anthropic, langchain-openai, bcrypt all publish for 3.12)
+- Ecosystem-ready: Dependencies work well with 3.12 (e.g., LangGraph, NiceGUI, psycopg, pgvector, langchain-anthropic, langchain-openai, bcrypt all publish for 3.12)
 - Long support runway: EOL is October 2028
 - mypy experience: Reportedly 3.12 has the best mypy experience of the widely-supported versions (e.g., generics syntax, better error messages, and mature support for pyproject.toml flags included in the MVP plan)
 - Heroku support: heroku-24 stack supports 3.12 as a first-class runtime so local and prod python versions can be identical
@@ -252,9 +254,11 @@ I chose python `3.12` for multiple reasons.
 - Entretien d'assimilation, an in-person, oral interview at the prefecture that is required for naturalization
 - CSP and CR variants of the civic exam
 - Speech input/output
+- Advanced user preferences such as explanation depth, study cadence, and tone
+- Turn history: scrolling back through earlier lessons and quizzes in the coach conversation. The latest turn survives refreshes and later visits.
+- Mock exam score history: only the latest exam result is kept
 - Native mobile app
 - Runtime / on-demand scraping of the ministry website; The one-shot offline capture into `data/` is in scope. Ongoing or query-time scraping is not.
-- Payment, subscriptions, billing
 - Memory decay / TTL
 - A separate memory-reviewer LLM node before writes
 - Cross-learner difficulty calibration (empirical p-correct per item). Meaningless with one learner: it would conflate item difficulty with that learner's mastery and retire exactly the questions they most need to drill. Deferred until there is a real multi-learner population, which also requires sanctioning a shared memory namespace.

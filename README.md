@@ -8,7 +8,7 @@ as opposed to optimization of chunk embedding and retrieval. See [Luminary RAG a
 
 ## MVP Features
 
-- **Memory-aware coaching:** remembers weak themes, recurring misconceptions, preferred explanation depth, and study cadence across sessions
+- **Memory-aware coaching:** remembers weak themes and recurring misconceptions
 - **Autonomous coaching guided by theme:** uses an LLM planner to decides on the next action, ensuring coverage of the five official themes
 - **Quizzes:** the coach gives LLM-generated questions on request or on its own initiative, using the official French thematic content as source with explanations grounded in the official study material
 - **Mock exam mode:** mirrors the official format (40 Q, 45-min timer, 80% pass, per-theme weighting) and reports pass/fail plus per-theme scores

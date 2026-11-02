@@ -1,0 +1,1693 @@
+# Project Plan B: Civica MVP
+
+## Context
+
+Civica is a memory-aware learning coach for the French naturalization written civics exam. 
+This plan covers the MVP: a single web app that offers a coach conversation (lessons and quizzes chosen by an autonomous planner) and a mock exam mode, backed by generative AI for questions/responses, embeddings for content retrieval, and data store for the official corpus and agent memory. 
+It also includes autonomous agent flow and a system for self-improvement.
+
+See `docs/mvp-overview.md` for initial scope. `Project Plan B` diverges from `Project Plan A` only after step 10B, but also includes an additional inserted step 6B.
+
+## Terminology
+
+- **Coach:** civica as a whole, the agent across every mode. "Coaching memory" is everything civica remembers about a learner across all sessions and modes.
+- **Coach conversation:** the planner-driven chat, one per user (`thread_id = f"{user_id}:coach"`)
+  - The planner decides each turn (based on the learner's message and state) whether to teach a lesson or give a quiz. 
+  - The planner obeys an explicit request for a lesson or a quiz.
+- **Mock exam:** likely a second application mode (e.g., `AppMode.COACH` and `AppMode.MOCK_EXAM`)
+  - This is a deterministic flow that bypasses the planner entirely and has its own thread (`f"{user_id}:mock_exam"`).
+- **teach** and **generate_quiz:** planner tools the planner can call in any coach turn
+  - `teach` delivers a grounded lesson on a theme by wrapping `explain()`.
+  - After `teach`, the planner typically calls `generate_quiz` for a one-question comprehension check.
+  - After an incorrect response to a quiz, the planner might call `teach` to re-teach that material.
+  - "Teaching strategies", which are planned as one of the last implementation steps, are neither tools nor modes. They are related to how well the `teach` tool explains a subject.
+
+## Prerequisites (manual)
+
+- **Docker Desktop** (or another OCI runtime) for local Postgres+pgvector.
+- **`uv`** installed on the host (`brew install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`) with interpreter Python 3.12. 
+- **API keys:**
+  - `ANTHROPIC_API_KEY` for text generation
+  - `OPENAI_API_KEY` for `text-embedding-3-large` for one-time embedding of source material
+- **Session secret:** `CIVICA_SESSION_SECRET` (generated locally) to sign the web app's login cookie
+
+## Test fixture conventions
+
+- **Corpus fixtures:** two or three short, hand-crafted French thematic paragraphs stored as strings/JSON in `tests/fixtures/thematic_sheets/`. Themes should span at least two of the five official themes so ingest and retrieval can be tested cross-theme. Keep each paragraph under ~200 words.
+- **HTML fixtures:** one small `<html>` file per capture-test scenario (minimal, real-shaped enough to exercise the normalizer). Store under `tests/fixtures/html/`.
+- **Question fixtures:** small hand-written multiple-choice questions in French (2–3 total) with an obviously fake correct-answer index. Never copy real ministry questions into tests.
+- **Learner fixtures:** synthetic `user_id`s like `test-user-alex`, `test-user-jordan`. Never use real names.
+- **DB fixtures:** the test DB is a dedicated `civica_test` database (separate from `civica`), reached via `TEST_DATABASE_URL`. Tests that write to real tables use a function-scoped, opt-in `db_schema` fixture defined in `tests/conftest.py`. It creates a fresh Postgres schema per test (e.g. `test_<uuid>`), sets it as the connection's `search_path`, applies `schema.sql` into it, and drops the schema on teardown. Tests that only need a live connection (e.g. Step 1's pool tests) do not request the fixture and pay no isolation cost. The fixture itself is built in Step 4, when the first table (`content_chunks`) makes isolation necessary. External tests (marked `@pytest.mark.external`) may hit real Anthropic/OpenAI endpoints; default `pytest` skips them.
+
+## Schema convention
+
+The database schema is captured in a single file: `src/civica/db/schema.sql`. 
+Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`), so re-running is always safe.
+
+- Whenever a step extends `schema.sql`, a developer applies the change locally by running:
+  ```
+  uv run python -m civica.scripts.migrate
+  ```
+- The migrate script and its accompanying `db.migrate.apply_schema()` function are created in Step 1. Later steps only append to `schema.sql`.
+
+## Dependency-injection convention (testability)
+
+Production code exposes injection seams to separate concerns and reduce coupling. This should result in a minimization of test-time monkeypatching.
+
+---
+
+## ✅ Step 1: Project scaffolding + Postgres
+
+**Goal:** Empty project → runnable `uv`-managed Python project with a local Postgres+pgvector container and a shared connection pool.
+
+- Python package:
+  - Install and pin Python 3.12 for the project:
+    - `uv python install 3.12`
+    - `uv python pin 3.12` (writes `.python-version` so every `uv run` in this repo uses 3.12).
+  - Run `uv init --package civica --python 3.12` and adopt `src/`-layout so the package lives at `src/civica/`.
+  - Create `src/civica/` with `__init__.py`.
+  - Configure `pyproject.toml`:
+    - `requires-python = ">=3.12,<3.13"` under `[project]` (pins the supported interpreter range).
+    - `[tool.pytest.ini_options]`: `addopts = "-m 'not external'"` and register the `external` marker.
+    - `[tool.mypy]`: `python_version = "3.12"`, `strict = true`, `disallow_any_explicit = true`, `disallow_untyped_defs = true`.
+
+- Dependencies:
+  - Add dependencies (`uv add`): `psycopg[binary,pool]`, `pgvector`, `python-dotenv`.
+  - Add dev dependencies (`uv add --dev`): `pytest`, `pytest-cov`, `mypy`.
+
+- Environment variables:
+  - Create `.env.example` with `DATABASE_URL=`, `TEST_DATABASE_URL=`, `ANTHROPIC_API_KEY=`, `OPENAI_API_KEY=`.
+  - Create `.env` by copying `.env.example` and filling in the values; e.g., `DATABASE_URL=postgresql://civica:civica@localhost:5432/civica`
+  - Also set `TEST_DATABASE_URL=postgresql://civica:civica@localhost:5432/civica_test` in both `.env.example` and `.env`. Tests require a separate database to prevent corruption of development data.
+  - Add `.env` to `.gitignore` with header `#Environment`.
+
+- **Check In:** Stop and confirm with user that scaffolding and `.env` handling are satisfactory before continuing.
+
+- Data store:
+  - Create `docker-compose.yml` at repo root using `pgvector/pgvector:pg16`, exposing 5432 (mount a named volume for data persistence)
+  - Initialize DB name `civica` with user `civica`.
+  - **Tests:** `tests/db/test_pool.py`
+    - Assert `get_pool()` returns a working pool by executing `SELECT 1` through a checked-out connection (against the local test DB).
+    - Assert `enable_pgvector` is idempotent (call twice, no error).
+    - Only invoke the public functions; do not import module-private state.
+  - Create `src/civica/db/__init__.py` and `src/civica/db/pool.py`:
+    - `get_pool() -> ConnectionPool` - reads `DATABASE_URL` from env, returns a singleton `psycopg_pool.ConnectionPool` (autocommit).
+    - `enable_pgvector(conn) -> None` - `CREATE EXTENSION IF NOT EXISTS vector`.
+
+- Migrations:
+  - Create `src/civica/db/schema.sql` as the single source of truth for the database schema. It starts empty; later steps append `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` statements. Every statement must be idempotent so re-running is a no-op.
+  - **Tests:** `tests/db/test_migrate.py`
+    - Assert `apply_schema()` runs cleanly against a fresh database (extension enabled, `schema.sql` executed).
+    - Assert `apply_schema()` is idempotent: calling it twice against the same database does not error and leaves the schema unchanged.
+    - Only invoke public functions.
+  - Create `src/civica/db/migrate.py`:
+    - `apply_schema() -> None` - checks out a connection from the pool, calls `enable_pgvector`, then executes the contents of `schema.sql`.
+  - Create `src/civica/scripts/migrate.py`:
+    - Entrypoint: `main() -> None` (runnable via `uv run python -m civica.scripts.migrate`). Calls `db.migrate.apply_schema()` and prints a short confirmation.
+
+- **Check In:** Stop and confirm with user that Postgres connectivity and migrations are satisfactory before continuing.
+
+- **README:**
+
+    - Add Technology table within the **Architecture** section: 
+  >   ### Technology
+  >
+  > | Dependency             | Purpose                                       |
+  > |------------------------|-----------------------------------------------|
+  > | `uv`                   | Python package + venv manager                 |
+  > | `python` (3.12)        | Runtime                                       |
+  > | `docker`               | Container runtime for local Postgres+pgvector |
+  > | `pgvector` (extension) | Vector similarity search in Postgres          |
+  > | `psycopg[binary,pool]` | Postgres driver + connection pool             |
+  > | `pytest`, `mypy`       | Tests and type checking                       |
+
+
+    - Add the following instructions under **Setup** section:
+
+    >   ### 1. Clone the repo
+    >
+    >   ```
+    >   git clone <repo-url>
+    >   cd civica
+    >   ```
+    >
+    >   ### 2. Install dependencies
+    >
+    >   ```
+    >   uv sync
+    >   ```
+    >
+    >   ### 3. Set environment variables 
+    >   Copy `.env.example` to `.env` and fill in `DATABASE_URL`, `ANTHROPIC_API_KEY`, and `OPENAI_API_KEY`.
+    >
+    >   ### 4. Start Postgres (with pgvector)
+    >   ```
+    >   docker compose up -d
+    >   ```
+    >   This launches `pgvector/pgvector:pg16` locally.
+    >
+    >   ### 5. Apply the database schema
+    >
+    >   ```
+    >   uv run python -m civica.scripts.migrate
+    >   ```
+    >   Idempotent. This command is safe to run any time.  If the object already exists, PostgreSQL silently skips that statement. Existing rows are untouched.
+    >   The word "migrate" here does not operate like Django/Rails frameworks, where it can mean  to reset to declared schema state (potential for dropping columns).
+    >   But schema.sql is pure idempotent DDL. The impact is more like: "make sure these tables exist".
+
+    - Add testing instructions under **Development** section.
+  >   ### Run the test suite
+  >
+  >   - Unit + integration tests (fast, no network): `uv run pytest`
+  >   - External tests (real API/DB calls): `uv run pytest -m external`
+  >   - Type checker: `uv run mypy src`
+  
+    - Add the top-level `### Project Structure` to the **Development** section.
+    ```
+    civica/
+      ├── data/                     # git-ignored; raw + normalized corpus
+      ├── docs/                     # design docs and plans
+      ├── docker-compose.yml        # local Postgres+pgvector
+      │ 
+      ├── src/civica/               # application package
+      │
+      └── tests/                    # unit + integration tests
+    ```
+
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any deviations from the plan.
+  - Added test that runs mypy as part of the standard test suite to avoid regressions. 
+  - Added autoflake dependency to detect unused imports and variables. Added a test to run it as part of standard test suite.
+  - Updated `src/civica/db/pool.py` to pass `open=True` explicitly to `psycopg_pool.ConnectionPool(...)` to enforce strictness, which addressed the psycopg_pool 4.x deprecation warning about the default changing to `False`.
+  - Added init script (`docker/postgres/init/01-create-test-db.sql`) to create test database (`civica_test`) on first boot of Postgres database container.
+  - Deferred per-test schema isolation fixture (`db_schema` in `tests/conftest.py`) to Step 4 becuase nothing built in step 1 exercises this fixture.
+  - Made various improvements to setup and development instructions in `README.md`.
+
+---
+
+## ✅ Step 2: Capture ministry thematic sheets (`data/raw/`)
+
+**Goal:** One-shot crawl of `formation-civique.interieur.gouv.fr/fiches-par-thematiques/` that persists every visited page as HTML under `data/raw/thematic_sheets/<slug>/index.html`.
+
+- Add dependencies: `httpx`, `beautifulsoup4`.
+- **Tests:** 
+  - Unit test (`tests/scripts/test_capture_thematic_sheets.py`) with `httpx.MockTransport` (no network). Stub the index page + two child pages. Assert files are created at expected paths. Assert idempotency: running twice does not re-download unchanged pages.
+  - An integration test that is tagged as `external` to confirm the contract with the real ministry site. Though the crawl script is intended to be run manually only one time, it's important to know if the ministry may have updated the official material.
+- Create `src/civica/scripts/__init__.py` and `src/civica/scripts/capture_thematic_sheets.py`:
+  - Entrypoint: `main() -> None` (runnable via `uv run python -m civica.scripts.capture_thematic_sheets`).
+  - Start at the thematic index URL. Discover links within the `formation-civique.interieur.gouv.fr/fiches-par-thematiques/` path only.
+  - Persist each HTML response verbatim to `data/raw/thematic_sheets/<url-slug>/index.html`.
+  - Idempotent: if the file exists and the response body matches, skip; otherwise overwrite.
+  - Rate-limit to 1 request/second and set a descriptive `User-Agent`.
+
+- **Check In:** Stop and confirm with user that the crawler correctly discovers and stores pages before moving to normalization.
+
+- **README:** 
+  - Add to project structure diagram: `├── scripts/                  # one-shot ingestion scripts`
+  - Add to **Setup** section:
+  > ### 7. Capture and ingest the corpus (one-time, manual)
+  > Because `data/` is git-ignored, each developer must rebuild the corpus locally.
+  > ```
+  > uv run python -m civica.scripts.capture_thematic_sheets     # Ministry HTML → data/raw/
+  > ```
+  
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any deviations from the plan.
+  - Bifurcated the test suite into `unit/` and `integration/` directories.
+  - Added proper logging. Replaced print statements on the migrate script (added in Step 1).
+  - Discovered that the top-level website provides a sitemap so that was incorporated into the script. Implemented a hybrid approach: 
+    - The script's first pass uses the sitemap as the source of truth, but silently misses pages if the sitemap is stale.
+    - The script's second pass searches all encountered links to catch new pages that may not be listed in the sitemap. A small amount of additional complexity to gain a comprehensive result.
+
+---
+
+## ✅ Step 3: Normalize captured HTML → `data/corpus/`
+
+**Goal:** Turn each `data/raw/thematic_sheets/<slug>/index.html` into a clean JSON record (`{theme, slug, title, sections: [...]}`) at `data/corpus/thematic_sheets/<theme-slug>/<page-slug>.json`.
+
+- Create `src/civica/domain/themes.py` with the `Theme` enum for the five official theme slugs: `principes-et-valeurs-de-la-republique`, `droits-et-devoirs`, `histoire-geographie-et-culture`, `systeme-institutionnel-et-politique`, `vivre-dans-la-societe-francaise`. This module is depended on by ingestion and assessment later.
+- **Test:** `tests/scripts/test_normalize_thematic_sheets.py`
+  - Feed a small fixture HTML file, assert the produced JSON matches an expected fixture JSON (byte-for-byte after re-encoding).
+  - Assert unknown themes raise a clear error rather than being silently written to a wrong bucket.
+- Create `src/civica/scripts/normalize_thematic_sheets.py`:
+  - Entrypoint: `main() -> None`.
+  - For each captured HTML file, extract the page title, section headings, and body prose using `BeautifulSoup`. Drop navigation, cookie banners, `<script>`, and repeated header/footer nodes.
+  - Bucket each page under one of the five theme slugs based on URL path or explicit mapping.
+  - Write deterministic JSON (stable key order, UTF-8, no BOM).
+
+- **Check In:** Stop and confirm with user that the normalized JSON shape is what downstream ingestion expects.
+
+- **README:** 
+  - Add the `normalize_thematic_sheets` command to the **Setup → 6. Capture and ingest** flow: `uv run python -m civica.scripts.normalize_thematic_sheets   # HTML → data/corpus/`
+  - Add `data/corpus/thematic_sheets/` to the project structure diagram (with inline comment).
+
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any deviations from the plan.
+  - Added an additional verification phase (`verify_corpus_coverage.py`) that cross-checks the normalized json against the raw html to ensure no critical information was dropped.
+  - Transformed official themes into pydantic model for easier validation and extension (additional properties will be required for subsequent steps).
+  - README: Added detail bullets about the scripts. Added civica package directories to the project structure.
+
+---
+
+## ✅ Step 4: Chunk + embed + ingest corpus into pgvector
+
+**Goals:**
+- Read `data/corpus/thematic_sheets/**/*.json`. 
+- Chunk each section into ~800-character passages.
+- Embed with OpenAI `text-embedding-3-large`.
+- Upsert into a `content_chunks` table with a pgvector index. 
+- Re-running is a no-op unless the source changed.
+- If source pages or the chunk text format changed, re-embedding will be triggered selectively. If rows disappeared from the corpus, old chunks will be pruned to avoid accumulation of stale chunks. After pruning, `content_chunks` is an exact mirror of the current `data/corpus/`.
+
+- Add dependency: `langchain-openai`.
+- Extend `src/civica/db/schema.sql` (see [Schema convention](#schema-convention); developers apply with `uv run python -m civica.scripts.migrate`):
+  ```sql
+  CREATE TABLE IF NOT EXISTS content_chunks (
+    content_hash TEXT PRIMARY KEY,
+    theme TEXT NOT NULL,
+    page_slug TEXT NOT NULL,
+    section_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    embedding VECTOR(3072) NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS content_chunks_theme_idx ON content_chunks(theme);
+  CREATE INDEX IF NOT EXISTS content_chunks_embedding_idx
+    ON content_chunks USING hnsw (embedding vector_cosine_ops);
+  ```
+  
+- **Check In:** Stop and confirm with user that implementation is satisfactory. Prompt the user on how to manually test the structure of the database.
+
+- **Test:** `tests/ingest/test_chunker.py`
+  - Assert chunk boundaries are stable and deterministic.
+  - Assert chunks respect the size/overlap invariants.
+- Create `src/civica/ingest/__init__.py` and `src/civica/ingest/chunker.py`:
+  - `chunker.chunk_section(text: str) -> list[str]` - deterministic char-window chunker (~800 chars, ~100 char overlap).
+
+- **Check In:** Stop and confirm with user that implementation is satisfactory.
+
+- **Tests:** 
+  - Extend `tests/conftest.py` with the per-test schema fixture (see [Test fixture conventions](#test-fixture-conventions)):
+    - `db_schema` fixture: function-scoped, opt-in. On setup: opens a connection outside the shared pool, creates schema `test_<uuid>`, sets `search_path` to it, calls `apply_schema()`, yields the connection. On teardown: `DROP SCHEMA ... CASCADE` and closes the connection.
+    - Any test that inserts into tables requests `db_schema` and uses its yielded connection instead of `get_pool()`. This keeps the shared pool's connections at `search_path = public` so parallel/other tests do not see the transient schema.
+  - `tests/ingest/test_repository.py`
+    - Uses the `db_schema` fixture.
+    - Integration test with fake embeddings (fixed vectors), real Postgres schema. Insert then re-insert same content_hash - assert exactly one row exists.
+    - Assert `theme` filter query works.
+  - `tests/ingest/test_embedder_external.py`: one `@pytest.mark.external` test that embeds a real string and asserts the returned vector length equals 3072
+
+- Create `src/civica/ingest/embedder.py` and `src/civica/ingest/repository.py`:
+  - `embedder.embed(texts: list[str]) -> list[list[float]]` - thin wrapper around `OpenAIEmbeddings(model="text-embedding-3-large")`.
+  - `repository.upsert_chunks(rows: Iterable[ChunkRow]) -> None` - `ChunkRow` is a dataclass with `theme`, `page_slug`, `section_id`, `content_hash`, `text`, `embedding`. Upserts by `content_hash` primary key so re-ingest is idempotent.
+
+- Create `src/civica/scripts/ingest_corpus.py`:
+  - Entrypoint reads all JSON under `data/corpus/thematic_sheets/`, chunks, embeds (batched), upserts.
+
+- **Check In:** 
+  - Stop and confirm with user that implementation is satisfactory and that end-to-end ingestion works against a real corpus sample before going forward.
+  - Ask the user run the following query after running the ingestion script to confirm that the chunks are embedded as expected.
+  ```
+  docker compose exec postgres psql -U civica -d civica -c "
+  SELECT theme,
+         COUNT(*)                    AS chunks,
+         COUNT(DISTINCT page_slug)   AS pages,
+         MIN(vector_dims(embedding)) AS min_dims,
+         MAX(vector_dims(embedding)) AS max_dims,
+         ROUND(AVG(vector_norm(embedding))::numeric, 4) AS avg_norm
+  FROM content_chunks
+  GROUP BY ROLLUP(theme)
+  ORDER BY theme NULLS LAST;"
+  ```
+
+- **Test:** extend `tests/integration/ingest/test_repository.py` (uses the `db_schema` fixture):
+  - Upsert three rows, then call `delete_chunks_not_in` keeping two of the three hashes - assert exactly those two rows remain and the returned deleted-count is 1.
+  - Call `delete_chunks_not_in` keeping all existing hashes - assert no rows are deleted and the returned count is 0.
+  - Call `delete_chunks_not_in` with an empty keep-set - assert it raises `ValueError` and deletes nothing (a full wipe must never happen implicitly; resetting the table is a manual operation).
+  
+- Extend `src/civica/ingest/repository.py`:
+  - `delete_chunks_not_in(keep_hashes: Collection[str], conn: psycopg.Connection | None = None) -> int` - deletes every `content_chunks` row whose `content_hash` is not in `keep_hashes` and returns the number of rows deleted. Raises `ValueError` on an empty `keep_hashes`. Same connection convention as `upsert_chunks` (pool by default, explicit connection in tests).
+  
+- Extend `src/civica/scripts/ingest_corpus.py`:
+  - After the embed/upsert phase, call `delete_chunks_not_in` with the hashes of ALL chunks in the current corpus (not just the newly embedded ones) and log the deleted count.
+  - Safety guard: if the corpus yields zero chunks (e.g. `data/corpus/` missing or empty), skip pruning and log a warning instead of emptying the table.
+  - Because the prune keys on `content_hash`, it also removes obsolete rows when the chunk text format evolves (e.g. a change to the title/heading prefix), since reformatted chunks re-ingest under new hashes.
+
+- **Check In:** Stop and confirm with user that pruning is correct: modify or remove one corpus JSON locally, re-run `ingest_corpus`, and verify the stale rows disappear while the row count matches the current corpus.
+  ```
+  # 1. Row count before
+  docker compose exec postgres psql -U civica -d civica -c "SELECT COUNT(*) FROM content_chunks;"
+
+  # 2. Temporarily remove one corpus page (pick any)
+  mv data/corpus/thematic_sheets/droits-et-devoirs/<some-page>.json /tmp/
+
+  # 3. Re-run ingestion: expect "Pruned N stale row(s)" and 0 new embeddings (no API cost)
+  uv run python -m civica.scripts.ingest_corpus
+
+  # 4. Row count should have dropped by exactly N; then restore and re-run
+  mv /tmp/<some-page>.json data/corpus/thematic_sheets/droits-et-devoirs/
+  uv run python -m civica.scripts.ingest_corpus   # re-embeds just that page's chunks, prunes 0
+  ```
+
+- **README:** 
+  - Add to technology table: | `langchain-openai`     | Embeddings client (`text-embedding-3-large`) |
+  - Add `ingest_corpus` to **Setup → 6**: `uv run python -m civica.scripts.ingest_corpus               # chunk + embed → pgvector`
+  - Add `src/civica/ingest/` to the project structure diagram.
+
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any deviations from the plan.
+  - pgvector's HNSW index caps the `vector` type at 2000 dimensions so I built the index on a `halfvec(3072)` cast which is half-precision and indexable up to 4000 dimensions. Step 5 was updated so retrieval queries use the same cast to hit the index.
+  - Added `chunk_index` column so overlapping chunks within a section have a stable positional identity for citations and re-ingest diffs.
+  - Added a `<page title> - <section heading>` prefix (part of the hashed text) to each chunk prior to embedding so that chunk retrieval stays anchored to the official topic. How? Adding the prefix encourages a co-location of chunks which come from the same topic in the official study materials within the vector DB. The goal is to minimize the chance that responses stray from the official material when studying a given topic. I would not have enforced this kind of categorization on a more general LLM applicationm, but it's appropriate for this narrowly focused exam prep app.
+  - Used NFC-normalized UTF-8 on `content_hash` so that accent-encoding drift will not duplicate rows.
+  - Nested the `db_schema` fixture within `tests/integration/conftest.py` following the logic of the unit/integration test suite split. `apply_schema()` accepts an optional connection so tests can target a per-test schema that is not visible to concurrent tests.
+  - Refactored embedding flow to use dependency injection (of embeddings and embedding model) to improve separation of concerns. This unifies the embedding flow with the injection seam planned for subsequent steps. I updated the conventions on this plan to maintain this pattern going forward.
+
+---
+
+## ✅ Step 5: Content retriever
+
+**Goal:** Semantic-search API used by `teach` and `evaluate` nodes.
+
+- **Move `embedder.py` to a neutral package** (so retrieval never grows a dependency on `ingest/`):
+  - Move `src/civica/ingest/embedder.py` → `src/civica/embeddings/embedder.py` (create `src/civica/embeddings/__init__.py`). No behavior change.
+  - Rationale: ingestion and retrieval must share one embedder (model + dimensions) to be correct. Doing the move before `retrieval/` exists means retrieval imports the neutral package from day one instead of importing `ingest.embedder` and unwinding it later.
+  - Update all imports: `db/migrate.py` (imports `EMBEDDING_DIMENSIONS`), `scripts/ingest_corpus.py`, and `tests/integration/ingest/test_embedder_external.py` (relocate to `tests/integration/embeddings/test_embedder_external.py` to mirror the source tree).
+  - Verification: full suite green (`uv run pytest`), mypy strict green
+
+- Extend `src/civica/embeddings/embedder.py`:
+  - `embed_query(text: str) -> list[float]`: one-line wrapper around the client's `embed_query` so retrieval uses the same embedder as ingestion without awkward `embed([query])[0]` calls.
+
+- **Check In:** Stop and confirm with user that implementation is satisfactory.
+
+- **Test:** `tests/integration/retrieval/test_content.py` (integration test becuase it seeds real DB rows)
+  - Seed the DB with a few chunks whose embeddings are hand-picked fake vectors, then assert `search` returns them for a stubbed query embedding, ordered by descending `similarity`.
+  - Stub the query embedding by monkeypatching the embed-function reference inside `civica.retrieval.content` (no network; this must not become an `external` test).
+  - Pass the fixture's yielded connection via the `conn` parameter (see below): the fixture's per-test schema is only on that private connection's `search_path`, so a pool-based read would not see the seeded rows.
+  - Assert `theme` filter narrows results.
+  - Assert `similarity` is `1 - cosine_distance` (seed with vectors whose expected distances are hand-computable, e.g. orthogonal unit vectors).
+
+- Create `src/civica/retrieval/__init__.py` and `src/civica/retrieval/content.py`:
+  - `search(query: str, theme: Theme | None = None, k: int = 5, conn: psycopg.Connection | None = None) -> list[ContentChunk]`: the optional-connection convention matches `upsert_chunks` and `apply_schema` (pool by default, explicit connection in tests).
+  - Embeds the query with `embedder.embed_query`, runs cosine similarity via pgvector, optionally filters by `theme` (compare the `theme` column against `theme.slug`; `Theme` is a pydantic model per the Step 3 diversion, not an enum).
+  - The similarity query must order by `embedding::halfvec(N) <=> <query>::halfvec(N)`: the HNSW index is built on that cast (see Step 4 notes), so a plain `embedding <=> <query>` would fall back to a sequential scan. Build `N` into the SQL from `embedder.EMBEDDING_DIMENSIONS` (same constant `migrate.py` templates into `schema.sql`); never hardcode 3072.
+  - Call `register_vector(conn)` before passing the query vector as a parameter, same as `repository.py` does.
+  - `<=>` returns cosine *distance*; expose `similarity = 1 - distance` so the field means what its name says.
+  - `ContentChunk` is a small dataclass exposing `text`, `theme: Theme` (hydrated via `Theme.from_slug`), `page_slug`, `section_id`, `chunk_index`, `content_hash`, `similarity`. `chunk_index` and `content_hash` give citations a stable identity (the reason `chunk_index` was added in Step 4).
+  - NB: Chunks were embedded with the `<page title> - <section heading>` prefix but queries are embedded raw without a standard prefix. This asymmetry is acceptable for now. 
+        The order of the two elements in the prefix should be neglible in terms of embedding location.
+        Subsequent steps have been updated to prefix queries as appropriate when the category is known (e.g. tutoring or quizzing within an official topic).
+
+- **Check In:** Stop and confirm with user that implementation is satisfactory and retrieval quality on a small manual query before continuing. 
+  - Instruct user to perform manual verification: Verify the HNSW index is *usable* with `EXPLAIN` after `SET enable_seqscan = off`. At MVP corpus size the planner may correctly prefer a sequential scan with seqscan enabled, so an automated index-usage assertion would be flaky by design.
+  - NB: With a `theme` filter, HNSW gathers candidates first and post-filters. So filtered searches may return fewer than `k` rows on larger corpora (pgvector 0.8's iterative scans address this). Not worth engineering around at MVP size.
+
+- **README:** Consider if anything should be added based on the changes in this section. Suggestions:
+  - Add `src/civica/retrieval/` and `src/civica/embeddings/` to the project structure diagram
+  - Update any text that references `ingest/embedder.py`.
+
+- **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any deviations from the plan.
+  - Similarity assertions in the integration tests use a 1e-2 tolerance (instead of exact floats) because the distances are computed through the `halfvec` cast (half precision) to hit the HNSW index. Using equivalency to an exact float would be flaky.
+  - Beyond the planned cases, tests also cover the `k` limit and full `ContentChunk` field round-trip (theme hydrated as a `Theme` instance for citation identity).
+  - Added smoke test to ensure database container is up before running subsequent database tests (that will all fail after wasting 30 seconds of timeout). I also DRYed a few of the existing test files that had a lot of hard-coded repetition.
+  - Renamed `ingest/` to `ingestion/` to align with best practices. Modules are named for the thing or subsystem they contain (nouns). Functions are named for actions (verbs).
+  - Refactored to use dependency injection to improve separation of concerns, which removed monkeypatching in tests.
+  
+---
+
+## ✅ Step 5B: Extract a validated `Chunk` domain model (refactor)
+
+**Goals:** 
+- Extract the shared core of a `Chunk` that is used by both ingestion and retreival. It represents the data persisted in the vector database.
+- Enforce field invariants at the ingestion boundary to prevent inappropriate values from being persisted.
+- No impact to behavior. So all existing tests must still pass at the step boundary (updated only where validation or field access changes).
+
+**Rationale:**
+- `ChunkRow` and `ContentChunk` share six persistent fields (`theme`, `page_slug`, `section_id`, `chunk_index`, `content_hash`, `text`) but each carries one field that the other must not: `ChunkRow.embedding` and `ContentChunk.similarity` which should not be shared.
+- Composition (as opposed to merger) is desireable: a shared core `Chunk` pydantic model plus a thin write wrapper pydantic model (for ingestion) and a thin read wrapper pydantic model (for retrieval). All three are pydantic so validation and the frozen-model convention are uniform across the chunk types.
+- Use pydantic (as opposed to dataclasses) aligning with the existing `Theme` precedent.
+  - The benefit is fail-fast invariant enforcement during ingestion when parsed/derived data is persisted. On the read path (retreival) the DB schema already guarantees these values (no need for additional validation at that boundary).
+  - NB: With raw psycopg, pydantic validates on construction. It sits beside the SQL mapping. It is not the DB (de)serializer.
+  - Most of the new pydantic models added in this section will not be shared broadly so it is not justifiable at this time to co-locate them (for example, in a `schemas` file or directory).
+- It is NOT desireable to merge these two models into one flat model because that would force `embedding` and `similarity` to be optional fields. The result would be loss of the type-level guarantee of which is populated.
+- It is NOT desirable to introduce an ORM (e.g. SQLAlchemy), which would only map persisted columns. It would not own the derived `similarity` (a separate scored-result type is still required) and it would fight the hand-tuned `embedding::halfvec(N) <=> ...::halfvec(N)` cast the HNSW index depends.
+
+**Guardrails (apply to all parts):**
+- `Chunk` is corpus-side. It must never be JSON-serialized into the LangGraph memory store (the strict corpus/memory separation rule). This composition is for the retrieval/ingest paths only.
+- Each new `BaseModel` (`Chunk`, `EmbeddedChunk`, `ContentChunk`) inherits the `# type: ignore[explicit-any]` mypy-strict workaround already used on `Theme`. Expected cost, not a surprise.
+- Run `uv run pytest` (unit + integration + mypy strict) green at the step boundary; this is a refactor, so no behavior regresses.
+
+**Part 1: Shared core `Chunk` domain model.** A neutral, pydantic model so ingestion and retrieval both depend on it, not on each other.
+
+- **Test:** `tests/unit/domain/test_chunk.py` (new; unit, no DB)
+  - Constructing a `Chunk` with an empty `text`, `page_slug`, `section_id`, or `content_hash`, or a negative `chunk_index`, raises `ValidationError`.
+  - A valid `Chunk` is frozen: assigning to any field after construction raises.
+  - `theme` accepts a `Theme` instance and round-trips unchanged (guards against a slug string sneaking in).
+- Create `src/civica/domain/chunk.py`:
+  - `Chunk` (pydantic `BaseModel`, `model_config = ConfigDict(frozen=True)`) with fields:
+    - `theme: Theme` (the domain object, not a slug string)
+    - `page_slug: str = Field(min_length=1)`
+    - `section_id: str = Field(min_length=1)`
+    - `chunk_index: int = Field(ge=0)`
+    - `content_hash: str = Field(min_length=1)`
+    - `text: str = Field(min_length=1)`
+  - Imports only `domain/themes.py` (no embeddings/db imports), keeping the domain layer dependency-light.
+- **Check In:** Stop and confirm the core model's fields and validation rules. Check in with the user before going forward. 
+
+**Part 2: Write wrapper + `theme` unification (ingestion).** 
+
+This closes the existing inconsistency where the write model typed `theme` as a slug string while the read model typed it as `Theme`. 
+The result should be that both carry `Theme` and the slug appears only at the SQL boundary. No bare theme-slug strings should live on either model.
+
+- **Test:** extend `tests/integration/ingestion/test_repository.py` (uses the `db_schema` fixture)
+  - Constructing an `EmbeddedChunk` whose `embedding` length != `EMBEDDING_DIMENSIONS` raises `ValidationError` before any DB write.
+  - A correctly sized `EmbeddedChunk` upserts as before; existing idempotency and `theme`-filter assertions stay green.
+- Extend `src/civica/ingestion/repository.py`:
+  - Replace the `ChunkRow` dataclass with `EmbeddedChunk` (pydantic `BaseModel`, `model_config = ConfigDict(frozen=True)`): `chunk: Chunk`, `embedding: list[float]`.
+  - Validate the embedding dimension with a pydantic `Field` (the single most valuable guard): `embedding: list[float] = Field(min_length=EMBEDDING_DIMENSIONS, max_length=EMBEDDING_DIMENSIONS)`. Import `EMBEDDING_DIMENSIONS` from `embeddings/embedder` (the same constant `migrate.py` templates into `schema.sql`; never hardcode 3072). This catches a silent, nasty class of ingest bug before it reaches Postgres. Keep this coupling in the ingestion layer (it already imports the embedder); do not push it down into `domain/`.
+  - Update `_upsert_on_connection` / `upsert_chunks` to accept `Iterable[EmbeddedChunk]` and build the SQL params from `row.chunk.theme.slug`, `row.chunk.page_slug`, `row.chunk.section_id`, `row.chunk.chunk_index`, `row.chunk.content_hash`, `row.chunk.text`, `row.embedding` (serialize the slug here, at the SQL boundary only).
+- Extend `src/civica/scripts/ingest_corpus.py`:
+  - Build each row as `EmbeddedChunk(chunk=Chunk(theme=Theme.from_slug(<source slug>), page_slug=..., section_id=..., chunk_index=..., content_hash=..., text=...), embedding=embedding)` instead of the flat `ChunkRow(...)`.
+- **Check In:** Stop and confirm the ingestion path and the embedding-dimension guard. Check in with the user before going forward.
+
+**Part 3: Read wrapper (retrieval).**
+
+- **Test:** update `tests/integration/retrieval/test_content.py`
+  - Adjust for the composed `ContentChunk` shape. The field round-trip still asserts `theme` is hydrated as a `Theme`; `similarity` is still `1 - cosine_distance` (existing 1e-2 tolerance from the Step 5 notes preserved).
+  - Existing `theme`-filter and `k`-limit assertions stay green.
+- Update `src/civica/retrieval/content.py`:
+  - `ContentChunk` becomes a pydantic `BaseModel` (`model_config = ConfigDict(frozen=True)`) composing the core plus the score: `chunk: Chunk`, `similarity: float`. Keep the name `ContentChunk` to limit downstream churn (Steps 8-10 reference it).
+  - Construction still hydrates `theme` via `Theme.from_slug(row[...])` (retrieval already does this) and computes `similarity = 1 - distance`.
+  - Decision to confirm at the check-in: nest (`result.chunk.text`) vs. flatten (re-expose `text`, `page_slug`, ... as passthrough properties so call sites keep `result.text`). Nesting is simpler but touches every call site and the citation access in Steps 8/9/10; flattening preserves the current surface at the cost of a little boilerplate. Recommend flattening the read wrapper's most-used fields so Step 8/9/10 code stays unchanged.
+- **Check In:** Stop and confirm the retrieval shape and the nest-vs-flatten decision. Check in with the user before going forward.
+
+**Part 4: Fold embedding-model identity into `content_hash` (for safer model migration).**
+
+This addresses a silent failure mode that I discovered while implementing this step:
+- `content_hash = sha256(text)` will change if the model dimensions are changed. But it does not encode which embedding model produced the stored vector.
+- If in the future I swap the `EMBEDDING_MODEL` (to another model of the same dimension), the incremental aspect of the ingestion pipeline, which skips a chunk if the hash is unchanged, would keep stale vectors from the old embedding model.
+- The result would be the retreival/query pipeline performaing similarity search of stale (old model) vectors against a query embedded with the new model. 
+- No errors would surface but retrieval would degrade significantly because cosine distance across two model spaces is meaningless.
+
+- **Test:** `tests/unit/scripts/test_ingest_corpus.py` (new; unittest because no DB and no network calls)
+  - Chunks collected from identical corpus text under two different `EMBEDDING_MODEL` values produce different `content_hash` values (model identity participates in the hash). Drive this through the public `collect_pending_chunks` over a tiny corpus JSON written to `tmp_path`, toggling the model between the two runs.
+  - The same text under the same model is deterministic/stable across runs (idempotency preserved: unchanged corpus + unchanged model must not re-embed).
+  - To keep the model toggle testable, reference the constant via the module (`ingest_corpus`/`embedder`) rather than binding a bare local at import time. So a `monkeypatch.setattr` on the constant takes effect at call time.
+- Extend `src/civica/scripts/ingest_corpus.py`:
+  - Import `EMBEDDING_MODEL` from `embeddings/embedder` (alongside the existing `embed` import).
+  - Change `_content_hash` to hash the model identity together with the NFC-normalized text, using an unambiguous separator that cannot occur in a model name (e.g. a NUL byte `"\x00"`, not a hyphen or colon). Keep the NFC normalization so accent drift still never duplicates rows.
+  - No change to `collect_pending_chunks` / `ingest` control flow: the new hash flows through the existing dedup, skip, and prune logic unchanged.
+- **Check In:** Stop and confirm the hash composition (separator choice) and the one-time full-re-embed operational effect. Check in with the user before going forward.
+
+- **README:** Consider if anything should be added based on the changes in this section.
+
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    -  The shared `make_chunk_row` test factory takes a `Theme` domain object as argument (instead of a slug string) to avoid callers using slugs to represent themes. Slugs should only be used at the SQL layer.
+    -  Improved the implementation of the read wrapper `ContentChunk` (and underlying mechanisms) to make it mirror the write wrapper `EmbeddedChunk` more closely.
+      - Nested the shared chunk properties within the read wrapper ContentChunk instead of flattening it because the write wrapper uses nesting. At this point the deserialized data was accessed by position index (`row[1]`, `row[6]`), which was extremely fragile. This implementation resulted in an invisible positional contract between the `SELECT` column order and the index literals. If the query was re-ordered, the wrong data would be asigned to the `ContentChunk` fields.
+      - Interim refactor: Switched the retrieval cursor to a `dict_row` row factory so that the `_search_on_connection` method read result columns by name (`row["theme"]`, `row["distance"]`) instead of by position index (`row[1]`, `row[6]`). This increased safety compared to the previous implementation but relied on untyped data structures (e.g., dict[str, Any]).
+      - Added a module-private `_SearchRow` pydantic model whose fields mirror the SELECT column list deserialized from the database. This improved the `_search_on_connection` method such that it opens the database cursor with `row_factory=psycopg.rows.class_row(_SearchRow)`, which means that `cursor.fetchall()` returns a typed list[_SearchRow] instead of raw tuples or a dict of untyped values. 
+      - Now the read and write paths (relevant to chunks) are much more aligned and safe because they both move data through typed pydantic models with attribute access. Additionally, the `Theme` to slug conversion sits at the SQL boundary for both the read and write processes. 
+      - The remaining inherent (and acceptable) asymmetry is directional: the read path needs a hydration step, whereas the write path's mirror-image step is just serializing `theme.slug` inline when building the SQL params.
+    - Refactored to use dependency injection to improve separation of concerns. This removed need for monkeypatching in tests.  
+---
+
+## ✅ Step 6A: Users + auth (username + local secret)
+
+**Goal:** A `users` table plus register/verify flows. Every subsequent memory/quiz-log call is namespaced by `user_id`.
+
+**Design decisions (from the pre-implementation review; see the rationale bullets inline):**
+- `UserId` lives in the domain layer, not the auth service. Step 7B's `quiz_answers`, the Step 7 memory layer, and later the graph all import `UserId`; anchoring it in `domain/` (beside `Chunk` and `Theme`) keeps those data layers from importing the auth service and avoids an import cycle.
+- The application owns the UUID. `register` generates `uuid4()` in Python and inserts it explicitly (no DB `DEFAULT`, no `RETURNING` roundtrip). This mirrors how `content_chunks` owns its own primary key (`content_hash` generated in Python) rather than delegating identity to the database.
+- `UsernameTaken` comes from the DB `UNIQUE` constraint, not a pre-check. `register` attempts the `INSERT` and catches `psycopg.errors.UniqueViolation`, translating it to `UsernameTaken`. A `SELECT`-then-`INSERT` would carry a time-of-check/time-of-use race; relying on the constraint is both correct and simpler.
+- Usernames are normalized at the service boundary (trim surrounding whitespace + `casefold()`) before hashing, insert, and lookup, so `Alex`, `alex`, and `alex ` resolve to one account. The stored column stays plain `TEXT UNIQUE` (no `CITEXT`, no functional index); normalization is a service-layer concern, keeping the schema simple.
+- `register` validates secret length to sidestep bcrypt's silent 72-byte truncation (two long secrets sharing a 72-byte prefix would otherwise verify as equal, and newer `bcrypt` releases raise on over-length input). Reject an over-long secret with a clear error rather than pre-hashing.
+- Service functions follow the established optional-connection convention (`conn: psycopg.Connection | None = None`; pool by default, explicit connection in tests), identical to `search`, `upsert_chunks`, and `apply_schema`.
+
+
+- Add dependency: `bcrypt`.
+
+- Extend `src/civica/db/schema.sql` (see [Schema convention](#schema-convention)):
+  ```sql
+  CREATE TABLE IF NOT EXISTS users (
+    user_id UUID PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    secret_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  ```
+  - `user_id` has no `DEFAULT`: the application supplies the UUID (see design decisions). `username` stores the already-normalized value; `secret_hash` stores the bcrypt hash with its embedded salt (no separate salt column needed).
+
+- **Test:** `tests/unit/domain/test_user.py` (new unit test)
+  - `UserId` wraps a `UUID` and round-trips unchanged (a plain construction/identity check, mirroring the lightweight `Theme`/`Chunk` domain tests). This exists so the shared type has a home and a test before the service imports it.
+- Create `src/civica/domain/user.py`:
+  - `UserId = NewType("UserId", UUID)`. Imports only `uuid.UUID`; no db/service imports, keeping the domain layer dependency-light (same discipline as `domain/chunk.py`).
+
+- **Check In:** Stop and confirm with user that implementation is satisfactory.
+
+- **Test:** `tests/integration/users/test_service.py` (integration: writes real `users` rows; use the `db_schema` fixture and pass its connection)
+  - Register → verify: happy path returns a `UserId` (and `verify` with the same credentials returns the same `UserId`).
+  - Register duplicate username → raises `UsernameTaken`.
+  - Register a username that differs only in case or surrounding whitespace from an existing one → raises `UsernameTaken` (normalization collapses them to one account).
+  - `verify` succeeds when the supplied username differs only in case/whitespace from the registered form (lookup normalizes identically).
+  - Verify with wrong secret → returns `None`.
+  - Verify with unknown username → returns `None`.
+  - Register with an over-length secret (exceeds the bcrypt 72-byte limit) → raises a clear validation error and writes no row.
+- Create `src/civica/users/__init__.py` and `src/civica/users/service.py`:
+  - `register(username: str, secret: str, conn: psycopg.Connection | None = None) -> UserId` - normalizes the username (trim + `casefold`), validates the secret length (raises on over-length input, before any hashing or write), hashes the secret with bcrypt, generates `uuid4()`, inserts the row, and returns the `UserId`. Catches `psycopg.errors.UniqueViolation` on the `username` constraint and raises `UsernameTaken`.
+  - `verify(username: str, secret: str, conn: psycopg.Connection | None = None) -> UserId | None` - normalizes the username identically, looks up the row, checks the secret with `bcrypt.checkpw`, and returns the stored `UserId` on success or `None` on either an unknown username or a bad secret (the two cases are indistinguishable to the caller by design).
+  - `UsernameTaken` is defined here (service-layer error) and exported. `UserId` is imported from `domain/user.py`.
+  - Optional-connection convention (pool by default, explicit connection in tests) matches `search`/`upsert_chunks`/`apply_schema`.
+  
+- **Check In:** Stop and confirm with user that implementation is satisfactory and that the auth surface is what the UI will consume.
+
+- **README:**
+  - Add to technology table: | `bcrypt`               | Local-secret hashing for username auth       |
+  - No new dirs in the project structure diagram (`src/civica/users/` is a sub-package).
+
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan. 
+    - Extracted `_BCRYPT_ROUNDS` to variable and override in tests so that production hash cycles remain near libary default (12) but tests can run on fewer cycles to maintain performance.
+    - Extracted shared logic for managing database sessions to one place (`session.py`).
+    - Manually confirmed creation of a user in database.
+
+---
+
+## Step 6B: Session Management and Minimal UI
+
+**Goals:**
+- A browser interface where a user can register, log in, and log out.
+- A user stays logged in across browser refreshes and server restarts. This is necessary to support quizzes, mock exams, and long coaching sessions.
+
+_This step was added and implemented after some of the subsequent steps, but this location is where I should have started working on the UI (as soon as possible)._
+
+**Rationale for choice of NiceGUI:** 
+- asynchronous with event handlers
+- per-user session storage keeps a user logged in across refreshes and server restarts (no cookie add-on or sessions table required)
+- test helper runs without a browser
+- actively maintained: v3.18.0 released October 2026
+- Alternatives considered: Chainlit was archived in 2026. Streamlit requires several workarounds for session management because it is single script that reruns on every click and cannot set cookies.
+
+**Validation Experiment (timeboxed, about an hour):** Confirm the following and report the findings and the chosen test wiring to the user before implementing subsequent instructions.
+- NiceGUI's `User` test fixture can drive pages built with injected `AppDeps` (including the per-test `db_schema` connection)
+- `app.py` passes mypy strict
+- whether `pytest-asyncio` is needed
+- **Check In:** Report the findings to the Product Owner to determine if ok to move to subsequent instructions.
+
+**Setup**
+- Add dependency: `nicegui`, capped below the next major version (`<4`) so a breaking release cannot arrive through a routine `uv lock --upgrade`. Add dev dependency `pytest-asyncio` if the validation demonstrates that the NiceGUI test plugin requires it.
+- `pyproject.toml` `[tool.pytest.ini_options]`: `asyncio_mode = "auto"`, `main_file = ""` (the app has no `main.py`; tests register pages themselves), and add `-p nicegui.testing.user_plugin` to `addopts`. pytest only accepts plugins from the root config or root `conftest.py` so the plugin loads for the whole suite. Existing sync tests are unaffected.
+- Add `.nicegui/` (NiceGUI's per-user storage files) to `.gitignore`.
+- Add `CIVICA_SESSION_SECRET` to `.env.example` with a placeholder.
+
+**Session settings**
+- **Test:** `tests/unit/ui/test_settings.py`
+  - `session_secret()` returns the value of `CIVICA_SESSION_SECRET` when it is set.
+  - A missing or empty `CIVICA_SESSION_SECRET` raises `MissingSessionSecret` with a message that names the variable and points to the README for how to generate and store one.
+- Create `src/civica/ui/__init__.py` and `src/civica/ui/settings.py`:
+  - `session_secret() -> str` and `MissingSessionSecret`.
+  - `SESSION_MAX_AGE = 14 days` in seconds. Passed to NiceGUI's session middleware so the login lasts 14 days. Set this explicitly rather than relying on a default.
+- **Check In:** Stop and confirm with user that the implemented code is satisfactory.
+
+**Registration rules**
+- Agree conventional username and password rules with the Product Owner before writing tests. Base the password rules on NIST SP 800-63B. Base the username rules on common practice.
+- **Test:** `tests/unit/users/test_rules.py` (unit: pure functions, no DB): boundary lengths, disallowed characters, reserved names, common passwords (case-insensitive), and a password matching the username.
+- **Test:** extend `tests/integration/users/test_service.py`: an invalid username or a common password raises and writes no row.
+- Create `src/civica/users/rules.py`:
+  - `validate_username(normalized)` and `validate_secret(secret, normalized_username)`, raising `InvalidUsername` / `InvalidSecret`. Both subclass `ValueError` so existing callers keep working, and each carries a message that is safe to show users.
+  - Human-readable rule strings (e.g. `USERNAME_RULES`, `SECRET_RULES`) that the registration page shows as hints, so the rules and hints share one source.
+  - The common-password blocklist is a bundled text file (`src/civica/users/common_passwords.txt`), loaded once. No network calls.
+- `users.service.register()` calls both validators before hashing or writing. Move the existing secret-length check into the rules. Sign-in never re-checks the rules, so older accounts still sign in.
+- Make `normalize_username` and `BCRYPT_ROUNDS` public in `users.service`: the UI shows the stored (normalized) username, and `AppDeps` defaults to the production hash cost.
+- **Check In:** Stop and confirm with user that the implemented code is satisfactory.
+
+**Minimal UI**
+- The UI displays "password" while the code and database use "secret" to match `users.service`.
+- **Test:** `tests/integration/ui/test_app.py` (integration: NiceGUI's `User` fixture, which simulates the browser in Python with no real browser; registration and sign-in run through the real `users.service` against the test DB, wired as the spike decided, with a lowered bcrypt cost from `tests/support/users.py`)
+  - Access: an unauthenticated visit to `/` redirects to `/login`. `/register` and NiceGUI's own `/_nicegui/` assets are served without signing in.
+  - Sign-in page: correct password signs in (button or Enter). Wrong password, unknown username, over-length password, and empty input each show an error, stay on `/login`, and create no user. The register link opens the registration page.
+  - Registration page: shows the username and password rules as hints. Creating an account lands on `/` showing "Signed in as" and the username. A taken username, mismatched confirmation, or any broken rule shows its error and creates no user. A link returns to the sign-in page.
+  - **Refresh keeps the user logged in:** opening `/` again in the same simulated browser shows the signed-in page, not the sign-in form.
+  - **Logout:** shows the sign-in form, and opening `/` again redirects to `/login`.
+  - Signing back in after logout reaches the same account (same username shown, still one user row).
+- **Test:** `tests/integration/ui/test_entrypoint.py` (integration: NiceGUI's `user_simulation(main_file=...)` runs `app.py` as `__main__` without starting a server, so the production `ui.run(...)` wiring is exercised)
+  - The session cookie lasts 14 days.
+  - The cookie follows `SESSION_MAX_AGE` when it is set to another value (Starlette also defaults to 14 days, so the first test alone cannot tell the explicit setting apart from that default).
+  - Startup raises `MissingSessionSecret` when the secret is empty.
+- Before calling the new tests done, break each behavior they cover once (remove the setting, the check, or the handler) and confirm the matching test fails.
+- Do not yet implement a real browser smoke test, which will slow down the test suite. For now, the web app pages are simple forms with high likelihood of performing as expected so a quick manual check is sufficient. We will add a browser smoke test just before implementing interactive chat in the UI, when the hit on test speed will be worth the added assurance. 
+- Create `src/civica/ui/deps.py`: frozen `AppDeps` dataclass (optional DB connection for `users.service`, following the optional-connection convention, and the bcrypt cost so tests can lower it) and `default_app_deps()`, following the `PlannerDeps` pattern. A subsequent step adds `graph` to it.
+- Create `src/civica/ui/auth.py`:
+  - Auth middleware based on NiceGUI's authentication example: requests pass when per-user storage marks the browser as signed in, or when the path is `/login`, `/register`, or NiceGUI's own `/_nicegui/` assets; anything else redirects to `/login`.
+  - `sign_in(user_id, username)` writes the login keys to `app.storage.user`; `current_user() -> SessionUser | None` reads them back through a frozen pydantic `SessionUser` model (`user_id`, `username`), since storage is persisted JSON; `sign_out()` clears `app.storage.user` entirely.
+  - Logout clears all of the browser's per-user storage, because that storage belongs to the browser, not to the civica account (two people sharing a browser share it). Logout never touches Postgres: memory, checkpoints, and quiz history are keyed by `user_id` and are there again at the next login.
+- Create `src/civica/ui/app.py` (entrypoint, run as `uv run python -m civica.ui.app`):
+  - `register_pages(deps: AppDeps)` defines `@ui.page("/login")`, `@ui.page("/register")`, and `@ui.page("/")`. Tests register pages with their own deps through the same function, so there is one seam and no monkeypatching.
+  - Under `if __name__ in {"__main__", "__mp_main__"}` (needed for NiceGUI's auto-reload): `load_dotenv()`, `register_pages(default_app_deps())`, then `ui.run(storage_secret=session_secret(), session_middleware_kwargs={"max_age": SESSION_MAX_AGE}, title="Civica")`. The app refuses to start without `CIVICA_SESSION_SECRET`.
+  - **Sign-in page (`/login`):** username and password inputs (password masked) and a **Sign in** button; Enter also submits. Sign-in only verifies an existing account, and every failure shows one message ("Wrong username or password."), since `verify()` does not distinguish an unknown username from a wrong password. Below the button: "If you don't have an account, register here." linking to `/register`. On success `sign_in(...)` and navigate to `/`.
+  - **Registration page (`/register`):** username, password, and confirm password inputs, each rule shown as a hint, and a **Create account** button. Registration only creates an account: a taken username, a mismatched confirmation, or a broken rule shows its message. A link returns to `/login`. On success `sign_in(...)` and navigate to `/`.
+    - Why two pages: with one form where an unknown username silently registers, a typo in a returning user's username creates a new, empty account.
+  - **Signed-in page:** "Signed in as <username>" (the normalized form) and a **Log out** button (`sign_out()`, navigate to `/login`). Placeholder text for the coach, which a subsequent step replaces.
+- **Check In:** 
+  - Stop and confirm with user that the UI is satisfactory.
+  - Prompt the user to: 
+    - Run `uv run python -m civica.ui.app`. 
+    - Create a dev user on the registration page. 
+    - Refresh the browser and restart the server to confirm they stay logged in. 
+    - Log out and confirm they stay logged out. 
+    - Sign back in and confirm it is the same account.
+    - Stop the server process with Ctrl+C so that port 8080 is available for use.
+
+- **README:**
+  - Add to **Technology** table: | nicegui | web UI and sessions |
+  - Add `src/civica/ui/` (`# NiceGUI web app and its view models`) to the project structure diagram, and `.nicegui/` (`# git-ignored; per-browser login storage`).
+  - Add `CIVICA_SESSION_SECRET` (required to run the web app) to the environment variables in **Setup**
+    - It signs the browser's login cookie. (It does not encrypt stored data.)
+    - Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Changing this secret will log out every user, but their coaching memories will remain intact.
+  - Do not yet update the Usage section. Let's update that when more functionality is available.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## ✅ Step 7: Memory layer (LangGraph checkpointer + store + records + memory_writer)
+
+**Goal:** The LangGraph-backed learner memory: short-term thread state (checkpointer), a long-term namespaced store holding four record types, and an allowlist-guarded `memory_writer` helper over that store. The raw quiz-answer log lives outside LangGraph state and is built in Step 7B.
+
+**Conventions to follow:**
+- `UserId` is imported from `domain/user.py`, never redefined here. The memory writer, the quiz log, and the record types all type their user parameter as `UserId`, keeping the namespace type single-sourced in the domain layer and this layer free of any dependency on the auth service.
+- Typing (mirror `domain/`): every record/row type is a **frozen pydantic `BaseModel`** (`model_config = ConfigDict(frozen=True)`, `Field(...)` constraints), matching `Chunk`/`Theme`. Each `BaseModel` class needs a `# type: ignore[explicit-any]` comment on its `class` line, because the project's `disallow_any_explicit = true` flags pydantic's base. No plain dataclasses in this layer.
+- `Theme` persists as its slug, everywhere. The `Theme` pydantic model is never stored whole. In store records, add a field serializer so `theme` dumps to `theme.slug` (rehydrate with `Theme.from_slug`); in `quiz_answers` the `theme TEXT` column holds `theme.slug`. Slug is the single wire form across the store JSON and the SQL column. (Applied in `records.py` below; the same rule governs `quiz_log.py` in Step 7B.)
+
+**Part 1**
+- Add dependency: `langgraph`, `langgraph-checkpoint-postgres` (or the equivalent monorepo package that ships `PostgresSaver` + `PostgresStore`).
+  - No `schema.sql` change in this step because the LangGraph tables are created by `setup()`. The `quiz_answers` table is added in a subsequent step.
+- **Test:** `tests/integration/memory/test_checkpointer.py` (integration: exercises real `PostgresSaver` tables)
+  - A checkpoint saved for thread `t1` can be restored; unrelated threads return `None`.
+  - Note: LangGraph's `setup()` creates its own tables outside `schema.sql` so the `db_schema` fixture does not isolate them. These tests run against the test DB's public schema and must clean up the threads they create.
+- Pool config (Do this first because the existing pool is not drop-in compatible.): 
+  - LangGraph's `PostgresSaver`/`PostgresStore` require their connections to use `row_factory=dict_row` and `prepare_threshold=0` (in addition to `autocommit=True`, which the pool already sets). 
+  - The current `db/pool.py` hands back `TupleRow` connections. 
+  - Verify the exact required kwargs against the installed `langgraph-checkpoint-postgres` version, then extend `db/pool.py` to add `row_factory=dict_row` and `prepare_threshold=0` to the shared pool's `kwargs`, and re-check existing `TupleRow` consumers (they read rows positionally via `session.run_on_connection`.
+  - Confirm none break or have them set their own per-connection row factory. 
+  - Keep the single-pool rule from `CLAUDE.md`: Do not spin up a second pool.
+- Create `src/civica/memory/__init__.py`, `src/civica/memory/checkpointer.py`, and `src/civica/memory/store.py`:
+  - `checkpointer.get_saver() -> PostgresSaver` - singleton bound to the shared connection pool (constructed directly over the pool, not via the `from_conn_string` context manager, so it stays open for the process). Calls `setup()` once.
+  - `store.get_store() -> PostgresStore` - singleton bound to the shared pool. Calls `setup()` once. Key-based only (no vector index config); nothing in the current plan needs semantic memory search.
+- **Check In:** Stop and confirm with user that the implemenation is satisfactory.
+
+**Part 2**
+- **Test (unit):** `tests/unit/memory/test_records.py` (pure serialization, no DB, no network)
+  - `SourceRef` round-trips through `model_dump(mode="json")` / `model_validate` as an object with `page_slug`/`section_id` intact (no tuple-vs-list drift).
+  - A `TopicMastery` (a Theme-bearing record) dumps its `theme` as `theme.slug` (a string, not a nested object) and rehydrates via `Theme.from_slug` to an equal record, locking in the Theme-as-slug convention.
+  - Each of the four record models (`LearnerProfile`, `TopicMastery`, `MistakeEpisode`, `SessionSummary`) round-trips to an equal instance and exposes the expected `kind`.
+  - Note: This is the fast test for the pydantic/typing layer.
+- Create `src/civica/domain/source_ref.py` and `src/civica/memory/records.py`:
+  - `domain/source_ref.py` - `SourceRef(BaseModel, frozen)` with `page_slug: str = Field(min_length=1)` and `section_id: str = Field(min_length=1)`. Lives in `domain/` (not `memory/`) because Step 9's `Question` also carries `list[SourceRef]` forward into `MistakeEpisode`. Replaces bare `(page_slug, section_id)` tuples and mirrors `Chunk`'s identity fields.
+  - `records.py`:
+    - `MemoryKind(StrEnum)` with members `LEARNER_PROFILE = "learner_profile"`, `TOPIC_MASTERY = "topic_mastery"`, `MISTAKE_EPISODE = "mistake_episode"`, `SESSION_SUMMARY = "session_summary"`. Single source of truth for the namespaces.
+    - Four frozen pydantic record models - `LearnerProfile`, `TopicMastery`, `MistakeEpisode`, `SessionSummary` - each declaring `kind: ClassVar[MemoryKind]` so the writer derives the namespace from the record (no separate stringly-typed `namespace_kind` param, no CamelCase-to-snake drift). Each has an obvious `Theme`-typed field where relevant (persisted as slug per the Theme rule above). No hidden state.
+    - `MistakeEpisode` captures the source context of the missed question, not just the theme: `theme`, `question_id: str`, and `sources: list[SourceRef]` (a question may draw on several passages). This is what lets Step 17's mistake-driven review reconstruct a corpus-prefix-style retrieval query and re-teach the exact passages the learner missed.
+- **Check In:** Stop and confirm with user that the implemenation is satisfactory.
+
+**Part 3**
+- **Test (integration):** `tests/integration/memory/test_writer.py` (integration: exercises the real `PostgresStore`; same public-schema caveat as the checkpointer tests - use unique per-test `user_id`s so runs do not collide)
+  - `writer.put` with a typed record succeeds and is readable back via `writer.get` as the same typed record.
+  - `writer.put_raw` with a kind **not** in the allowlist raises `MemoryNotAllowed` (this is the graph/LLM-boundary entrypoint - the guard is reachable here because the caller supplies the kind as a string).
+  - Reads/writes are scoped per `user_id` - a value written for `alex` is not returned for `jordan`.
+  - A `MistakeEpisode` written with `sources: list[SourceRef]` reads back as an equal `MistakeEpisode` with those `SourceRef`s intact (end-to-end through the real store, complementing the unit round-trip above).
+- Create `src/civica/memory/writer.py`:
+  - `MEMORY_WRITE_ALLOWLIST: frozenset[MemoryKind]` = all four `MemoryKind` members.
+  - `put_raw(user_id: UserId, kind: str, key: str, value: Mapping[str, object]) -> None` - the boundary entrypoint (graph/LLM path, where the kind arrives as an untrusted string). Raises `MemoryNotAllowed` if `kind` is not a member of the allowlist; otherwise `store.put((kind, str(user_id)), key, value)`. This is where the allowlist is enforced.
+  - `put(user_id: UserId, key: str, record: MemoryRecord) -> None` - typed convenience wrapper for in-process callers; delegates to `put_raw(user_id, record.kind.value, key, record.model_dump(mode="json"))`. (`MemoryRecord` is the union / shared base of the four record models; its `kind` is always allowed by construction, so this path never raises.)
+  - `get(user_id: UserId, key: str, kind: type[R]) -> R | None` where `R` is bound to `MemoryRecord` - reads the raw mapping and returns `kind.model_validate(mapping)` (typed, not a bare `Mapping`), or `None`. No allowlist on reads.
+  - **Key conventions** (state them, downstream steps depend on them): `LearnerProfile` / `SessionSummary` - one per user, a constant key (e.g. `"current"`); `TopicMastery` - keyed by `theme.slug`; `MistakeEpisode` - unique key per episode (e.g. `question_id` + timestamp).
+- **Check In:** Stop and confirm with user that the implemenation is satisfactory and that the memory surface (record shapes, allowlist) is what the graph will consume.
+
+- **README:** 
+  - Add `src/civica/memory/` to the project structure (and note `domain/source_ref.py` if the diagram lists domain files).
+  - Add to technology table: | `langgraph`            | Graph orchestration, checkpointer, store     |
+
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Added maximum character limit on free-form prose fields. The cap is generous (500) to capture nuance. Such fields are intended only for LLM or human consumption. Other types of fields (e.g. identifiers, slugs) are more tightly controlled.
+    - Developed field shapes: `LearnerProfile.goal: str` (bounded free-form prose, `max_length=500`, LLM-consumed personalization context), `TopicMastery` = `theme` + `mastery: float` in `[0,1]` (scoring stats stay in the `quiz_answers` log, not duplicated here), `SessionSummary.summary: str` (bounded free-form prose, `max_length=500`); `MistakeEpisode` = `theme` + `question_id` + `sources: list[SourceRef]`.
+
+---
+
+## ✅ Step 7B: Quiz-answer log (raw append-only table outside LangGraph)
+
+**Goal:** A plain-SQL append-only record of every quiz answer, separate from LangGraph state. It powers scoring and the mistake-driven review.
+
+- Extend `src/civica/db/schema.sql` (see [Schema convention](#schema-convention)):
+  ```sql
+  CREATE TABLE IF NOT EXISTS quiz_answers (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(user_id),
+    theme TEXT NOT NULL,
+    question_id TEXT NOT NULL,
+    chosen_index INT NOT NULL,
+    correct_index INT NOT NULL,
+    is_correct BOOLEAN NOT NULL,
+    answered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS quiz_answers_user_recent_idx
+    ON quiz_answers(user_id, is_correct, answered_at DESC);
+  ```
+  - This index matches the only reader (`recent_mistakes`: filter `user_id` + `is_correct = false`, order `answered_at DESC`). No theme-scoped index yet. Add one only when a theme-scoped reader exists.
+  - `quiz_answers` is the **append-only stats/scoring log** (every answer, right or wrong). It is complementary to `MistakeEpisode` store record, which captures the corpus **source context** of wrong answers for re-teaching. Do not fold one into the other.
+  - No tests. Schema only.
+
+- **Test:** `tests/integration/progress/test_quiz_log.py` (integration: writes real `quiz_answers` rows; use the `db_schema` fixture, which also provides the `users` table for the FK)
+  - **First insert a `users` row** (call `users.register`, or insert directly) - `quiz_answers.user_id` has a FK to `users(user_id)`, so logging against a non-existent user raises a `ForeignKeyViolation`. Use that row's `UserId` for the rest of the test.
+  - Log 5 answers, `recent_mistakes(user_id, limit=3)` returns the 3 most recent incorrect ones in reverse-chronological order.
+  - Field fidelity: a returned `QuizAnswerRow` matches what was logged - `theme` rehydrated (via `Theme.from_slug`) to the same `Theme` that was written as a slug, and `question_id` / `chosen_index` / `correct_index` / `is_correct` preserved.
+  - `recent_mistakes` for a fresh user returns an empty list.
+- Create `src/civica/progress/__init__.py` and `src/civica/progress/quiz_log.py`:
+  - `QuizAnswerRow` - frozen pydantic model over a `quiz_answers` row: `id: int`, `user_id: UserId`, `theme: Theme`, `question_id: str`, `chosen_index: int = Field(ge=0)`, `correct_index: int = Field(ge=0)`, `is_correct: bool`, `answered_at: datetime`. Reads rehydrate `theme` via `Theme.from_slug`.
+  - `log_answer(user_id: UserId, theme: Theme, question_id: str, chosen_index: int, correct_index: int, is_correct: bool, conn: psycopg.Connection | None = None) -> None` - writes `theme.slug` into the `theme` column.
+  - `recent_mistakes(user_id: UserId, limit: int = 20, conn: psycopg.Connection | None = None) -> list[QuizAnswerRow]` - filters `is_correct = false`, orders `answered_at DESC` (served by `quiz_answers_user_recent_idx`).
+- Notes on conventions:
+  - `UserId` from `domain/user.py`, `Theme` from `domain/themes.py`. Optional-connection convention (pool by default, explicit connection in tests) matches the rest of the codebase.
+  - `Theme` persists as its slug: `log_answer` writes `theme.slug` into the `theme TEXT` column; reads rehydrate via `Theme.from_slug`.  
+
+- **Check In:** Stop and confirm with user that implementation is satisfactory and that the quiz-log surface (row shape, schema) is what the graph will consume.
+
+- **README:** 
+  - Add `src/civica/progress/` to the project structure.
+
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Ordering tiebreaker: `recent_mistakes` orders by `answered_at DESC, id DESC` instead of `answered_at DESC` alone. The `answered_at` timestamp defaults to `NOW()`, and Postgres freezes `NOW()` to the moment a transaction starts, so several answers saved together can end up with the exact same timestamp, which could be problematic when searching for the 'most recent' user response. Adding `id DESC` breaks the tie by the always-increasing row `id`: the answer inserted later always has the larger `id`, so it sorts first.
+    - Theme loading: `QuizAnswerRow` turns the stored theme slug back into a `Theme` on its own so that query results load straight into the row model without an extra step.
+    - Added a test confirming that logging an answer for a user who does not exist is rejected by the foreign key.
+
+---
+
+## ✅ Step 8: Explanation engine (Claude + retrieval)
+
+**Goal:** Given a theme and a learner question, produce a concise English explanation (with French vocabulary) grounded in retrieved French corpus chunks.
+
+- Add dependency: `langchain-anthropic`.
+- Create `src/civica/llm/client.py` - a thin chat-model factory mirroring `embeddings/embedder.py`: a module constant `GENERATION_MODEL = "claude-sonnet-5"` (named to parallel `embedder.py`'s `EMBEDDING_MODEL` - both name the *task*, embedding vs generation, not the provider) and `get_chat_model(model: str = GENERATION_MODEL) -> BaseChatModel` that lazily constructs `ChatAnthropic(model=model, max_tokens=...)` so importing never requires `ANTHROPIC_API_KEY`. The optional `model` override lets Step 9 request a stronger model for question generation without a second factory or a second constant; callers that omit it get the default. If you keep the lazy-cache pattern from `embedder.py`, key the cache by `model` (a small dict), since the override means more than one client can exist. This is the single place the generation provider and default model are chosen; Step 8 (`explain`) and Step 9 (assessment engine) both default their injected `chat_client` to it, so the provider choice is never duplicated. It is deliberately a thin wrapper, not a provider-abstraction service (see the NB below): `BaseChatModel` is the portability layer, so a future provider swap is a one-line constructor change here. No dedicated test (thin wrapper, exercised via the engines and the external tests), matching `embedder.py`.
+- **Unit tests:** `tests/unit/explanation/test_engine.py`
+  - Unit test (no DB, no network) with a fake retriever (returns fixed chunks) and a fake `ChatAnthropic` (records the prompt, returns a canned response), both injected into `explain` (see the dependency-injection note below). Assert:
+    - The final prompt contains all retrieved passages verbatim.
+    - The system message forbids drawing on outside knowledge (assert the exact substring is present).
+    - The system message mandates English output while retaining French vocabulary (assert the exact substring is present). This is the second hard product contract alongside grounding: the exam is French, explanations are English.
+    - Returned `Explanation.context_chunks` matches the fake retriever's output.
+  - Empty-retrieval case: with a fake retriever that returns `[]`, `explain` returns an `Explanation` stating there is insufficient material and does **not** call the fake `ChatAnthropic` (assert the fake was never invoked). See the empty-retrieval short-circuit below.
+- Create `src/civica/explanation/engine.py` (noun-named package per the Step 5 naming convention; the public function stays the verb `explain`):
+  - `explain(user_question: str, theme: Theme, *, retriever: SearchFn = search, chat_client: BaseChatModel | None = None) -> Explanation` - calls the injected `retriever` (a callable with the same shape as `retrieval.content.search`, which is the default), packs the retrieved passages into a Claude prompt with a fixed system message that mandates using only the provided passages and translating French → English, calls the injected `chat_client` (defaults to `llm.client.get_chat_model()`), returns a frozen `Explanation`.
+  - Dependency injection: `retriever` and `chat_client` are keyword-only parameters with production defaults, per the dependency-inversion rule. This gives the unit test a real seam (pass a fake retriever and fake `ChatAnthropic`).
+  - `Explanation` is a **frozen pydantic model** (matching `Chunk` / `ContentChunk` / `QuizAnswerRow`, not a bare dataclass) with `text: str` and `context_chunks: list[ContentChunk]`. The field is named `context_chunks`, not `citations`: it holds every passage retrieved and packed into the prompt, i.e. the model's grounding context, not a verified per-claim attribution of what Claude actually cited. (Step 9's analogous field is `Question.sources`; the different name is deliberate - those are the specific chunks a question was generated from.)
+  - Model pinning and choice: the default model id lives in the `llm/client.py` `GENERATION_MODEL` constant (`claude-sonnet-5`), never an inline `"claude-..."` placeholder in the engine. Default to Sonnet, not Opus: explanation is a high-volume, tightly-scoped, retrieval-grounded task where Sonnet is the better cost/quality default; revisit at the check-in if quality disappoints. The factory must **not** set `temperature` (removed on current Claude models; passing it returns a 400), and should set an explicit `max_tokens` large enough that an explanation is never truncated (streaming is unnecessary at this size).
+  - Empty-retrieval short-circuit: if the retriever returns no chunks (the `search` docstring notes a theme filter can return fewer than `k`, possibly zero), return an `Explanation` whose `text` states there is insufficient official material for the question, with `context_chunks=[]`, **without** calling the LLM. A grounded coach must not free-associate when it has no passages; this enforces the official-facts-only rule.
+  - No `user_id`: `explain` intentionally takes no learner identity. Explanation draws only on the corpus, so keeping LangGraph memory out of this path is the strict data-type separation rule working as intended - do not add a `user_id` parameter here.
+  - Prompt-injection boundary: interpolate `user_question` only into the user/human message, never into the system message. The fixed system message (grounding + English-output mandate) is the trusted channel; the learner question is untrusted input.
+  - Query construction: pass the learner's question to the retriever raw, scoped by the hard `theme` filter. Do not prepend theme context to the query here: a natural user question exists, the filter already scopes the theme deterministically, and prefix tokens would dilute the question's own signal. (Contrast with Step 9, where no natural question exists and the query is manufactured from context.)
+  - Prompt lives in a `PROMPTS` dict at module top so it can be tested without invoking the LLM.
+
+**Check In:** Stop and confirm with the user that the implementation is satisfactory. Eyeball the explanation quality on a real theme before moving on.
+- Notes
+  - I explored the creation of an extracted service to interface with claude so that I could integrate with more LLM providers easily in the future. However, LangChain is serving this purpose sufficiently for now. Given the current structure, changing clients simply requires using a different contructor, e.g., `ChatAnthropic(...)` vs `ChatOpenAI(...)`.  
+  - I explored aligning more fully the embedding and generation pathways in terms of how they reach out to LLM providers. I decided against a refactor at this time because they already match at the architecture level. They differ only at the surface and that difference is deliberate because the two calls are shaped differently.
+
+- **Add integration test:** `../tests/integration/explanation/test_engine_external.py`: one `@pytest.mark.external` test that calls Claude with a tiny stub context and asserts the response is non-empty **and** is not a refusal (a bare "non-empty" assertion would pass on a refusal or a French-only answer, so also assert the text contains no obvious refusal marker). External tests live under `integration/` with the `_external` suffix, matching `test_embedder_external.py`.
+
+- **README:**
+  - Add `src/civica/llm/` (chat-model factory) and `src/civica/explanation/` to the project structure diagram.
+
+**Check In:** Stop and confirm with the user that the implementation is satisfactory.
+
+**Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan below:
+    - Improved control and extensibility of the LLM chat clients: Solidified LLM clients into classes (e.g. `AnthropicChat`) depending on the platform. Bound the required input parameters to an LLM chat client to prevent mismatched parameters or accidental reliance on a default.
+    - Corrected the explanation engine from using `response.content` (which includes a lot of metadata) to using `response.text` (only the text blocks)
+    - Added `SearchFn` to `retrieval/content.py` as a Protocol so both the real `search` (extra defaulted params) and test fakes satisfy it.
+
+---
+
+## ✅ Step 9: Assessment engine (quiz + mock exam assembly)
+
+**Goal:** Assemble quiz batches and mock exams that mirror the official structure.
+
+- **Test:** `tests/unit/assessment/test_engine.py`
+  - Unit test (no DB, no network): fake retriever + fake Claude client (both injected) returning a deterministic JSON payload of MCQ items. Assert:
+    - `generate_quiz` returns exactly `n` well-typed questions from the requested theme.
+    - `generate_mock_exam` returns exactly 40 questions with the required per-theme counts.
+    - `MockExamResult.passed` reflects the 80% threshold at boundaries (31 = fail, 32 = pass, 40 = pass).
+    - The fake retriever records the query it was called with; assert the query is constructed from the theme's `display_name_fr` (never an empty string), per the query-construction rule below.
+    - Persistence: with a fake `question_store`, assert each returned `Question` is written exactly once, keyed by its content hash, so Step 21 can schedule and reuse items. Assert re-running with the same generated payload does not double-write (idempotent upsert). Assert the persisted row carries the current `prompt_version`.
+    - Answer logging: with a fake answer-logger injected, assert `MockExam.score(answers)` emits exactly one log call per answer (40 for a full exam), carrying the right `theme`/`question_id`/`is_correct`. This is the assertion that keeps the densest mastery signal from bypassing `quiz_answers`.
+- Create `src/civica/assessment/engine.py`:
+  - LLM client: `generate_quiz` and `generate_mock_exam` take keyword-only `retriever` (defaults to `content.search`) and `chat_client: BaseChatModel` (defaults to `llm.client.get_chat_model()`). This is the same injection seam and shared factory as the explanation engine. Do not construct a second `ChatAnthropic` here. If question generation needs a different model or a larger token cap than explanation (a mock exam is far longer than one explanation, so the 2048 cap will not fit), add a `QUIZ_PROFILE = AnthropicChat(...)` constant in `llm/client.py` and pass it to `get_chat_model(...)`, rather than inlining a model id or a token count at the call site.
+  - `generate_quiz(user_id: UserId, theme: Theme, n: int = 5) -> list[Question]` - retrieves corpus passages for the theme, prompts Claude to produce `n` MCQ questions in French (4 options, exactly one correct), returns typed `Question` records. Each `Question` carries `sources: list[(page_slug, section_id)]` taken from the retrieved `ContentChunk`s it was generated from, so a wrong answer can be logged as a `MistakeEpisode` (Step 7) with enough context for targeted re-teaching (Step 17).
+  - Query construction: no natural user question exists here, so manufacture the retrieval query from context in the same style as the corpus chunk prefix (`<page title> - <section heading>`, see Step 4 notes): at minimum `theme.display_name_fr`, or `<theme display_name_fr> - <page title>` when targeting a specific page. Combined with the hard `theme` filter, this pulls the query embedding toward that topic's chunk cluster without any corpus change. Vary the targeted page/section across the `n` questions so a quiz batch draws on more than one passage cluster.
+  - `generate_mock_exam(user_id: UserId) -> MockExam` - produces exactly 40 questions in the fixed theme distribution (11, 11, 8, 6, 4), also mirroring 28 knowledge + 12 scenario if separable via prompt. `MockExam` exposes `questions`, `time_limit_seconds = 45 * 60`, and a `score(answers) -> MockExamResult` method. Retrieval per theme follows the same query-construction rule as `generate_quiz`.
+  - `MockExamResult` exposes `total_correct`, `passed` (>= 32/40), and `per_theme_scores: dict[Theme, int]`.
+  - Persist the question bank (required to enable self-improvement): generated questions are written to a `generated_questions` table via an injected `question_store` (keyword-only, defaults to the production store), keyed by a sha256 hash of the question text so writes are idempotent. Each row stores the MCQ, the marked answer, the `theme`, the `sources: list[SourceRef]` it was generated from, and a `prompt_version` stamp. Today `Question` records are ephemeral; persisting them is what lets Step 21 schedule items per learner, rest mastered ones, and resurface missed ones instead of paying to regenerate every time.
+  - `prompt_version`: a short constant declared beside the generation prompt in the module `PROMPTS` dict and bumped by hand whenever that prompt changes. Stamping it costs one column and turns every later prompt edit into a measurable A/B rather than a guess. Step 9B pairs it with persisted critic-rejection reasons so rejection rate per prompt version becomes the accumulating quality signal.
+  - `generate_quiz` may prefer persisted items that are due for a learner before generating new ones once the bank is warm (behind the `PREFER_SCHEDULED_QUESTIONS` flag, default `False`; Step 21 flips it on after its scheduling check-in).
+  - Add the `generated_questions` table to `schema.sql` (idempotent `CREATE TABLE IF NOT EXISTS`).
+  - **Every scored answer is logged.** `MockExam.score(answers)` and the quiz scoring path both write one `quiz_answers` row per answer via Step 7B's `log_answer`. A mock exam is 40 answers in one sitting and is the densest mastery signal the system ever receives; it must not bypass the log. Step 16's `mock_exam_node` inherits this rule.
+
+- **Check In:** 
+  - Confirm with the user that the implementation is satisfactory.
+  - Confirm with user that the question quality is appropriate on a small manual run of `generate_quiz`. Prompt the user to decide whether Sonnet's question quality holds up for the assessement engine before overriding the model choice (e.g. with opus).
+
+- **README:**
+  - Add `src/civica/assessment/` to the project structure diagram and note the new `generated_questions` table alongside `content_chunks` and `quiz_answers`.
+
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - `generate_quiz` returns a frozen `Quiz` (user_id, questions, `score(answers)`) instead of just a `list[Question]` so that quiz and mock exam answers can both get scored and logged through one shared scoring path in `assessment/scoring.py`.
+    - Added `QuestionKind` field on `Question` class to represent the difference between knowledge questions and scenario questions. 
+    - The mock exam asks a total of 40 questions across each theme (`EXAM_QUESTION_COUNTS`). These are broken down into 28 knowledge questions and 12 scenario questions (`EXAM_SCENARIO_COUNTS`). 
+      - The full breakdown by theme is: 8/3 Principes et valeurs de la République, 8/3 Droits et devoirs, 6/2 Histoire géographie et culture, 4/2 Système intitutionnel et politique, 2/2 Vivre dans la société française.
+    - Mock exam generates all five themes before saving once. Any failure saves nothing.
+    - One retrieval and one LLM call per theme. Chunks are grouped by section into one passage group per question. `sources` and `kind` are assigned in code.
+    - `PREFER_SCHEDULED_QUESTIONS` was dropped from this step; Step 21 adds it when it has something to gate.
+    - Bug discovered after merge: Questions cites several unrelated sections. Step 9C added to address this.
+
+---
+
+## ✅ (optional) Step 9B: Grounding + correctness gate (question critic)
+
+**Goal:** 
+- A verifier pass that rejects ungrounded or malformed MCQs (multiple choice questions) before they reach the learner. 
+- This is primarily a quality/safety gate that improves each output at generation time.
+- It also leaves an accumulating trail: paired with Step 9's `prompt_version` stamp, persisted rejection reasons make "did that prompt edit actually help?" a query instead of an opinion.
+- It remains independent of the learner-facing self-improvement loops in Steps 21 and 22.
+
+- **Test:** `tests/unit/assessment/test_critic.py`
+  - With a fake Claude client scripted to return one malformed item on the first pass (zero or two correct options, or an option absent from the retrieved chunks) and a valid item on the retry, assert the malformed item never reaches the returned batch and that every returned `Question` is one that passed the critic.
+  - Assert the fake client was invoked the expected number of times (generation + critic + one bounded retry), so the loop neither skips the critic nor retries unboundedly.
+  - Assert an item that still fails after `MAX_REFINE_ATTEMPTS` is dropped, not shown (a short batch is acceptable; a wrong answer key is not).
+- Extend `src/civica/assessment/engine.py`:
+  - After the generation call, each candidate MCQ passes through a critic step before it is returned. 
+  - The critic is a second LLM call over the same retrieved chunks that checks three hard properties: (1) exactly one option is correct, (2) every option and the marked answer are grounded in the provided passages (no outside knowledge), (3) the distractors are plausible but wrong. Items that fail are regenerated up to a bounded number of attempts (`MAX_REFINE_ATTEMPTS`, small constant); if an item still fails, it is dropped rather than shown.
+  - Implement the critic as an injected callable (`critic: CritiqueFn = default_critic`) defaulting to a `get_chat_model()`-backed check, so the unit test drives it with a fake, same seam as `retriever`/`chat_client`. The critic prompt lives in the module `PROMPTS` dict alongside the generation prompt so it is testable without the LLM. Do not inline a model id here; if the critic needs a different model or a smaller token cap, add a `CRITIC_PROFILE` constant in `llm/client.py` and pass it to `get_chat_model(...)`.
+  - Only critic-passed questions are persisted to `generated_questions` (tightens the Step 9 persistence rule from "generated" to "generated and validated"), so the self-improvement loop (Step 21) schedules validated items instead of first-pass items.
+  - Persist rejections too: a small append-only `rejected_questions` table (`prompt_version`, `theme`, `reason`, `attempt`, `rejected_at`) written whenever the critic fails an item. Rejected questions are still not shown to the learner; only the reason is kept. Rejection rate grouped by `prompt_version` then answers whether a prompt change improved generation, which converts the critic's doubled LLM cost into data. One table and one insert; do not build a UI for it (the Step 21/22 reflection dashboard reads it).
+
+- **Check In:** Confirm with the user that the critic meaningfully improves quality on a small real run (compare a raw batch to a critiqued batch) before keeping it on by default - it doubles the LLM calls per question, so the quality gain must justify the cost.
+
+- **README:** 
+  - Add a **Grounded question quality** bullet to the MVP Features list: generated questions pass a corpus-grounded correctness gate (a critic pass that rejects ungrounded, ambiguous, or multi-answer items) before they reach the learner. Frame it as grounding/safety, not self-improvement.
+
+- **Update this plan:** 
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - The critic lives in its own module (`assessment/critic.py`). Prompts moved to `assessment/prompts.py`.
+    - LLM call optimization: The critic checks a whole theme batch in one call (instead of per-theme LLM calls). Only failed questions are regenerated, at most `MAX_REFINE_ATTEMPTS = 2` times.
+    - The critic reuses `QUIZ_PROFILE` (same model and max_tokens). No `CRITIC_PROFILE` was added.
+    - Quizes are permitted to be shorter than expected as long as they are not completely blank. However, a mock exam has higher standards because it must adhere to the official exam structure. So if the LLM returns a mock exam that does not meet the requirements for a given them, the app raises `QuestionGenerationError` and persists nothing.
+    - The critic is off by default. During validation runs, the critic rejected 0 of 25 questions, which doubled the cost for no quality gain. The critic functionality may be useful as the application evolves. To turn the critic on, pass `critic=LlmCritic()`.
+    - Validation runs of the critic surfaced another issue: questions that mention "the passage" or "the fiche" and questions about the course sheets themselves. To address this, the generation prompt (`quiz-v003`) was updated to forbid both. The critic was also updated to check for this issue (if it is turned on). A rerun showed 0 of 25 questions with either problem.
+    - Content note: Two corpus claims conflict with outside sources: 1) cousin marriage is "interdit" 2) the Commission "replaced" the Haute Autorité in 1957. The app's intention is to be loyal to the official study material in the corpus so no effort was made to adjust for this discrepency.
+
+---
+
+## ✅ Step 9C: Optimize retrieval to improve question generation
+
+**Goal:** Each generated question cites only the section it was written from, so a missed question can re-teach the exact passage.
+
+**Bug discovered in early steps:** 
+  - `_group_chunks` in `assessment/engine.py` deals every retrieved section round-robin into the `n` passage groups. 
+  - With `_RETRIEVAL_K = 30`, a 5-question quiz gives each question 5 to 6 unrelated sections, mostly "objectifs-de-la-fiche" introductions. 
+  - Every one of them lands in `Question.sources`, then in `MistakeEpisode.sources`. So re-teaching would point at the wrong pages.
+
+- **Test:** extend `tests/unit/assessment/test_engine.py`
+  - With retrieved chunks spanning more sections than `n`, each question's `sources` holds exactly one section, and the `n` sections used are the top-ranked distinct sections in retrieval order.
+  - Each passage group in the generation prompt contains only that section's chunks; lower-ranked sections are not sent.
+  - With fewer sections than `n`, sections are reused (current behavior) and each question still cites one section.
+- Fix `_group_chunks`: one distinct section per question, taken in retrieval (similarity) order; discard the remaining sections instead of merging them in.
+- Side effect: the question critic (if turned on) sees only the passage a question came from, which makes its grounding check stricter.
+
+- Add an `--exam` option to the comparison script (`.claude/scratch/compare_critic.py`, local and not committed) so it can generate a mock exam. Quizzes only produce knowledge questions, and the 12 scenario questions have not been reviewed yet.
+
+- **Check In:** Rerun the comparison script on all themes, then with `--exam`. Confirm:
+  - Each question cites one relevant section.
+  - A batch no longer repeats a topic (the Step 9B run had two questions on the national motto, from overlapping passage groups).
+  - Scenario questions are clear, realistic, and have one defensible answer. If they are weak, try Opus for question generation (one-line change to `QUIZ_PROFILE`).
+  - If "objectifs-de-la-fiche" introductions still dominate the top-ranked sections, raise it with the user as a separate retrieval follow-up (query construction or filtering), not part of this fix.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - `_group_chunks` now gives each question one section in retrieval order. Lower-ranked sections are dropped; sections are still reused when there are fewer than `n`.
+    - Scenario questions are clear and each has one defensible answer, so there was no need to upgrade the model to Opus. A few are knowledge questions phrased as scenarios.
+    - Added filter on "objectif-de-la-fiche": 
+      - The first validation run confirmed that course-objective intros ("objectif-de-la-fiche", "objectifs-de-la-fiche") dominated the top-ranked sections (14 of 27 exam sources). 
+      - With one section per question, those questions had nothing factual to stand on: the critic rejected 7 exam questions and the mock exam failed.
+      - So a filter was added. The assessment engine drops those sections after retrieval. Teach retrieval is unchanged.
+      - Results of second validation run (after the filter was added): All 5 quizzes 5/5 (1 rejection in 25), mock exam built 40/40 (1 rejection), no objective sections cited.
+    - Tuned `_RETRIEVAL_K` from 30 to 40: "Droits et devoirs" had exactly 11 usable sections for 11 questions at k=30; k=40 gives it some buffer with a total of 16.
+    - Fixed question to passage alignment:
+      - The k=40 validation run showed the model writing two questions for one passage group and skipping a later one. Sources and kind were attached by position, so 9 of 11 "Droits et devoirs" questions cited the wrong section. The critic caught them, but it is off by default.
+      - To address this, the following updates were made. Each generated item now names its `group`. The engine attaches sources and kind by that number, ignores out-of-range and duplicate items, and retries skipped groups once before raising `QuestionGenerationError`. Prompt version bumped to `quiz-v004`.
+      - Results of the next validation run: all 5 quizzes 5/5 with 0 rejections, mock exam 40/40 with 1 rejection (a genuine grounding gap, not misalignment).
+    - Fixed "Histoire, géographie et culture" retrieving fewer than 8 content sections:
+      - Before this change,one section was reused. So the exam asked twice about the same topic. The query (the theme name) was too broad.
+      - Raising `_RETRIEVAL_K` to 80 would not help because of the 0.3 similarity cutoff. Making that cutoff more generous would hurt the relevance of every other theme.
+      - Histoire theme is now searched with three sub-topic queries ("Histoire de France", "Géographie de la France", "Culture française"), giving 45 usable sections instead of 7. Sections are interleaved round-robin across the queries so no single sub-topic fills the exam. Other themes keep one query.
+      - This does not mean that the Histoire theme might overlap with other themes because the corpus sources by theme are restricted for use by other themes.
+    - Final validation run: Histoire quiz of 8 had 8/8 with 0 rejections; mock exam 40/40 with 0 rejections and no reused section in any theme.
+    - Strengthened prompt safety
+      - Replaced loose prompt dicts with dataclasses (`QUIZ_PROMPTS`, `PLANNER_PROMPTS`, `EXPLANATION_PROMPTS`) that carry their version and typed render methods. Now typos fail the type checker. 
+      - Added a test that pins each version of a prompt beside a hash of its prompt text. Now an edit to a prompt without a version bump fails the suite. No prompt text changed.
+      - Guard prompt templates in tests so that placeholder and render-argument mismatches fail the suite.
+      
+---
+
+## ✅ Step 10A: Autonomous planner (tools + tool-calling loop)
+
+**Goal:** 
+- An autonomous LLM planner that decides its own next action over a bounded tool set for the Teach and Quiz flows. 
+- The mastery-weighted priority heuristic is preserved but demoted from controller to one tool the planner may call. 
+- This step is pure back end and fully unit-testable with a fake model (no LangGraph wiring, no DB). The following Step 10B assembles it into the graph.
+- The allowlist and corpus-grounding short-circuits that were implemented in Step 7 provide the guardrails for this autonomous loop.
+
+- **Test:** `tests/unit/graph/test_router.py` (unit: stub `memory.writer.get` to return synthetic mastery/mistake values; the heuristic is pure once reads are stubbed)
+  - Given synthetic mastery values and no mistakes, assert `suggest_review_theme` returns the highest-priority theme.
+  - With ties, assert the theme with an active mistake episode wins.
+- Create `src/civica/graph/router.py`:
+  - `suggest_review_theme(user_id: UserId) -> Theme` (formerly `pick_next_theme`) - implements `priority(theme) = weight(theme) × (1 − mastery(theme))`. Reads `topic_mastery` for the user via `memory.writer.get`; missing mastery treated as 0. Ties broken by presence of any `mistake_episode` for the theme (present = higher priority). Weights come from the official theme distribution. This is unchanged logic; only its role changes - it is no longer the control-flow entrypoint but a deterministic tool the planner can call to get a strong default recommendation. Keeping it pure and separately unit-tested preserves the deterministic, testable signal underneath the autonomy.
+- **Check In:** Stop and confirm with the user that the implementation is satisfactory.
+
+- **Test:** `tests/unit/graph/test_planner.py` (unit: fake chat model that emits scripted tool calls; assert on the tool-call trace, not a single return value - the planner's contract is the sequence of actions it takes, not a pure output)
+  - Given a fake model that requests `suggest_review_theme` then `teach`, assert both tools are invoked in order with the arguments the model supplied, and that the loop terminates when the model emits a final message (no tool call).
+  - Assert the planner cannot exceed `MAX_PLANNER_STEPS`: a fake model that always emits a tool call is halted at the bound, the learner receives the fallback lesson (not an error and not a partial trace), and the graph still reaches `memory_writer`.
+  - Allowlist guard end-to-end: a fake model that tries to write memory through `record_outcome` with a kind outside `PLANNER_WRITE_ALLOWLIST` causes `MemoryNotAllowed` to surface (the planner cannot smuggle arbitrary writes past the boundary).
+  - Mastery guard specifically: a fake model that tries to write `topic_mastery` through `record_outcome` raises `MemoryNotAllowed`, even though that kind is a legitimate target for the in-process `memory.writer.put` used by `update_mastery_node`. The two allowlists must be observably different.
+  - Grounding guard: a fake model that calls `teach`/`generate_quiz` for a theme whose fake retriever returns `[]` gets the insufficient-material short-circuit (Step 8), not a fabricated lesson.
+- **Test:** extend `tests/integration/memory/test_writer.py` (integration: real `PostgresStore`, matching the existing `put`/`get` coverage)
+  - `list_records` returns every record past the store's default page size, scoped to the requesting user.
+  - `put_planner` writes an allowlisted kind and raises `MemoryNotAllowed` for `topic_mastery` without touching the store.
+- Create `src/civica/graph/planner.py`:
+  - A tool-calling node: bind the tool set to `get_chat_model()`, and in a bounded loop let the model choose the next tool until it emits a final response. This is the "LLM decides its own next step" core, replacing the fixed teach/quiz branch. `MAX_PLANNER_STEPS` (small constant) caps the loop to bound cost and prevent runaway.
+  - **Tool set (thin bindings over existing engines - no new business logic):**
+    - `suggest_review_theme(user_id) -> Theme` - the demoted heuristic above.
+    - `retrieve_corpus(theme, query) -> list[ContentChunk]` - wraps `retrieval.content.search`.
+    - `teach(theme, focus) -> Explanation` - wraps `explanation.explain` (retains its empty-retrieval short-circuit).
+    - `generate_quiz(theme, n) -> list[Question]` and `score_answer(question_id, choice) -> bool` - wrap the assessment engine and correctness gate (implemented in Step 9 and 9B).
+      - NB: `generate_quiz` returns a `Quiz` (scored via `Quiz.score`), not a `list[Question]`. With the critic on, it may raise `QuestionGenerationError` when every question is rejected; the tool must treat that like the empty-retrieval short-circuit, not fail the turn.
+    - `read_learner_state(user_id) -> LearnerState` - wraps `memory.writer.get` (mastery, recent mistakes, `LearnerProfile.goal`).
+    - `record_outcome(...)` - the **only** write tool; wraps `memory.writer.put_raw`, so every autonomous write still passes an allowlist and raises `MemoryNotAllowed` on any kind outside it. This is exactly why the allowlist exists: it is the safety boundary for an LLM that decides its own writes.
+  - **Narrow the planner's write scope (new constant).** `memory/writer.py` currently defines `MEMORY_WRITE_ALLOWLIST = frozenset(MemoryKind)`, which is derived from the enum and therefore silently widens every time a new kind is added. That is the right list for in-process callers but the wrong list for an LLM. Add a second, **hand-enumerated** constant that `record_outcome` checks:
+    ```python
+    PLANNER_WRITE_ALLOWLIST: frozenset[MemoryKind] = frozenset({
+        MemoryKind.MISTAKE_EPISODE,
+        MemoryKind.SESSION_SUMMARY,
+    })
+    ```
+    Enumerate the members literally; never derive this one from `MemoryKind`, so adding a kind never grants the planner access by accident. Step 18 adds `STUDY_PLAN` to it deliberately.
+  - **Mastery is derived, never written by the LLM.** `topic_mastery` is computed deterministically from `quiz_answers` by `update_mastery_node` (Step 10B) and is *not* in `PLANNER_WRITE_ALLOWLIST`. The planner's writes are restricted to episodic and semantic records (mistake episodes, session summaries). This closes the "the LLM grades its own homework" hole and is what makes Step 22's mastery-gain reward trustworthy: an agent that can both choose a teaching strategy and write its own score has no reward signal at all.
+  - **Halt fallback.** When the loop hits `MAX_PLANNER_STEPS` without a final message, the turn does not error and does not surface a partial tool trace. It falls back to `suggest_review_theme` plus a plain `teach` turn on that theme, and records `halt_reason="max_steps"` on the trace. The learner sees a normal lesson; the operator sees the halt in `planner_trace`.
+  - **Comprehension check after teach.** Instruct the planner in its system prompt to follow a `teach` call with a single `generate_quiz(theme, n=1)` drawn from the just-taught passage before ending the turn. This needs no new tool or business logic (the tools already compose), it closes the teach-assess loop inside one turn, and it gives Step 22's bandit a dense immediate reward instead of one that waits for the next quiz session. Test it as a prompt convention, not a hard code path: the planner may skip it when the learner asked a direct question.
+    - NB: With `n=1` a single critic rejection leaves nothing to ask. If `generate_quiz` raises `QuestionGenerationError`, end the turn after the lesson without the check rather than erroring.
+  - Guardrails (state them; the tests above enforce them): bounded loop (`MAX_PLANNER_STEPS`) with the halt fallback above; writes only via `record_outcome` behind `PLANNER_WRITE_ALLOWLIST`; numeric mastery never LLM-written; facts only via the corpus-grounded `teach`/`generate_quiz` tools, which short-circuit on empty retrieval so the planner cannot free-associate; the untrusted learner message is interpolated only into the human turn, never the system prompt (Step 8's prompt-injection boundary).
+  - Live validation: one Teach turn against real agent on the dev database where the learner asked to work on their weakest area.
+    - The planner called `read_learner_state`, `suggest_review_theme`, `teach` and `generate_quiz(n=1)`, then ended with `final_message`. That is 5 trace rows, 5 of the 6 allowed steps, no writes attempted and no retrieval gaps.
+    - The lesson was grounded in the corpus. `teach` took about 11s, and the check question plus the final reply took about 4s.
+    - The final reply asked only the check question, so Step 12 must show the lesson, the question and the reply together. The reply also promised to "check it and log the result", which is the graph's job (Step 10B); tighten that wording at the next planner prompt change.
+
+**Planner trace + insufficient-material telemetry**
+
+The MVP overview already lists "log retrieved memories per turn" as the MVP debugging policy, and Step 18's "why this next" UI line has nothing to read from without this. It is also the prerequisite for ever improving the planner itself and for Step 19's coverage tracker.
+
+- **Test:** extend `tests/unit/graph/test_planner.py`
+  - A scripted multi-tool turn writes one `planner_trace` row per tool call, in order, with the arguments the model supplied.
+  - A turn halted at `MAX_PLANNER_STEPS` records `halt_reason="max_steps"`; a normally-terminating turn records `halt_reason="final_message"`.
+  - An empty-retrieval short-circuit increments the insufficient-material counter with the query and theme that failed.
+  - Use an injected fake trace writer (same seam convention as `retriever`/`chat_client`); no DB in the unit test.
+- **Test:** `tests/integration/graph/test_trace.py` (integration: test database, like every other DB writer)
+  - `record_step` and `record_gap` round-trip their rows, including `tool_args` as JSONB and `prompt_version`.
+  - `planner_trace` rows are readable by `user_id` + `thread_id`, in step order; `user_id` must reference an existing user.
+- **Test:** extend `tests/integration/db/test_migrate.py`: `planner_trace` and `retrieval_gaps` exist after migration, and re-running the migration stays idempotent.
+- Extend `src/civica/db/schema.sql` with two small append-only tables (idempotent):
+  - `planner_trace` (`id BIGSERIAL`, `user_id UUID REFERENCES users(user_id)`, `thread_id TEXT`, `step_index INT`, `tool_name TEXT`, `tool_args JSONB`, `halt_reason TEXT`, `prompt_version TEXT` (`PLANNER_PROMPTS.version`), `created_at TIMESTAMPTZ DEFAULT NOW()`).
+  - `retrieval_gaps` (`id BIGSERIAL`, `theme TEXT`, `query TEXT`, `occurred_at TIMESTAMPTZ DEFAULT NOW()`) written on every empty-retrieval short-circuit. Recurring rows point at corpus, chunking, or query-construction gaps: this is the self-improvement signal for the retrieval layer itself, and it is the one signal nothing else in the plan captures.
+- Create `src/civica/graph/trace.py` with a thin `record_step(...)` / `record_gap(...)` pair following the optional-connection convention. No business logic; these are append-only writers.
+- Trace rows are operator data, not learner memory. They live in plain SQL tables, never in the LangGraph store, so they stay outside the memory allowlist entirely.
+- **Check In:** Stop and confirm with user that the planner's autonomy is scoped and safe (tool set, loop bound, allowlist-guarded writes) before wiring the full graph.
+
+- **README:**
+  - Add `src/civica/graph/` (planner, router) to the project structure diagram.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Router: tests inject an `InMemoryStore` instead of stubbing `get`. New `list_records` reads all of a user's mistake episodes. Remaining ties go to official exam order.
+    - `score_answer` was dropped so the LLM cannot invent answers to inflate mastery. Scoring will happen deterministically after the learner answers.
+    - `user_id` is bound by the caller instead of a tool argument.
+    - `record_outcome` checks `PLANNER_WRITE_ALLOWLIST` and then validates the value. `MemoryNotAllowed` ends the turn; other bad tool arguments go back to the model.
+    - Extra guardrails: quiz size capped at 10, correct answers hidden from the model, and `MAX_PLANNER_STEPS = 6` with a fallback lesson.
+    - `planner_trace` adds a `turn_id`, since one `thread_id` spans many turns. Each turn writes one row per tool call, then one row with the halt reason (including `forbidden_write`, recorded before `MemoryNotAllowed` is re-raised).
+    - New `InsufficientMaterialError` separates retrieval gaps from critic rejections and carries the queries tried. Gaps are also logged for empty `retrieve_corpus` results and the fallback lesson.
+    - Planner modes
+      - The modes were renamed `LESSON` and `QUIZ` (not `TEACH` and `QUIZ`) to avoid confusion with the `teach` tool, which the planner may call in either mode.
+      - Subsequent to the above rename, `PlannerMode` (teach/quiz) was removed completely because it had devolved into an unnecessary UI element. The planner autonomously determines whether or not to introduce a quiz. It can also be triggered by the user asking for a quiz in the chat.
+
+---
+
+## ✅ Step 10B: Refactor the planner loop into graph nodes
+
+**Goal:** 
+- Refactor the planner's tool-calling loop to use a more standardized architecture of LangGraph nodes (less custom python), while maintaining every existing guardrail: step bound, halt fallback, allowlist-guarded writes, trace rows, retrieval gaps.
+- This step only builds the planner subgraph. A subsequent step assembles the full graph with Postgres persistence.
+
+- **Test:** `tests/unit/graph/test_planner_graph.py` (unit: compiled planner subgraph with a fake planner model (`FakePlannerModel`) injected through `PlannerDeps`, `InMemorySaver`, `InMemoryStore`, and the injected fake trace writer; no DB).
+  - Every test in `tests/unit/graph/test_planner.py` that calls `run_planner` moves to this file and invokes the compiled planner subgraph instead, passing `user_id` in the runtime `context` and `thread_id` in the config. Assertions on `PlannerResult` fields (reply, halt reason, tool calls, lesson, quiz) read the same values from the final graph state.
+  - `test_planner.py` keeps only the tests that do not run the loop: `read_learner_state` and the check that `MAX_PLANNER_STEPS` fits a teach-and-check turn.
+  - The tests in this file must cover these behaviors. The last two are new in this step; the rest are 10A checks, updated where this step changes behavior:
+    - A fake model that requests `suggest_review_theme` then `teach` invokes both tools in order with the arguments the model supplied, and the turn ends when the model emits a final message (no tool call).
+    - A fake model that always emits a tool call is halted at `MAX_PLANNER_STEPS`: the learner receives the fallback lesson (not an error and not a partial trace).
+    - Allowlist guard: a `record_outcome` write of a kind outside `PLANNER_WRITE_ALLOWLIST`, including `topic_mastery`, leaves the store untouched, records `halt_reason="forbidden_write"`, and serves the fallback lesson without raising.
+    - Grounding guard: `teach`/`generate_quiz` on a theme whose fake retriever returns `[]` gets the insufficient-material short-circuit, not a fabricated lesson.
+    - Trace: one `planner_trace` row per tool call, with `step_index` in tool-call order, then one terminal row with `final_message`, `max_steps`, or `forbidden_write`. Each turn gets its own `turn_id`. A reply with several tool calls numbers them in the model's listing order, whatever order the rows were written.
+    - Retrieval gaps: the existing 10A gap tests (empty teach, empty fallback lesson, empty `retrieve_corpus`, empty quiz) pass against the subgraph.
+    - The step counter resets per turn: a second turn on the same thread gets the full `MAX_PLANNER_STEPS` budget.
+    - A generated quiz's questions are kept in state, and the model's tool output still hides the correct answer.
+- Update `src/civica/graph/planner.py`:
+  - Remove `run_planner`, `PlannerResult`, and `_TurnState`. There should be one loop implementation and it is the graph.
+  - Tools read `user_id` from an injected `ToolRuntime` instead of a closure, because the full graph is compiled once for all learners. The model still never sees a `user_id` argument (Step 10A).
+  - `teach` and `generate_quiz` return `Command(update=...)` to put the lesson or quiz questions in state.
+  - `read_learner_state`, `default_planner_deps`, and their unit tests stay as they are.
+- Create `src/civica/graph/nodes.py`:
+  - `build_planner_graph(deps)`: a `StateGraph` with a `context_schema` carrying `user_id`.
+  - `start_turn`: resets per-turn state. Clears messages with `RemoveMessage(REMOVE_ALL_MESSAGES)`, sets the model-call counter to 0, clears tool calls, lesson, and quiz questions, and starts a new `turn_id`.
+  - `planner_model`: adds the system prompt at call time (not stored in `messages`), makes one model call with the tools bound, and increments the counter. A reply with no tool call writes the `final_message` trace row.
+  - `planner_tools`: the prebuilt `ToolNode`, with `handle_tool_errors=(ValueError, ToolException)` so bad arguments go back to the model as text, and a `wrap_tool_call` hook that writes one trace row per call and turns `MemoryNotAllowed` into a `forbidden_write` halt in state. Writes stay fail-closed; the learner never sees an error.
+  - `fallback_lesson`: `suggest_review_theme` plus a plain `teach` on that theme, used for `max_steps` and `forbidden_write`. Writes the terminal trace row.
+  - Conditional edges: after `planner_model`, the step bound routes to `fallback_lesson` when `MAX_PLANNER_STEPS` is reached; otherwise `tools_condition` routes a tool call to `planner_tools` and a final message to the exit. After `planner_tools`, a forbidden write routes to `fallback_lesson`; anything else returns to `planner_model`.
+  - `thread_id` comes from the graph config and `user_id` from the runtime `context`, never from tool arguments (Step 10A).
+  - State holds only checkpointer-serializable data. The quiz is kept as its questions, since `Quiz` holds an answer-logger function.
+  - Each node is a plain function `(state, runtime) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate.
+  - Known differences from 10A: a forbidden write no longer raises (`put_planner` still raises; `planner_tools` catches it). `ToolNode` runs the tool calls of one model reply concurrently, so other calls in a reply containing a forbidden write still run. Trace rows may be inserted in any order, so each row's `step_index` is computed, not counted: the number of tool calls in earlier replies of the turn plus the call's position in the current reply. Sorting by `step_index` gives cause-and-effect order across replies and the model's listing order within a reply.
+- **Check In:** Stop and confirm with the user that the subgraph keeps every 10A guardrail before wiring persistence.
+
+- **README:**
+  - Add a "Learner graph" section to Architecture, starting with the planner loop diagram (adjust it if the built nodes differ):
+    ```
+                               ┌─────────────────┐   tool call    ┌───────────────┐
+     enter ─► start_turn ─────►│  planner_model  ├───────────────►│ planner_tools │
+                               │                 │◄───────────────┤               │
+                               └───┬─────────┬───┘    result      └───────┬───────┘
+                                   │         │ MAX_PLANNER_STEPS          │ forbidden write
+                     final message │         ▼                            ▼
+                                   │    ┌─────────────────────────────────────┐
+                                   │    │           fallback_lesson           │
+                                   │    └──────────────────┬──────────────────┘
+                                   ▼                       ▼
+                                 exit                    exit
+    ```
+  - Under the diagram, explain the loop in plain terms: `start_turn` clears the previous turn's messages and step count, `planner_model` makes one model call, `planner_tools` runs the tools it asked for, and the two repeat until the model sends a final message. The loop stops after `MAX_PLANNER_STEPS`, and a write outside the planner's allowlist ends the turn; both serve a fallback lesson instead of an error.
+  - Add a note about: "Choice of graph node architecture for planner loop". Rationale for selection of graph-native loop (as opposed to wrapping custom python in a single node or event stream):
+    - Progress is checkpointed after every tool step, so a crash can resume mid-turn.
+    - Each step can be streamed to the UI as it happens (`teach` takes about 11s).
+    - The graph can pause before a tool runs (human-in-the-loop interrupts).
+    - It is the standard LangGraph agent pattern, and each step is visible in LangGraph tooling.
+    - Built from LangGraph's prebuilt `ToolNode` and `tools_condition` rather than a hand-written tool loop.
+  - Add `nodes` to `src/civica/graph/` in the project structure diagram.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Subgraph contract: `build_planner_graph(deps)` returns an uncompiled `StateGraph` so that the caller picks the checkpointer and store. Input is `{learner_message, mode}`. Final state carries `reply`, `halt_reason`, `tool_calls`, `lesson`, and `quiz_questions`. The plan did not name these key. The moved tests assert the same values.
+    - `PlannerContext` (`user_id`) lives in `planner.py` to avoid a circular import. `nodes.py` re-exports it. Tool building moved to `build_planner_tools(deps)` because tools no longer close over a `user_id`. So one tool set can be built per graph and bound to both the model and the `ToolNode`. The lesson helper is now the public `teach_theme` because `fallback_lesson` in `nodes.py` reuses it.
+    - `planner_model` and `fallback_lesson` are built by small factories closing over `deps` because LangGraph passes nodes only `(state, runtime)` and `deps` (models, stores) cannot go in checkpointed state. Nodes read `thread_id` from `runtime.execution_info` because a node that takes both `runtime` and `config` does not type-check against langgraph's `add_node` overloads. The tool wrapper reads it from the `ToolRuntime` config, which `ToolRuntime` exposes directly.
+    - `planner_model` appends a reply's calls to `tool_calls` in listing order before tools run so that the order never depends on concurrent wrappers. Calls in a reply that hits `MAX_PLANNER_STEPS` are not run, recorded, or traced, matching 10A: the trace and `tool_calls` list only calls that actually ran.
+    - `router.suggest_review_theme` now reads mastery with one `list_records` call instead of a `get` per theme. Same result, one read. It also stops `InMemoryStore` from creating empty namespaces on missed reads, which the forbidden-write test checks.
+    - Added a test that a turn's lesson, quiz questions, and tool calls do not leak into the next turn on the same thread. The plan's tests checked only that messages and the step count reset, so a stale lesson could have been served on a later turn unnoticed.
+
+---
+
+## Step 11: Graph assembly and persistence
+
+**Goal:** Coach turns run end to end against the dev database. To support this, the full graph must be compiled on Postgres (checkpointer + store) with an input router and a `memory_writer` terminal node.
+
+- **Test:** `tests/integration/graph/test_graph.py`
+  - Integration test using real `explanation`/`assessment` code but fake Claude + fake retriever (no network; writes real store rows). Drive the graph through a planner-backed coach turn for a test user with a fake model that emits a realistic tool-call sequence, and assert:
+    - `memory_writer` runs before the graph terminates regardless of the planner's path, including a turn halted at `MAX_PLANNER_STEPS` (assert the store row exists after any successful turn).
+    - The planner runs on `default_planner_deps()` with only the chat models faked, so the default retrievers (including `retrieve_corpus`) and the Postgres-backed stores are exercised against the test database.
+    - `planner_trace` rows exist for the turn and are readable by `user_id` + `thread_id`, in tool-call order when sorted by `step_index` (Step 10B; insert order is not guaranteed, so trace readers order by `step_index`, never `id` or `created_at`).
+    - A turn whose retrieval comes back empty writes a `retrieval_gaps` row with its theme and query.
+    - Checkpointer resume: a second invocation on the same `thread_id` sees the state saved by the first (the UI steps rely on this).
+    - The per-turn message history is reset at the start of each turn (by `start_turn`, Step 10B), so the checkpoint does not grow with every turn.
+    - Forbidden write: a planner turn that attempts a `topic_mastery` write through `record_outcome` leaves the store untouched, records `halt_reason="forbidden_write"` in `planner_trace`, and the learner gets the fallback lesson rather than an error.
+- **Test (external):** `tests/integration/graph/test_planner_external.py`, marked `@pytest.mark.external`, needs `ANTHROPIC_API_KEY`. One contract test: real Claude with the planner's tools bound returns tool calls matching the tool schemas and ends the turn with a final message.
+
+- Create `src/civica/graph/graph.py`:
+  - `build_graph(deps: PlannerDeps | None = None, checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph` - compiles the graph with `deps.store` as store and `checkpointer` as checkpointer. Defaults are `default_planner_deps()` and the shared `get_saver()`, so production gets Postgres and tests inject fakes (e.g. `InMemorySaver`, fake models) without monkeypatching. Callers pass `user_id` in the runtime `context` (`PlannerContext`) and `thread_id` in the config (Step 10B). The planner loop comes from the uncompiled `build_planner_graph(deps)`.
+  - The parent graph's state shares the planner's output keys (`reply`, `lesson`, `quiz_questions`, `tool_calls`, `halt_reason`) so callers read a turn's result with `graph.get_state(config).values` after streaming.
+  - Planner state holds pydantic `Explanation` and `Question` objects. The default checkpoint serializer accepts them; if `LANGGRAPH_STRICT_MSGPACK` is ever enabled, register their modules in `allowed_msgpack_modules`.
+  - `route_input`: graph input is a tagged union by kind (`message`, later `answer`, `mock_start`, `mock_submit`). This step handles `message` only, which enters the planner subgraph.
+  - `memory_writer` writes the session summary and is the required last node on every path.
+
+- **Check In:** Stop and confirm with user that the compiled graph and its persistence are satisfactory before building the UI on top of it (subsequent step).
+
+- **README:**
+  - In the "Learner graph" section, add the routing diagram above the planner loop, with only the `message` row:
+    ```
+    START ─► route_input
+               │
+               └─ message ─────────────────► planner loop (below) ───────────────────► memory_writer ─► END
+    ```
+  - For reference: subsequent steps will add their own rows as the functionality is added. The finished diagram should be:
+    ```
+    START ─► route_input
+               │
+               ├─ message ─────────────────► planner loop (below) ───────────────────► memory_writer ─► END
+               ├─ answer ─► score_answer ─► explain_answer* ──► update_mastery ──────► memory_writer ─► END
+               ├─ mock_start ────────────► mock_exam_generate ───────────────────────► memory_writer ─► END
+               └─ mock_submit ───────────► mock_exam_score ───► update_mastery ──────► memory_writer ─► END
+    ```
+    `*` wrong answers only (Step 15).
+  - State that every turn enters through `route_input`, every path ends at `memory_writer`, and study plan, coverage and mistake-driven review are planner tools, not separate nodes.
+  - Add `graph` to `src/civica/graph/` in the project structure diagram.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 12: Coach UI for lessons
+
+**Goal:** The learner chats with the coach in the web app and watches lessons arrive. There is one coach conversation per user. The planner reads intent from the learner's message. At this point, a logged-in user can:
+  - Ask for a lesson:
+    - Type a prompt such as "Teach me about the principles of the Republic" and press Enter or the Submit button.
+    - Observe each planner step (e.g. reading learner state, retrieving passages, teaching) appearing in a step log as it happens.
+    - See the lesson text appear word by word as it is generated.
+    - Read the finished lesson with citations: the source page, the section, and the match score for each passage it drew on.
+  - Not enough material: if retrieval finds nothing for the request, the lesson says there is not enough material and shows no citations.
+  - See questions read-only: the one-question comprehension check that usually follows a lesson (and the questions from a "Quiz me" request) shows with its options, but no option can be checked yet (Step 13).
+  - Recognize a fallback lesson:
+    - If the planner exceeds its step limit or attempts a forbidden write, the user gets a fallback lesson instead of an error.
+    - The fallback lesson comes from the graph's `fallback_lesson` node, so it was not chosen by the planner.
+    - The inspector flags that the lesson shown is a fallback. Learners stop seeing this flag once the inspector is hidden behind the debug flag (Step 20).
+  - Start a new turn: a new turn replaces the previous one on screen; the previous lesson is not shown.
+  - Refresh without losing the turn: the user reloads the browser and the page shows the same turn, read back from the persisted conversation.
+  - Come back later: the user sees the most recent turn after logging out and back in, after closing the tab and opening the app in a new tab, or after logging in from a different browser or computer (the conversation is saved per user, not per browser). Earlier turns are not shown: turn history is out of MVP scope.
+  - Cannot double submit: the prompt input is disabled while a turn is running, so a second click on Submit (or pressing Enter a second time) does not start an overlapping turn.
+  - One turn at a time per user: submitting from a second tab or browser while a turn runs shows "A turn is already running" and starts nothing, so two turns never write to the same conversation at once.
+  - Recover from a failed turn: if a turn errors (e.g. the Anthropic API or the database is unavailable), the user sees "Something went wrong, please try again." and the prompt input works again.
+  - View the inspector (developer view, open by default for now). A right-hand panel shows:
+    - the tools the planner called, in order, with their arguments
+    - why the turn ended (`halt_reason`) and the fallback flag
+    - the learner's current state: goal, mastery by theme, recent mistakes. Expect it to be mostly empty: the goal is set at onboarding (Step 20), mastery is written only once answers are scored (Step 15), and mistakes appear only when the planner records one during a turn.
+
+**What the user cannot do yet** (added in subsequent steps):
+  - check an answer, or use the **Teach me** / **Quiz me** quick actions (Step 13)
+  - see token costs (Step 14)
+  - answer questions for real, with scoring, logging, and mastery (Step 15)
+  - take a mock exam (Step 16)
+  - see a "why this next" line (Step 18) or coverage (Step 19)
+  - set a study goal at onboarding, or hide the inspector (Step 20)
+
+**Implementation**
+- **Test:** `tests/unit/ui/test_turn_view.py` (unit: build final planner states by hand; no graph, no DB)
+  - A grounded lesson yields one citation per context chunk, in retrieval order, with `page_slug`, `section_id`, and similarity.
+  - An insufficient-material lesson yields no citations.
+  - Quiz questions map to read-only items that never expose the correct answer.
+  - A turn that ended in `max_steps` or `forbidden_write` is flagged as a fallback lesson.
+- **Test:** `tests/unit/ui/test_reply_stream.py` (unit: hand-built `(message_chunk, metadata)` pairs; no graph)
+  - Text chunks from the planner's final message and from the explanation model are yielded in order.
+  - Tool-call chunks, and chunks from question generation or the critic, are dropped.
+- **Test:** `tests/unit/ui/test_stream_bridge.py` (unit: plain sync generators; no graph)
+  - Items from a sync generator arrive in order through the async bridge, and the bridge ends when the generator ends.
+  - An exception raised inside the generator reaches the awaiting caller.
+  - Other coroutines keep running while the generator blocks, so one slow turn does not freeze the app.
+- **Test:** `tests/unit/llm/test_client.py`: each profile's model carries its caller tag (`planner`, `explanation`, `quiz`).
+- **Test:** extend `tests/integration/ui/test_app.py`. The real graph from `build_graph(...)` is added to the injected `AppDeps`, compiled with the existing fakes in `tests/support/planner.py` (fake planner and content models, fake retriever, fake trace writer and answer logger), `InMemoryStore`, and `InMemorySaver`. Only external services are faked, so wiring bugs such as a missing runtime `context` or unstreamed subgraph steps fail the test.
+  - Log in and submit a prompt: the fake reply and at least one citation render.
+  - The lesson text streams: the fake explanation model emits it in several chunks, and the final rendered lesson matches the checkpointed state.
+  - The step log shows the planner's tool steps (from inside the planner subgraph), not only the outer graph's nodes.
+  - A turn that produced questions shows them with their options, none preselected, and no **Check** control.
+  - Reload: opening `/` again shows the same lesson and questions (rendered from the checkpointer, since a NiceGUI page rebuilds on every visit).
+  - A second turn replaces the first: the previous lesson is no longer shown.
+  - The prompt input is disabled while a turn runs, so a second submit cannot start an overlapping turn.
+  - A second simulated browser for the same user, submitting while a turn runs, shows "A turn is already running" and the graph is invoked once.
+  - A graph that raises partway through the stream shows the friendly error, logs the exception, and leaves the prompt input enabled.
+- **Test:** `tests/browser/test_coach_smoke.py` is a real-browser smoke test. 
+  - NiceGUI's `User` fixture (existing tests) skips the page's JavaScript, the live websocket between page and server, and the browser's cookie handling, which this step starts to rely on for streaming.
+  - Use NiceGUI's `Screen` fixture (Selenium driving Chrome against a running server) to implement the smoke test. Add dev dependency `selenium`, and load both fixtures by switching `addopts` to `-p nicegui.testing.plugin`.
+  - Keep it to 1 to 3 tests: sign in, submit a prompt, see the streamed reply render; reload and see the same turn.
+  - Add a `browser` marker and exclude it from the default run (`-m 'not external and not browser'`). Document the requirements (Chrome and its driver) at the top of the file.
+  - Confirm how the running server receives test deps (the per-test DB schema and the fake graph) before writing the tests; the `User` fixture's in-process wiring may not carry over.
+- Extend `src/civica/llm/client.py`: tag each profile's model with its caller name (`ChatAnthropic` accepts `tags`). The reply stream filters on these tags, and Step 14 reuses them to split token usage by caller.
+- Extend `FakeChatModelBase` in `tests/support/llm.py` with `_stream`, so fakes emit text in several chunks and token streaming is exercised in tests.
+- Create `src/civica/ui/reply_stream.py`: `reply_text(chunks) -> Iterator[str]` filters the `messages` stream down to learner-facing text (the planner's final message and the explanation model, by caller tag), dropping tool-call chunks. No NiceGUI import.
+- Create `src/civica/ui/stream_bridge.py`: `iterate_in_thread(make_iter) -> AsyncIterator[T]` runs a sync iterator in a worker thread and hands each item back to the event loop through an `asyncio.Queue`. Plain asyncio, no NiceGUI import.
+  - Why: the graph, checkpointer, and store use sync psycopg. NiceGUI runs every user on one event loop, so calling `graph.stream()` directly would freeze the app for everyone during a ~15s turn. Moving the stack to LangGraph's async saver and store is deferred; this bridge keeps the back end unchanged.
+- Create `src/civica/ui/turn_view.py`: frozen dataclasses `TurnView`, `CitationView`, `QuizItemView` built from the planner's final state (`reply`, `lesson`, `quiz_questions`, `tool_calls`, `halt_reason`). No NiceGUI import, so the shaping logic is unit-testable.
+- Extend `src/civica/ui/deps.py`: add `graph` to `AppDeps`. `default_app_deps()` builds it once per process with `build_graph()`, so the chat models and pool are not rebuilt per page visit. Tests pass their own graph through `register_pages(deps)`; no new seams.
+  - Also add `turn_locks: dict[UserId, asyncio.Lock]` (empty by default) so each test gets fresh locks. The locks are per process, which is enough while the app runs as one process; a multi-process deployment would need a database lock instead.
+- Extend `src/civica/ui/app.py`.
+  - **One conversation:** every coach turn uses `thread_id = f"{user_id}:coach"` so `PostgresSaver` restores it. The mock exam gets its own thread in Step 16.
+  - **Prompt input:** a text input with a send button (Enter also sends). Disabled while a turn runs.
+  - **Streamed turn:** run `graph.stream(input, config={"configurable": {"thread_id": ...}}, context=PlannerContext(user_id=...), stream_mode=["updates", "messages"], subgraphs=True)` through `iterate_in_thread`. A lesson turn takes about 15s, so show progress two ways as it runs. This is the payoff of the graph-native loop from Step 10B.
+      - `updates`: append each step to a step log (`ui.expansion`) as it runs.
+      - `messages`: pass the token chunks through `reply_text` and append them to a `ui.markdown` inside a `ui.chat_message`, so the lesson and reply appear word by word. LangGraph captures tokens from chat models called inside tools, so no engine changes are needed.
+    - `subgraphs=True` is required: the planner is a subgraph, and without it the stream emits only one update for the whole planner instead of one per step.
+    - Once the stream ends, replace the streamed text with the full turn rendering below.
+    - `user_id` goes only in `context`, never in the input or config (Step 10B).
+    - After the stream ends, read the turn's result with `graph.get_state(config).values` rather than rebuilding it from the streamed updates.
+  - **One turn per user:** take the user's lock from `deps.turn_locks` before streaming. If it is already held, show "A turn is already running" and return without invoking the graph.
+  - **Failed turn:** wrap the streamed turn in `try`/`except`/`finally`. On an exception, log it with `logger.exception` and show "Something went wrong, please try again." The `finally` releases the lock and re-enables the turn controls, so an error never leaves the input locked. The stream bridge already re-raises worker-thread errors in the caller.
+  - **Turn rendering:** the planner `reply`, the lesson text with its citations, and any questions read-only (options listed, no control to choose one).
+    - Survive reloads: a NiceGUI page function runs on every visit, so build the page from `graph.get_state(config).values` (a cheap checkpointer read), not only right after streaming.
+  - **Inspector panel** in a `ui.right_drawer` (open by default while developing), kept apart from the learner's view: tool calls in order with their arguments, `halt_reason`, and the fallback-lesson flag, all read from the graph's final state. Also the learner state (goal, mastery, mistakes) from the existing `read_learner_state` against the graph's store. No new DB readers.
+- **Check In:** Stop and confirm with user that the UI is satisfactory. Prompt the user to run `uv run python -m civica.ui.app`, log in, ask for a lesson, and confirm the streamed steps, citations, read-only comprehension question, and inspector trace are sensible. A second turn must not show the previous turn's lesson.
+  - Review word-by-word streaming with the user: is it worth keeping, or is a plain ~15s wait with the step log preferable? If streaming is dropped, remove `messages` from `stream_mode`, `reply_stream.py`, and its tests. Keep the caller tags (Step 14 needs them) and the stream bridge (the step log still needs it).
+
+- **README:**
+  - Replace `TBD` under **Usage** with:
+    > ### Web UI
+    > 1. Launch the web app locally
+    > ```
+    > uv run python -m civica.ui.app
+    > ```
+    > 
+    > 2. Sign in
+    > Create an account on the registration page, then sign in with your username and password. Sessions can last for 14 days before you must sign in again. 
+    > Your study history and coaching memory persist across sessions. Logging out or session expiration end only the browser session.
+    >     
+    > 3. Chat with the coach  
+    > Ask for a lesson or a quiz in your own words. 
+    > The inspector panel exposes the planner steps, tools called, and reason for end of turn.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 13: Coach UI for quizzes and practice checks
+
+**Goal:** The learner can ask for a quiz and check answers as practice. At this point, a logged-in user can also:
+  - Use quick actions: **Teach me** and **Quiz me** buttons above the prompt input send those messages, so a learner who does not know what to type can start. They are shortcuts for a message, not modes.
+  - Ask for a quiz:
+    - Type a prompt such as "Quiz me" (or press **Quiz me**).
+    - Observe the step log. The planner's short reply streams word by word; the questions appear all at once when the turn finishes (question generation is not streamed).
+    - See the set of multiple-choice questions. No options are preselected.
+  - Practice check: on any question (from a quiz or a lesson's comprehension check), select an answer and press **Check** to see whether it is correct and the source passages behind the question. Checks are labeled "not scored or saved yet": nothing is logged and mastery does not change (real answers arrive in Step 15).
+  - Fallback on a quiz request: if the planner hits its step limit or a forbidden write, the user gets a fallback lesson instead of a quiz, flagged in the inspector.
+  - Move on: a lesson after a quiz replaces the quiz questions on screen (`start_turn` clears them at the start of every turn).
+  - Refresh or come back later: the page shows the same questions. Practice checks are not saved, so questions the user had checked show as unanswered again.
+
+**Implementation**
+- **Test:** extend `tests/unit/ui/test_turn_view.py`: `check_choice` reports right and wrong choices and returns the question's sources.
+- **Test:** extend `tests/integration/ui/test_app.py` (same wiring as Step 12)
+  - **Quiz me** sends the message, and the turn renders the questions with none preselected.
+  - **Check** shows the result and the question's sources, and the fake answer logger records nothing.
+  - A lesson's comprehension-check question also has **Check**.
+  - Reload after a quiz: the same questions show, with earlier checks cleared.
+  - A lesson turn after a quiz turn no longer shows the quiz questions.
+  - The quick-action buttons are disabled while a turn runs.
+- Extend `src/civica/ui/turn_view.py`: `check_choice(question, choice)` for the practice answer check.
+- Extend `src/civica/ui/app.py`:
+  - **Quick actions:** **Teach me** and **Quiz me** buttons that submit those messages through the same path as typed input. Disabled while a turn runs.
+  - **Questions:** each question as a `ui.radio` (no option preselected) with a **Check** button that reveals correct/incorrect and the question's sources.
+  - The check is practice only, labeled "not scored or saved yet". It writes nothing to `quiz_answers` and never moves mastery; Step 15 replaces it with a real `answer` input through the graph.
+- **Check In:** Stop and confirm with user that the UI is satisfactory. Prompt the user to press **Quiz me** in the running app and confirm the planner returns a quiz (it follows explicit requests now that there are no modes), that **Check** works on quiz and comprehension questions, and that a following lesson replaces the quiz.
+
+- **README:**
+  - Add to the **Usage → Web UI** text: "**Teach me** and **Quiz me** are shortcuts for those requests. Quiz answers are practice only until answer scoring ships."
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 14: Token usage per turn
+
+**Goal:** Show what each turn costs. Total the token usage of every LLM call in a turn (planner, explanation, question generation, critic), split by caller, and show it in the inspector. Then use real numbers to size the token caps and inform the LLM choice.
+
+- **Test:** `tests/unit/llm/test_usage.py` (unit: fake chat models whose replies carry `usage_metadata`; no network)
+  - Calls made through two different profiles in one run are totaled separately per caller, and the turn total is their sum.
+  - Input, output, and reasoning tokens are each summed. A reply without `usage_metadata` adds nothing and does not error.
+  - A fresh tally starts at zero so that one turn's usage never leaks into the next.
+- **Test:** extend `tests/integration/ui/test_app.py`: after a lesson turn the inspector shows the turn's token totals per caller.
+- Extend `src/civica/llm/client.py`:
+  - Reuse the caller tags added in Step 12 so that usage can be split by caller even though every profile uses the same model.
+  - Add a small usage callback handler that follows LangChain's `UsageMetadataCallbackHandler` pattern but is keyed by caller tag (instead of model name), so totals separate the planner from the explanation and question generation.
+- Extend `src/civica/ui/app.py`:
+  - Pass a fresh handler in the graph config (`config={"callbacks": [handler], ...}`) for each turn. LangChain propagates config callbacks to every model call made inside the graph's nodes and tools, so no engine signature changes and no caller has to return its usage.
+  - Show the per-caller and total tokens for the turn in the inspector panel.
+- **Check In:** 
+    - Stop and confirm with the user that the token totals look right on a few real lesson and quiz turns. 
+    - Then decide together, using that data, whether to change any cap (e.g. `EXPLANATION_PROFILE` is `max_tokens=2048`) or set `reasoning_effort`. Change nothing without data. 
+    - Some background for the check-in decision:
+      - Spot checks against Sonnet 5 measured `reasoning` tokens at 0, on a simple question and on a deliberately hard one, with content arriving as a plain string rather than typed blocks. Adaptive thinking leaves the decision to the model and it declined both times. Treat this as two data points, not a distribution, and do not assume thinking spend without measuring.
+      - `get_chat_model()` sends no thinking or effort parameter, so adaptive behavior is whatever the server defaults to. Setting `reasoning_effort` makes langchain-anthropic add `thinking={"type": "adaptive", "display": "summarized"}` on its own. `Explanation.text` stays clean either way, because `explain()` reads `response.text`, which takes text blocks only.
+      - Do not reach for `thinking={"type": "disabled"}` on Opus 5. It is rejected at `xhigh` and `max` effort, and it can leak literal `<thinking>` tags into the visible text, where `response.text` cannot filter them. Lower the effort instead.
+      - The truncation warning already in `explain()` is the signal that the cap is set too low. It has not fired in practice.
+
+- **README:**
+  - Add a line to the web app usage text that the inspector shows each turn's token usage by caller.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 15: Answers + derived mastery
+
+**Goal:** Let the learner answer a quiz question in a later turn, log it, record mistakes, and recompute mastery deterministically. The planner has no scoring tool (Step 10A), so the model never supplies or scores an answer. A wrong answer also gets a short explanation grounded in the question's own sources, so quizzes deliver the grounded explanations the MVP overview promises.
+
+- **Test:** extend `tests/integration/graph/test_graph.py`
+  - The quiz questions created in one turn are kept in checkpointed state, and an `answer` input on the next turn scores them.
+  - A quiz answer written through the graph appears in the raw `quiz_answers` table.
+  - A wrong answer writes a `MistakeEpisode` carrying the question's `sources`.
+  - `topic_mastery` for the answered theme is updated, through the in-process `memory.writer.put`, never through `record_outcome`.
+  - Expired question: after a quiz turn, a `message` turn on the same thread (which clears `quiz_questions` in `start_turn`), then an `answer` for the earlier question, returns a "that question has expired" reply. It writes no `quiz_answers` row, no `MistakeEpisode`, and does not move mastery. The same applies to an answer whose `question_id` is not in the current `quiz_questions`.
+  - Answer once: a second `answer` for a question already answered returns an "already answered" reply. It writes no `quiz_answers` row, no `MistakeEpisode`, and does not move mastery, so repeat answers cannot skew the last-20 mastery window.
+  - Wrong-answer explanation: a wrong answer stores an explanation in the turn's result whose citations come only from the question's `sources`. A correct answer makes no explanation model call.
+  - If the explanation fails (no passages found, or the model errors), the scored result is still returned and logged; only the explanation is missing.
+- **Test:** extend `tests/integration/retrieval/test_content.py`: `search(..., sources=...)` returns only chunks from the given `(page_slug, section_id)` pairs, still ordered by similarity.
+- **Test:** `tests/unit/graph/test_mastery.py`: mastery is the correct share of the learner's last 20 answers on the theme (fewer answers use what exists; no answers leaves mastery unwritten).
+- Add to `src/civica/graph/nodes.py`:
+  - The `answer` input carries the `question_id` it answers, and `score_answer` first checks that id is in the checkpointed `quiz_questions`. If not (the learner moved on and the quiz was cleared, or the id is unknown), it replies that the question has expired and routes straight to `memory_writer` without scoring.
+  - Checkpointed state keeps each answered question's result (`answered: dict[question_id, result]`), cleared with `quiz_questions` in `start_turn`. `score_answer` rejects an id already in it with an "already answered" reply, routed straight to `memory_writer`. The UI lock below is the visible part; this check is what enforces it.
+  - `score_answer`: rebuilds the `Quiz` from the checkpointed `quiz_questions` with `deps.answer_logger` (Step 10B keeps only serializable data in state), then scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (Step 9). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
+  - `explain_answer` (wrong answers only): calls `explain()` with a prompt built from the question, the chosen option, and the correct option. Its `retriever` is `search` pinned to the question's `sources`, so the explanation is grounded in the passages the question was generated from. One LLM call per wrong answer; correct answers cost nothing extra. Step 22's teaching strategy can later plug in here.
+  - `update_mastery`: the **only** writer of `topic_mastery`, computed from `quiz_answers`. See the two-allowlist rule in Step 10A.
+  - Route: `answer` -> `score_answer` -> `explain_answer` (wrong answers only) -> `update_mastery` -> `memory_writer`.
+- Extend `src/civica/retrieval/content.py`: `search` takes an optional `sources: Collection[SourceRef] | None` filter that limits results to those `(page_slug, section_id)` pairs.
+- **UI:** extend `tests/integration/ui/test_app.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in Step 12) and renders the scored result, with the explanation and its citations under a wrong answer; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
+  - In `src/civica/ui/app.py`, replace the practice-only **Check** (Step 13) with a real submit that sends an `answer` input. Remove the "not scored or saved yet" label.
+  - Lock each question once answered: render it from the checkpointed `answered` results with the radio and submit disabled (`.disable()`).
+  - Show the updated mastery for the answered theme in the inspector panel.
+- **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right. Prompt the user to answer a few questions in the UI and watch mastery move.
+
+- **README:**
+  - Add the `answer` row to the routing diagram (see Step 11), and a line that answers are scored without the LLM, a wrong answer gets one grounded explanation call, and `update_mastery` is the only node that writes `topic_mastery`.
+  - Remove "Quiz answers are practice only until answer scoring ships" from the web app usage text.
+  - Add this note to the "Learner graph" section:
+    > Decision against using LangGraph's `interrupt` convention: In civica, user responses to questions result in a new turn tagged `answer`, rather than resuming a LangGraph `interrupt`. This is an intentional decision to ensure that learners are free to skip a question and move on. A new turn handles such a learner redirect like any other turn and always finishes at `memory_writer` with persistence and logging. LangGraph's `interrupt`, which encapsulates both a question and an answer in a single turn, pauses waiting for a learner's response. If the learner chose to redirect after being asked a question and we were using LangGraphs's `interrupt`, that would leave a turn unfinished (no persistence). 
+    > If learners 'skip around' and try to refer to a previous question that is no longer in the current quiz, the app replies with "that question has expired". Nothing is logged and mastery doesn't change.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 16: Mock exam path
+
+**Goal:** A deterministic 40-question mock exam that bypasses the *planner*, never the *logging*.
+
+- **Test:** extend `tests/integration/graph/test_graph.py`
+  - `mock_start` produces 40 questions held in checkpointed state (this path bypasses the planner).
+  - `mock_submit` reports pass/fail and **writes 40 `quiz_answers` rows**, and `topic_mastery` moves for every theme the exam covered. A mock exam that scores without logging would silently discard the densest signal the system gets.
+  - Mock exam failure: when the critic cannot fill a theme, `mock_exam_generate` retries once, then returns a "try again" message, saving no questions and no `quiz_answers` rows.
+- Add to `src/civica/graph/nodes.py`:
+  - `mock_exam_generate`: calls `generate_mock_exam`. It raises `QuestionGenerationError` when the critic cannot fill a theme and saves nothing; retry once, then show a "try again" message rather than crash the graph.
+  - `mock_exam_score`: scores via `MockExam.score`, which logs all 40 answers and then runs `update_mastery` like any other assessed path. The result (pass/fail and per-theme scores) stays in the exam thread's checkpointed state, so the UI can render it again after a reload. Only the latest exam is kept; a history of past scores is post-MVP.
+  - Routes: `mock_start` -> `mock_exam_generate` -> `memory_writer`; `mock_submit` -> `mock_exam_score` -> `update_mastery` -> `memory_writer`.
+- **UI:** extend `tests/integration/ui/test_app.py` first: selecting **Mock Exam** and starting renders the questions (graph compiled with fakes, as in Step 12); switching back to **Coach** shows the coach conversation unchanged; submitting renders pass/fail and the per-theme breakdown; reloading after submitting shows the same result; a generation failure renders the "try again" message.
+  - Create `src/civica/ui/modes.py` with `AppMode(StrEnum)` (`COACH`, `MOCK_EXAM`) and add a Coach / Mock Exam `ui.toggle` to `src/civica/ui/app.py`. The mock exam uses its own thread (`f"{user_id}:mock_exam"`), so it never disturbs the coach conversation. Mock Exam mode: start button, 40 questions each as a `ui.radio`, submit, pass/fail plus per-theme scores. No countdown timer yet (Step 20). This mode calls the deterministic mock-exam path, not the planner.
+- **Check In:** Stop and confirm with user that the implementation is satisfactory. Prompt the user to run one mock exam in the UI (note the generation time and cost of 40 questions).
+
+- **README:**
+  - Add the `mock_start` and `mock_submit` rows to the routing diagram. Add a line that the mock exam skips the planner: one call creates 40 questions, a second scores the answers.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 17: Mistake-driven review retrieval
+
+**Goal:** When the planner re-teaches a theme the learner got wrong, pull the exact passages they missed rather than a generic theme sample.
+
+- **Test:** extend `tests/unit/graph/test_planner.py`
+  - For a theme with an active `mistake_episode` that records `page_slug`/`section_id`, `retrieve_corpus` and `teach` query with that source context in the corpus prefix style.
+  - With no active episode, or an episode without sources, the query falls back to the theme.
+- Update the planner's tool bindings: when the planner (via `suggest_review_theme` / `read_learner_state`) targets a theme with an active `mistake_episode`, reconstruct the retrieval query from the episode's sources (theme at minimum; `page_slug`/`section_id` when recorded). `ContentChunk.chunk_index`/`content_hash` (Step 5) give those citations stable identity across sessions. The source context flows from Step 9 (`Question.sources`) into Step 7's `MistakeEpisode.sources`, written by Step 15.
+- **Check In:** Stop and confirm with user that the implementation is satisfactory.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 18: Persistent study plan
+
+**Goal:** Give the planner a durable agenda it owns across sessions.
+
+**Rationale (shared with subsequent step):** 
+- The planner's autonomy lives entirely inside a single turn. 
+- Across sessions it re-derives everything from mastery numbers, so it can loop on the same familiar passages forever and has no agenda to explain. 
+- Mastery says *how well*; coverage says *how much*; the study plan says *what we are doing and why*. Together they are the difference between "the LLM picks the next tool" and "the agent runs a plan it owns," which is the stated purpose of this project.
+
+- **Test:** extend `tests/unit/memory/test_records.py` and `tests/integration/memory/test_writer.py`
+  - `StudyPlan` round-trips through `model_dump(mode="json")` / `model_validate`, with `theme` fields dumping as slugs (the Theme-as-slug rule).
+  - A `StudyPlan` written through `record_outcome` succeeds now that `STUDY_PLAN` is in `PLANNER_WRITE_ALLOWLIST`, while `topic_mastery` through the same path still raises `MemoryNotAllowed`. Widening the planner's scope by one kind must not widen it by two.
+- Add to `memory/records.py`: `MemoryKind.STUDY_PLAN = "study_plan"` and a frozen `StudyPlan` record: `focus_themes: list[Theme]`, `next_action: str` (bounded prose, `max_length=500`), `rationale: str` (bounded prose, `max_length=500`), `updated_at: datetime`. One per user, constant key `"current"` (same convention as `LearnerProfile`).
+- Add `STUDY_PLAN` to `PLANNER_WRITE_ALLOWLIST` (Step 10A) by hand. This is a deliberate widening: the plan is exactly the kind of narrative, revisable state an agent should own, and it carries no numeric score the agent could inflate in its own favor.
+- Planner tools: `read_study_plan() -> StudyPlan | None` (read at the start of every coach turn) and `revise_study_plan(...)` routed through `record_outcome`. The system prompt instructs the planner to read the plan first, act consistently with it, and revise it when the learner's state has moved.
+- **UI ("why this next"):** extend `tests/unit/ui/test_turn_view.py` first: the line comes from `StudyPlan.rationale` when a plan exists, and falls back to the turn's last tool call (highest `step_index`) when none does.
+  - Show the line above each coach turn in `src/civica/ui/app.py` (e.g. "Reviewing *Laïcité*: you missed a question here last session"). Read it from state; no branching logic in the UI.
+  - Show the current study plan (focus themes, next action) in the inspector panel.
+- **Check In:** Stop and confirm with the user that the study-plan record shape is right. Prompt the user to run two coaching sessions in the UI and confirm the second one follows the plan written in the first.
+
+- **README:**
+  - Note the new `study_plan` memory namespace alongside the original four.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 19: Corpus coverage tracker
+
+**Goal:** Provide a deterministic answer to "how much of this theme has the learner actually seen?".
+
+**Why a new table:** `planner_trace` rows hold only the tool arguments (`theme`, `focus`), never the sections a lesson used, so "taught" coverage cannot be derived from the trace. The passages are known when `teach` returns (`Explanation` carries them), so they are recorded then.
+
+- **Test:** extend `tests/integration/db/test_migrate.py`: `lesson_sources` exists after migration, and re-running the migration stays idempotent.
+- **Test:** extend `tests/unit/graph/test_planner_graph.py`: a grounded `teach` writes one `lesson_sources` row per cited section through the injected fake writer; an insufficient-material lesson writes none.
+- **Test:** `tests/integration/reflection/test_coverage.py` (integration: seeds real `quiz_answers`, `generated_questions`, and `lesson_sources` rows)
+  - For a theme with N total `(page_slug, section_id)` pairs in `content_chunks`, a learner taught or quizzed on two of them reports exactly those two as covered and the rest as gaps.
+  - A learner with no history for a theme reports 100% gap, not an error or an empty result.
+  - Coverage is per user: one learner's history never appears in another's gaps.
+- Extend `src/civica/db/schema.sql` with an append-only `lesson_sources` table (idempotent): `id BIGSERIAL`, `user_id UUID REFERENCES users(user_id)`, `thread_id TEXT`, `turn_id UUID`, `page_slug TEXT`, `section_id TEXT`, `created_at TIMESTAMPTZ DEFAULT NOW()`. Written next to the trace writer, following the optional-connection convention.
+- Create `src/civica/reflection/coverage.py`:
+  - `get_coverage_gaps(user_id, theme) -> CoverageReport` - deterministic, no LLM. The universe of sections comes from `content_chunks`, minus the course-objective sections that assessment skips (Step 9C), so they never show as gaps. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`. **Taught** coverage comes from `lesson_sources`.
+  - `CoverageReport` is a frozen pydantic model: `theme`, `covered: list[SourceRef]`, `gaps: list[SourceRef]`, `covered_fraction: float`.
+- Bind `get_coverage_gaps` as a planner tool so the planner can deliberately steer toward unseen material instead of re-teaching whatever retrieval happens to surface.
+- **UI (coverage readout):** extend `tests/integration/ui/test_app.py` first: the readout renders one `covered_fraction` per theme for the logged-in user.
+  - Show per-theme coverage in `src/civica/ui/app.py`, e.g. "you have not seen 40% of this theme yet."
+- **Check In:** Stop and confirm with the user that the coverage definition is right. "Taught" counts a section as covered once a grounded lesson cites it, not when the learner shows they read it. Prompt the user to confirm in the UI that the readout moves after a lesson on an unseen passage.
+
+- **README:**
+  - Add `src/civica/reflection/` to the project structure diagram (first use; Step 21 extends it).
+  - Add `lesson_sources` to the Postgres tables list.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 20: Finish the UI
+
+**Goal:** Complete the user experience by adding to the UI: onboarding, mock exam timer, and learner-facing polish.
+
+- **Test:** extend `tests/integration/ui/test_app.py`
+  - A signed-in user with no `LearnerProfile` (new, or registered before this step) is prompted for a study goal; submitting it writes a `LearnerProfile` that `read_learner_state` returns. Skipping it writes nothing and the prompt does not reappear on the next visit from that browser.
+  - While a mock exam is in progress (started, not yet submitted), the **Coach** toggle is disabled. It is enabled again after submit or auto-submit.
+  - The mock exam shows a countdown and submits automatically when time runs out (drive time through an injected clock, not a real wait).
+  - A submit that arrives after the deadline is scored as an auto-submit, not accepted as a late answer set.
+  - Reload mid-exam: opening `/` again shows the same questions with the answers already picked still selected, and the countdown continues from the checkpointed `started_at`; it does not restart at 45 minutes.
+  - Submitting the exam clears the saved draft answers.
+  - Logout during an exam asks for confirmation. Cancelling keeps the exam and its draft answers; confirming signs out and discards the draft answers.
+  - With the debug flag off, the inspector panel is hidden.
+- Extend `src/civica/ui/app.py`:
+  - **Onboarding capture (populates `LearnerProfile`):** whenever the signed-in user has no `LearnerProfile` (not only at first registration, so users who registered earlier are also asked), prompt for their study goal (free text) and write it via `memory.writer.put(user_id, "current", LearnerProfile(goal=...))`. This is the only writer of `LearnerProfile` in the plan; the `goal` field is bounded free-form prose (`max_length=500`) consumed as personalization context by the `teach`/`evaluate` prompts, not as branching logic. If onboarding is skipped, no `LearnerProfile` is written and reads return `None`; a skip flag in `app.storage.user` stops the prompt from reappearing on every visit.
+  - **Mock Exam timer:** 45-minute countdown with auto-submit at zero.
+    - `mock_exam_generate` records `started_at` in checkpointed state, read through an injected clock. The UI derives the deadline from it, so a browser refresh does not reset the timer.
+    - Update the countdown label with a `ui.timer(1.0, ...)`. The callback only reads the clock and updates the label, so it never blocks the page.
+    - When the timer sees the deadline has passed, it submits the current answers. The submit handler re-checks the deadline server-side. Unanswered questions score as wrong.
+  - **Draft answers survive refresh:** save each pick to `app.storage.user` under the exam's `thread_id` as it is made, restore the picks when the page is built, and clear them on submit. A refresh therefore loses nothing, so no refresh warning is needed.
+  - **Logout during an exam:** the **Log out** button opens a `ui.dialog`: "You have an exam in progress. Logging out will discard your unsubmitted answers." Logout already should clear all per-user session storage (previous step), including the draft answers. The questions and `started_at` stay in the checkpointer.
+  - **No coaching during an exam:** disable the **Coach** toggle while the exam thread has questions and no result. The real exam is closed-book, so open coaching would make the mock score meaningless.
+  - **Inspector behind a flag:** hide the inspector drawer unless `CIVICA_DEBUG` is set, so learners see the coach and developers still see the trace.
+  - Layout polish for the learner: the Coach / Mock Exam picker and readable citations.
+
+- **Check In:** Stop and confirm with the user that the implementation is satisfactory. Manually exercise the full loop (register → onboarding → quiz a theme → mock exam) end-to-end before declaring MVP done.
+
+- **README:** 
+  - Add a screenshot placeholder to **Usage → Web app**, and extend its text to cover onboarding, **Mock Exam** (fixed 40-question format with a 45-minute timer), and the `CIVICA_DEBUG` flag for the inspector panel.
+  - Add `CIVICA_DEBUG` (optional) to the environment variables in **Setup**.
+  
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 21: Self-improvement via per-learner item scheduling
+
+**Goal:**
+- Schedule each persisted question *per learner*: rest items they have mastered, resurface items they missed.
+- Prevent wasting the learner's time on what they know. Drill on what they do not.
+
+**Why scheduling and not difficulty calibration (design decision, 2026-08-17):**
+
+An earlier draft of this step specified IRT-lite difficulty calibration: empirical p-correct per question, gated by `MIN_RESPONSES`, bucketed into `too_easy` / `good` / `too_hard` / `ambiguous`, with the outer buckets retired. That math needs many learners answering the same item. This system has essentially one real learner, and at n=1 p-correct is not item difficulty at all, it is that one learner's history. Two failure modes follow:
+
+- `too_easy` retires items the learner has *memorized*, which merely wastes the generation cost already paid.
+- `too_hard` retires items the learner *does not know yet*, which is exactly backwards for exam prep. Those are the questions to drill, and calibration would delete them.
+
+Per-user scheduling produces the felt behavior we actually wanted (the bank stops repeating what you know, and brings back what you missed), works correctly at n=1, and is simpler math. Difficulty calibration is deferred until there is a real multi-learner population, at which point it also needs the shared-namespace decision already flagged in Step 22. It is not abandoned, just correctly sequenced behind its data prerequisite.
+
+- **Test:** `tests/unit/reflection/test_scheduling.py` (unit, no DB/network: feed synthetic `quiz_answers` rows for known question ids)
+  - An item answered correctly `MASTERY_STREAK` consecutive times for a user is not due; it drops out of that user's selection pool.
+  - A missed item becomes due sooner than an unseen item (missed items outrank both mastered and never-seen ones).
+  - An item mastered by one learner is still due for another. Scheduling state is strictly per user, so one learner's progress never hides material from another.
+  - A single correct answer does not retire an item (the streak requirement is what a lucky guess cannot fake).
+  - Scheduling is deterministic and idempotent: the same input rows produce the same due-set.
+- Create `src/civica/reflection/scheduling.py`:
+  - `due_questions(user_id, theme, limit) -> list[str]` - Leitner-style. Derive each item's box for this learner from their `quiz_answers` streak on that `question_id`, order by (missed most recently, then never seen, then longest-rested), and return the ids that are due. Never-seen items are always eligible, so a cold-start learner is never starved.
+  - `is_mastered(user_id, question_id) -> bool` - `MASTERY_STREAK` (small constant, e.g. 3) consecutive correct answers.
+  - Derived from `quiz_answers` on read. No new mutable state to keep in sync, and no schema change beyond what Step 9 already added. This is a deliberate contrast with the calibration design, which needed a `difficulty` column written back onto `generated_questions`.
+  - `generate_quiz` (Step 9) calls `due_questions` first and only generates new items when the due set is short, closing the loop: mastered items rest, missed items return, and generation cost falls over time.
+  - Reads run on the hot path (they are one indexed query), but any bulk recomputation runs as an offline `scripts/` entrypoint like ingestion.
+
+- **Check In and Flag Flip:** 
+  - Confirm with the user that `MASTERY_STREAK` and the due-ordering feel right on a small real sample before enabling bank-preferring selection in `generate_quiz`.
+  - This is an important gate. Do not flip the flag or start the strategy policy (next step) until the scheduling signal is trusted.
+  - **Flip the flag (do this only after the check-in above passes):** `generate_quiz` reads a single feature flag, `PREFER_SCHEDULED_QUESTIONS` (default `False`), that gates whether it draws due persisted items before generating new ones. Until now it has been `False`, so scheduling is computed but never consumed. Set `PREFER_SCHEDULED_QUESTIONS = True` to turn the loop on. Do not flip the flag if the check-in reveals the signal is not yet trustworthy.
+
+**Reflection dashboard (chore, 0 points):**
+
+- Create `src/civica/scripts/reflection_report.py`: prints bank health (item counts by box, mastered fraction, generation-vs-reuse ratio), critic rejection rate grouped by `prompt_version`, recurring `retrieval_gaps`, and per-theme coverage. Add a mode that runs a scripted synthetic learner through the loops so the behavior can be exercised without months of real answers.
+- Rationale: the check-in above and Step 22's both say "until the signal is trusted," and without this script that judgment is unfalsifiable. Chore, so no points and no new tests of its own, but the suite must be green at the step boundary.
+
+- **README:**
+  - Add the scheduling and `reflection_report` `scripts/` entrypoints to the commands section.
+  - Add a short **Self-improvement** sub-section to `## Usage` explaining how per-learner scheduling rests mastered items and resurfaces missed ones, and how to read the reflection report.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+## Step 22: Self-improvement on teaching strategy
+
+**Goal:** Adapt how the coach explains a theme based on measured mastery gains - a small bandit over teaching strategies whose reward is the learner's next-quiz improvement. Depends on Step 10 (the planner's `teach` tool consumes the chosen strategy) and on Step 21 being trusted (per its check-in).
+
+- **Test:** `tests/unit/reflection/test_strategy_policy.py` (unit: stub `memory.writer.get`/`put_raw` with in-memory fakes)
+  - `select_strategy` returns a valid `TeachingStrategy` for a theme with no history (cold start uses a defined default/exploration rule, never an empty or invalid value).
+  - After recording a positive mastery-gain reward for a strategy, `select_strategy` shifts probability toward it (assert the observable selection distribution changes, not the internal counters).
+  - `TeachingStrategyStat` is written by the deterministic policy through `memory.writer.put`, and is **not** reachable from the planner: a `record_outcome` call targeting `teaching_strategy_stat` raises `MemoryNotAllowed`. An agent that can write its own reward statistics has no reward signal. (Note: `MEMORY_WRITE_ALLOWLIST` is derived from `MemoryKind`, so a new enum member is in it by construction and "outside the general allowlist" is not a testable state. The meaningful assertion is against the hand-enumerated `PLANNER_WRITE_ALLOWLIST` from Step 10A.)
+- Add to `memory/records.py` (extends Step 7, does not modify its completed records):
+  - `MemoryKind.TEACHING_STRATEGY_STAT = "teaching_strategy_stat"` and a frozen `TeachingStrategyStat` record (`theme`, `strategy: TeachingStrategy`, running reward stats). It joins `MEMORY_WRITE_ALLOWLIST` automatically (that constant is derived from `MemoryKind`) and is deliberately **left out** of `PLANNER_WRITE_ALLOWLIST`: a self-improving policy still writes only through the guarded boundary, and never through the LLM.
+  - `TeachingStrategy(StrEnum)` (e.g. `ANALOGY_FIRST`, `DEFINITION_FIRST`, `CONTRAST_WITH_COMMON_MISTAKE`) in `domain/` so both the planner's `teach` tool and the policy reference one source of truth.
+- Create `src/civica/reflection/strategy_policy.py`:
+  - `select_strategy(user_id, theme) -> TeachingStrategy` and `record_reward(user_id, theme, strategy, mastery_gain)` - a small multi-armed-bandit policy. Reward is the measured `topic_mastery` change on the next quiz for that theme (the before/after signal already lives in `quiz_answers` + `topic_mastery`). The planner's `teach` tool asks the policy which strategy to use and passes it into the explanation prompt; `memory_writer` records the reward after the follow-up quiz. The teaching policy now changes based on outcomes - the second self-improving feature.
+  - **Reward hygiene (required, not optional).** Compute the mastery-gain reward only from answers on items the learner has seen before, i.e. items with a scheduling history from Step 21. A brand-new generated question carries unknown difficulty, so its outcome reflects the item as much as the teaching. Mixing those in lets item noise swamp the strategy signal and the bandit converges on luck. Step 10A's comprehension check supplies the dense immediate reward; this rule decides which of those answers count.
+  - Strategy variants of the explanation prompts are injected as prompt sets. Add a `PromptSet` Protocol (`version: str`) in `llm/prompts.py` so the policy, `teach`, and the reflection report accept any prompt set through one interface. The existing frozen prompt-set dataclasses satisfy it structurally, with no inheritance; give each strategy variant its own version so rewards and rejections stay attributable.
+  - The reward depends on `topic_mastery` being deterministically derived. If the planner could write its own mastery, this reward would be self-graded and the bandit would optimize against a number it controls. That is the concrete payoff of the two-allowlist rule.
+- **Global-learning note (deferred - requires a Product Owner decision):** promoting item difficulty and high-value strategy signals from per-user to a *shared* namespace would let the coach improve for every learner, not just the current one. It is also the prerequisite for the cross-learner difficulty calibration that Step 21 deferred: p-correct only means "difficulty" when many learners answer the same item. This conflicts with the "all persistent state is namespaced by `user_id`" rule, so it is intentionally out of scope until the owner sanctions a reserved global namespace (e.g. `user_id="__global__"`) with its own allowlist entry. Flagged here, not built.
+
+- **Check In:** Confirm the strategy set and the cold-start rule with the user before wiring the bandit into the `teach` tool.
+
+- **README:**
+  - Extend the **Self-improvement** sub-section to cover the outcome-driven teaching-strategy policy that adapts how the coach explains a theme based on measured mastery gains.
+  - Add a separate markdown document (referenced from the `## Usage` sub-section) that explains in more detail how both self-improvement loops work.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Implementation Order
+
+1. **Step 1 - Scaffolding + Postgres:** everything else needs a package layout, `uv` env, and a working DB connection
+2. **Step 2 - Capture:** corpus acquisition has zero DB dependency; ship it first so a real snapshot exists for later ingestion tests
+3. **Step 3 - Normalize:** depends on Step 2 for input HTML; produces the deterministic corpus consumed by ingest
+4. **Step 4 - Ingest:** depends on Step 3's JSON shape and Step 1's pgvector setup
+5. **Step 5 - Retriever:** depends on Step 4's `content_chunks` table
+6. **Step 6 - Users + auth:** required to namespace memory in Step 7; independent of retrieval
+   - **Step 6B - Minimal UI + session management:** needs Steps 1 and 6 only. NiceGUI web app with login, 14-day sessions that survive browser refresh, and logout. Built after Step 10B (it was added to the plan late); Step 12 builds on it.
+7. **Step 7 - Memory layer:** needs Step 6's `user_id` and Step 1's pool; blocks the graph
+   - **Step 7B - Quiz-answer log:** needs Step 6's `user_id` and Step 1's pool; independent of Step 7 (no LangGraph coupling), can be built in parallel
+8. **Step 8 - Explanation engine:** needs Step 5 (retrieval); independent of memory
+9. **Step 9 - Assessment engine (core + persisted question bank):** needs Step 5 (retrieval) and Step 7B (persist quiz log); independent of the graph. `generate_quiz`/`generate_mock_exam` plus the `generated_questions` table; the persisted bank is the one thing Step 21 requires from this step.
+   - **Step 9B - Grounding + correctness gate:** needs Step 9; a quality/safety layer (question critic), not self-improvement. Independently shippable and deferrable if the Step 9 quality check-in already looks strong.
+10. **Step 10 - Autonomous planner (10A and 10B):** needs Steps 7, 7B, 8, 9.
+    - **Step 10A - Autonomous planner:** pure back end, unit-tested with a fake model. The mastery heuristic is demoted to a tool; the planner (LLM tool-calling loop) becomes the controller for every coach turn. Also lands the two-allowlist write boundary, the halt fallback, `planner_trace`, and `retrieval_gaps`.
+    - **Step 10B - Refactor the planner loop into graph nodes:** needs Step 10A; moves the tool loop into LangGraph nodes (`start_turn`, `planner_model`, `planner_tools` as a prebuilt `ToolNode`, `fallback_lesson`) with every 10A guardrail kept. Unit-tested with a fake planner model injected through `PlannerDeps`.
+11. **Step 11 - Graph assembly + persistence:** needs Step 10B; compiles the full graph on `PostgresSaver` + `PostgresStore` with `route_input` and `memory_writer` as the mandatory last node.
+12. **Step 12 - Coach UI for lessons:** needs Steps 6B and 11; streamed coach turns, the step log, and the inspector in one coach conversation per user. Questions show read-only.
+13. **Step 13 - Coach UI for quizzes and practice checks:** needs Step 12; **Teach me** / **Quiz me** quick actions and practice **Check** on questions. Steps 14 to 19 each add their own UI piece.
+14. **Step 14 - Token usage per turn:** needs Step 12 (graph config and inspector); totals token usage per caller for each turn and shows it in the inspector. Nothing later depends on it.
+15. **Step 15 - Answers + derived mastery:** needs Step 13 (replaces its practice check); scores answers, writes mistake episodes, and derives `topic_mastery` deterministically.
+16. **Step 16 - Mock exam path:** needs Step 15; deterministic 40-question exam that bypasses the planner but not the logging.
+17. **Step 17 - Mistake-driven review retrieval:** needs Step 15 (mistake episodes with sources).
+18. **Step 18 - Persistent study plan:** needs Step 12. Additive planner tools; this is what makes the autonomy persist across sessions rather than within a turn.
+19. **Step 19 - Corpus coverage tracker:** needs Step 15 (`quiz_answers` from the graph); adds `lesson_sources` so "taught" coverage has real section data.
+    - Steps 17, 18 and 19 can be built in any order.
+20. **Step 20 - Finish the UI:** needs Steps 16, 18 and 19; adds onboarding, the mock exam timer, the debug flag for the inspector, and learner-facing polish to the coach UI from Steps 12 and 13
+21. **Step 21 - Self-improvement via per-learner scheduling:** **in MVP.** Needs Step 9 (persisted bank) and Step 7B (`quiz_answers`) only; no planner dependency, so it can be built in parallel with Steps 10 to 20 and turned on after Step 20 ships. Included in MVP because the project's stated purpose is an agent that improves over time, and per-learner scheduling is the cheapest loop that visibly does that with one real learner. Ships with the reflection-report chore that makes its check-in evidence-based.
+22. **Step 22 - Self-improvement on teaching strategy:** **post-MVP.** The second self-improvement step. Needs Step 10 (planner consumes the chosen strategy) and a trusted Step 21 scheduling signal, plus the reward-hygiene rule.
+
+**MVP boundary:** Steps 1 through 21. Step 9B is optional within that boundary; Step 22 and cross-learner difficulty calibration are post-MVP.
+
+---
+
+## Verification (end-to-end)
+
+Run these against a fresh clone with `data/` empty:
+
+1. `docker compose up -d`
+2. `uv sync`
+3. `cp .env.example .env` - fill in `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and a generated `CIVICA_SESSION_SECRET`.
+4. `uv run python -m civica.scripts.migrate` - verify schema created (extension `vector` present, all tables in place).
+5. `uv run python -m civica.scripts.capture_thematic_sheets` - verify `data/raw/thematic_sheets/` populates.
+6. `uv run python -m civica.scripts.normalize_thematic_sheets` - verify `data/corpus/thematic_sheets/` populates.
+7. `uv run python -m civica.scripts.ingest_corpus` - verify `content_chunks` count in Postgres > 0.
+8. `uv run pytest` - full unit/integration suite green, mypy strict green.
+9. `uv run python -m civica.ui.app`:
+   - Register `test-alex` + secret; verify user row created.
+   - Refresh the browser and restart the app; verify you stay signed in. Log out, refresh, and verify you stay signed out. Log back in and verify your mastery and study history are still there.
+   - **Coach → "Teach me about Marianne"** returns an English explanation citing at least one French corpus passage.
+   - **Coach → "Quiz me on Principes et valeurs"**: answer 3 questions; verify `quiz_answers` rows appear and `topic_mastery` updates.
+   - **Mock Exam**: verify 40 questions, 45-minute countdown, picked answers still selected after a refresh, and a per-theme pass/fail breakdown at completion. Verify 40 new `quiz_answers` rows landed.
+   - **Autonomy**: verify the "why this next" line appears, that `planner_trace` has rows for the turn, and that a second coaching session references the study plan written in the first.
+   - **Coverage**: verify the per-theme coverage readout moves after a lesson on a previously unseen passage.
+10. `uv run python -m civica.scripts.reflection_report` - verify bank health, rejection rates by prompt version, and recurring retrieval gaps print without error.
+11. Answer the same question correctly `MASTERY_STREAK` times, then verify it stops appearing in that theme's quiz while an item you missed comes back.
+
+---
+
+## Project Structure
+
+```
+civica/
+  ├── data/                     # git-ignored; raw + normalized corpus
+  ├── docs/                     # design docs and plans
+  ├── docker-compose.yml        # local Postgres+pgvector
+  │ 
+  ├── src/civica/               # application package
+  │   ├── scripts/              # offline operations (capture, normalize, ingest, migrate)
+  │   ├── ui/                   # NiceGUI web app (app.py entrypoint) and its view models
+  │   └── ...                   # populated as steps are implemented
+  │
+  └── tests/                    # unit + integration tests
+```
