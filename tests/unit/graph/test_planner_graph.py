@@ -160,7 +160,7 @@ def _invoke(
     graph: PlannerGraph,
     *,
     learner_message: str = LEARNER_MESSAGE,
-    mode: PlannerMode = PlannerMode.TEACH,
+    mode: PlannerMode = PlannerMode.LESSON,
 ) -> State:
     """One learner turn on THREAD_ID for USER_ID; returns the final graph state."""
     state: State = graph.invoke(
@@ -176,7 +176,7 @@ def _run(
     planner_model: FakePlannerModel,
     *,
     critic: CritiqueFn | None = None,
-    mode: PlannerMode = PlannerMode.TEACH,
+    mode: PlannerMode = PlannerMode.LESSON,
 ) -> State:
     return _invoke(_compile(fakes, planner_model, critic), mode=mode)
 
