@@ -31,7 +31,6 @@ from civica.graph.planner import (
     HaltReason,
     PlannerContext,
     PlannerDeps,
-    PlannerMode,
     ToolCall,
     build_planner_tools,
     teach_theme,
@@ -58,7 +57,6 @@ def _last_wins(_: _T, new: _T) -> _T:
 
 class PlannerInput(TypedDict):
     learner_message: str
-    mode: PlannerMode
 
 
 class PlannerState(PlannerInput):
@@ -135,7 +133,7 @@ def _make_planner_model(deps: PlannerDeps) -> Node:
     ) -> dict[str, object]:
         """One model call; the system prompt is added here and never stored."""
 
-        system = SystemMessage(content=PLANNER_PROMPTS.system(mode=state["mode"].value))
+        system = SystemMessage(content=PLANNER_PROMPTS.system())
         response = model.invoke([system, *state["messages"]])
         assert isinstance(response, AIMessage)
 

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 # Editing a prompt means bumping its set's version and re-pinning the hash here, together.
 _PINS: list[tuple["DataclassInstance", str, str]] = [
     (QUIZ_PROMPTS, "quiz-v004", "92d4cd828fe7ae437dc1eb5ee57abdd4e5549b269794e6ac0cb84495e3727702"),
-    (PLANNER_PROMPTS, "planner-v002", "84385104135bff4151589a95fe18ea0a20d6ef8f0a4b0344dae0cf976ee32b1e"),
+    (PLANNER_PROMPTS, "planner-v003", "72780e00633f172dbc21048b59fdf42a79eada5529fd3f0e87d983efa36c8aa8"),
     (EXPLANATION_PROMPTS, "explanation-v001", "4c7a28ecf0f4646688feb4ff83016ede2f399b962c1cbfaf414a7da53f055da4"),
 ]
 _PIN_IDS = ["quiz", "planner", "explanation"]
@@ -40,7 +40,6 @@ _EXTRA_PLACEHOLDER = "sample_extra"
 _SAMPLE_THEME = "sample-theme"
 _SAMPLE_COUNT = 42
 _SAMPLE_BODY = "sample-body"
-_SAMPLE_MODE = "sample-mode"
 _SAMPLE_QUESTION = "sample-question"
 
 
@@ -113,11 +112,8 @@ class TestRenderMethods:
         assert all(value in text for value in (_SAMPLE_THEME, str(_SAMPLE_COUNT), _SAMPLE_BODY))
         assert "{" not in text
 
-    def test_planner_system_carries_the_mode(self) -> None:
-        text = PLANNER_PROMPTS.system(mode=_SAMPLE_MODE)
-
-        assert _SAMPLE_MODE in text
-        assert "{" not in text
+    def test_planner_system_is_fully_rendered(self) -> None:
+        assert "{" not in PLANNER_PROMPTS.system()
 
     def test_explanation_human_carries_its_arguments(self) -> None:
         text = EXPLANATION_PROMPTS.human(question=_SAMPLE_QUESTION, passages=_SAMPLE_BODY)

@@ -29,7 +29,7 @@ Written civic exam for naturalization applicants, mandatory from 2026-01-01.
 | Système institutionnel et politique   | 6              |
 | Vivre dans la société française       | 4              |
 
-Civica's `Quiz` and `Mock Exam` modes should mirror this structure exactly.
+Civica's Quizzes (in chat) and Mock Exams should mirror this structure exactly.
 
 ### How this exam differs from CSP / CR
 The civics exam for naturalization appears to differ from the exams labelled as CR (carte de résident) and CSP (carte de séjour pluriannuel).
@@ -53,7 +53,7 @@ Same architecture (40 Q, 45 min, 80% pass, five themes with identical weighting)
 - **Memory-aware coaching:** remembers weak themes, recurring misconceptions, preferred explanation depth, and study cadence across sessions
 - **Autonomous planning:** an LLM planner decides its own next action each turn over a bounded, guarded tool set, and keeps a durable study plan across sessions. Its choice is surfaced to the learner as a short "why this next" line.
 - **Guided study by theme:** the five official themes, with a per-theme coverage readout of how much material the learner has actually seen
-- **Quiz mode:** LLM-generated questions using the official French thematic content as source with explanations grounded in the official material*
+- **Quizzes:** the coach gives LLM-generated questions on request or on its own initiative, using the official French thematic content as source with explanations grounded in the official material*
 - **Mock exam mode:** mirrors the official format (40 Q, 45-min timer, 80% pass, per-theme weighting) and reports pass/fail plus per-theme scores*
 - **Improves over time:** per-learner item scheduling rests questions the learner has mastered and resurfaces the ones they missed, so the bank stops wasting their time and drills their gaps
 
@@ -67,23 +67,23 @@ Functional modules will contain domain logic that is invoked from graph nodes. T
 - **Progress store** persists mastery, quiz history, and next-review timestamps.
 - **Memory service** wraps LangGraph store namespaces: `("learner_profile", user_id)`, `("topic_mastery", user_id)`, `("mistake_episode", user_id)`, `("session_summary", user_id)`, `("study_plan", user_id)`. A sixth, `("teaching_strategy_stat", user_id)`, arrives post-MVP with the strategy policy.
 - **Assessment engine** assembles quizzes and mock exams to the official proportions and theme weighting.
-- **Explanation engine** generates concise, corpus-grounded explanations for teach and evaluate nodes. One mode in MVP. Tone controls are out of scope for MVP.
+- **Explanation engine** generates concise, corpus-grounded explanations for lessons and answer feedback. One explanation style in MVP. Tone controls are out of scope for MVP.
 
 
-One graph, three terminal modes (teach, quiz, mock exam). Subgraphs are out of scope for MVP.
+One graph with two paths: the coach conversation and the mock exam. The planner loop is the only subgraph.
 
-Teach and Quiz are driven by the autonomous planner: an LLM tool-calling loop that decides its own next action over a bounded tool set. 
+The coach conversation is driven by the autonomous planner: an LLM tool-calling loop that decides its own next action over a bounded tool set, including whether to teach or quiz. It follows an explicit learner request for a lesson or a quiz. 
 Mock Exam will be a deterministic path because the official format is fixed and we don't want to deviate from this.
 
 ```
 onboarding
     │
     ▼
-mode ──► planner ⇄ tools ──────────────────────────► memory_writer
-    │      (teach, quiz)   │                              ▲
+route ─► planner ⇄ tools ──────────────────────────► memory_writer
+    │        (coach)       │                              ▲
     │                      │  suggest_review_theme        │
     │                      │  retrieve_corpus / teach     │
-    │                      │  generate_quiz / score       │
+    │                      │  generate_quiz               │
     │                      │  read_learner_state          │
     │                      │  read_study_plan             │
     │                      │  get_coverage_gaps           │
@@ -157,7 +157,7 @@ The [official list of questions](https://www.immigration.interieur.gouv.fr/docum
 However, there is no official answer key, which is why this list is not used as part of the MVP.
 
 By incorporating the official list of questions, two major features will get major upgrade. 
-**Quiz mode** and **Mock Exam mode** will draw qeustions from the official naturalization question list.
+Quizzes and **Mock Exam mode** will draw questions from the official naturalization question list.
 
 Two one-shot scripts under `scripts/`:
 - `transform_pdfs_to_markdown.py` to convert pdfs in `data/raw/reference_texts/` to prose docs in `data/corpus/reference_texts/*.md`; skips the question list PDF

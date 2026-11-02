@@ -28,7 +28,6 @@ from civica.graph.planner import (
     PROFILE_KEY,
     HaltReason,
     PlannerDeps,
-    PlannerMode,
     ToolCall,
 )
 from civica.graph.prompts import PLANNER_PROMPTS
@@ -160,11 +159,10 @@ def _invoke(
     graph: PlannerGraph,
     *,
     learner_message: str = LEARNER_MESSAGE,
-    mode: PlannerMode = PlannerMode.LESSON,
 ) -> State:
     """One learner turn on THREAD_ID for USER_ID; returns the final graph state."""
     state: State = graph.invoke(
-        {"learner_message": learner_message, "mode": mode},
+        {"learner_message": learner_message},
         config={"configurable": {"thread_id": THREAD_ID}},
         context=PlannerContext(user_id=USER_ID),
     )
@@ -176,9 +174,8 @@ def _run(
     planner_model: FakePlannerModel,
     *,
     critic: CritiqueFn | None = None,
-    mode: PlannerMode = PlannerMode.LESSON,
 ) -> State:
-    return _invoke(_compile(fakes, planner_model, critic), mode=mode)
+    return _invoke(_compile(fakes, planner_model, critic))
 
 
 def _scripted(*turns: AIMessage) -> FakePlannerModel:
@@ -478,14 +475,11 @@ class TestGroundingGuard:
 class TestComprehensionCheck:
     """teach then generate_quiz(n=1): a critic that rejects everything ends the turn after the lesson."""
 
-    @pytest.mark.parametrize("mode", list(PlannerMode))
-    def test_system_prompt_asks_for_a_check_after_teach(
-        self, planner_fakes: PlannerFakes, mode: PlannerMode
-    ) -> None:
+    def test_system_prompt_asks_for_a_check_after_teach(self, planner_fakes: PlannerFakes) -> None:
         """A prompt convention, not a code path: the model is told to quiz once on what it taught."""
         model = _scripted(final_message(FINAL_TEXT))
 
-        _run(planner_fakes, model, mode=mode)
+        _run(planner_fakes, model)
 
         check = re.compile(rf"\b{TEACH}\b.*\b{GENERATE_QUIZ}\(\w+, n={COMPREHENSION_CHECK_SIZE}\)")
         assert any(check.search(text) for text in model.system_texts())
@@ -523,7 +517,7 @@ class TestGenerateQuiz:
     def test_state_keeps_the_requested_questions(
         self, planner_fakes: PlannerFakes, model: FakePlannerModel
     ) -> None:
-        state = _run(planner_fakes, model, mode=PlannerMode.QUIZ)
+        state = _run(planner_fakes, model)
 
         questions = state[QUIZ_QUESTIONS]
         assert len(questions) == QUIZ_SIZE
@@ -532,7 +526,7 @@ class TestGenerateQuiz:
     def test_tool_output_hides_the_correct_answer(
         self, planner_fakes: PlannerFakes, model: FakePlannerModel
     ) -> None:
-        _run(planner_fakes, model, mode=PlannerMode.QUIZ)
+        _run(planner_fakes, model)
 
         output = model.tool_output("call-quiz")
         assert output
@@ -548,7 +542,7 @@ class TestQuizSizeBound:
     ) -> None:
         model = _scripted(_quiz("call-quiz", n), final_message(FINAL_TEXT))
 
-        state = _run(planner_fakes, model, mode=PlannerMode.QUIZ)
+        state = _run(planner_fakes, model)
 
         assert state[HALT_REASON] == HaltReason.FINAL_MESSAGE
         assert state[QUIZ_QUESTIONS] == []
@@ -616,7 +610,6 @@ class TestReadTools:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", list(PlannerMode))
 class TestLearnerMessageBoundary:
     """The untrusted learner message goes in the human turn, never the system prompt."""
 
@@ -625,17 +618,17 @@ class TestLearnerMessageBoundary:
         return _scripted(tool_call(SUGGEST, "call-suggest"), final_message(FINAL_TEXT))
 
     def test_absent_from_every_system_message(
-        self, planner_fakes: PlannerFakes, model: FakePlannerModel, mode: PlannerMode
+        self, planner_fakes: PlannerFakes, model: FakePlannerModel
     ) -> None:
-        _run(planner_fakes, model, mode=mode)
+        _run(planner_fakes, model)
 
         assert model.system_texts()
         assert all(LEARNER_MESSAGE not in text for text in model.system_texts())
 
     def test_present_in_a_human_message(
-        self, planner_fakes: PlannerFakes, model: FakePlannerModel, mode: PlannerMode
+        self, planner_fakes: PlannerFakes, model: FakePlannerModel
     ) -> None:
-        _run(planner_fakes, model, mode=mode)
+        _run(planner_fakes, model)
 
         assert any(LEARNER_MESSAGE in text for text in model.human_texts())
 
