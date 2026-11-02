@@ -3,7 +3,7 @@
 ## Context
 
 Civica is a memory-aware learning coach for the French naturalization written civics exam. 
-This plan covers the MVP: a single Streamlit app that offers three modes (teach, quiz, mock exam), backed by 
+This plan covers the MVP: a single Streamlit app that offers a coach conversation (lessons and quizzes chosen by an autonomous planner) and a mock exam mode, backed by 
 generative AI for questions/responses, embeddings for content retrieval, and data store for the official corpus
 and agent memory. It also includes autonomous agent flow and a system for self-improvement.
 
@@ -936,7 +936,9 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
     - Extra guardrails: quiz size capped at 10, correct answers hidden from the model, and `MAX_PLANNER_STEPS = 6` with a fallback lesson.
     - `planner_trace` adds a `turn_id`, since one `thread_id` spans many turns. Each turn writes one row per tool call, then one row with the halt reason (including `forbidden_write`, recorded before `MemoryNotAllowed` is re-raised).
     - New `InsufficientMaterialError` separates retrieval gaps from critic rejections and carries the queries tried. Gaps are also logged for empty `retrieve_corpus` results and the fallback lesson.
-    - Planner modes are named `LESSON` and `QUIZ` (not `TEACH` and `QUIZ`) to avoid confusion with the `teach` tool, which the planner may call in either mode.
+    - Planner modes
+      - The modes were renamed `LESSON` and `QUIZ` (not `TEACH` and `QUIZ`) to avoid confusion with the `teach` tool, which the planner may call in either mode.
+      - Subsequent to the above rename, `PlannerMode` (teach/quiz) was removed completely because it had devolved into an unnecessary UI element. The planner autonomously determines whether or not to introduce a quiz. It can also be triggered by the user asking for a quiz in the chat.
 
 ---
 
@@ -1031,7 +1033,6 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Planner state holds pydantic `Explanation` and `Question` objects. The default checkpoint serializer accepts them; if `LANGGRAPH_STRICT_MSGPACK` is ever enabled, register their modules in `allowed_msgpack_modules`.
   - `route_input`: graph input is a tagged union by kind (`message`, later `answer`, `mock_start`, `mock_submit`). This step handles `message` only, which enters the planner subgraph.
   - `memory_writer` writes the session summary and is the required last node on every path.
-- Planner prompt: stop the final reply from promising to "check it and log the result". Scoring and logging are the graph's job.
 - Create `src/civica/scripts/run_turn.py`: runs one Teach turn for a dev user, streaming each step and printing the `planner_trace` rows.
 - **Check In:** Stop and confirm with user that the implementation is satisfactory. Prompt the user to run `run_turn.py` for an autonomous Teach turn and confirm the planner's tool-call trace is sensible.
 

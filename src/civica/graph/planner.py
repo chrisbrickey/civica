@@ -7,7 +7,6 @@ The loop itself is extracted to civica.graph.nodes.
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-from enum import StrEnum
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import ToolMessage
@@ -50,11 +49,6 @@ MAX_QUIZ_QUESTIONS = 10
 
 # One LearnerProfile per user lives under this key.
 PROFILE_KEY = "current"
-
-
-class PlannerMode(StrEnum):
-    LESSON = "lesson"
-    QUIZ = "quiz"
 
 
 @dataclass(frozen=True)
