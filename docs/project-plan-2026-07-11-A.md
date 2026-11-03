@@ -1,4 +1,4 @@
-# Project Plan: Civica MVP
+# DEPRECATED Project Plan A: Civica MVP
 
 ## Context
 
