@@ -9,15 +9,12 @@ from pydantic import BaseModel, ConfigDict
 
 from civica.db.session import run_on_connection
 from civica.domain.user import UserId
-
-# bcrypt silently truncates (or rejects in new releases) secrets whose UTF-8 encoding exceeds this many bytes.
-# Reject over-length secrets with a clear error instead of hashing a truncated value.
-_BCRYPT_MAX_SECRET_BYTES = 72
+from civica.users.rules import validate_secret, validate_username
 
 # bcrypt cost factor: Library default is 12. Raise over time as hardware improves.
 # Each hash consumes roughly ~0.24s as of 2026.
 # Tests override this to avoid unnecessary drag on test suite performance.
-_BCRYPT_ROUNDS = 12
+BCRYPT_ROUNDS = 12
 
 _INSERT_USER_SQL = """
 INSERT INTO users (user_id, username, secret_hash)
@@ -42,7 +39,8 @@ class _UserRow(BaseModel):  # type: ignore[explicit-any]
     secret_hash: str
 
 
-def _normalize_username(username: str) -> str:
+def normalize_username(username: str) -> str:
+    """The stored form of a username, trimmed and casefolded."""
     return username.strip().casefold()
 
 
@@ -52,12 +50,10 @@ def _register_on_connection(
     rounds: int,
     conn: psycopg.Connection[psycopg.rows.TupleRow],
 ) -> UserId:
-    normalized_username = _normalize_username(username)
+    normalized_username = normalize_username(username)
 
-    if len(secret.encode("utf-8")) > _BCRYPT_MAX_SECRET_BYTES:
-        raise ValueError(
-            f"Secret exceeds the maximum length of {_BCRYPT_MAX_SECRET_BYTES} bytes."
-        )
+    validate_username(normalized_username)
+    validate_secret(secret, normalized_username)
 
     secret_hash = bcrypt.hashpw(
         secret.encode("utf-8"), bcrypt.gensalt(rounds)
@@ -77,18 +73,14 @@ def register(
     secret: str,
     conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None,
     *,
-    rounds: int = _BCRYPT_ROUNDS,
+    rounds: int = BCRYPT_ROUNDS,
 ) -> UserId:
-    """Register a new user with a username and local secret.
+    """Register a new user with a username and local secret (aka password).
 
-    Normalizes the username (trim + casefold), validates the secret length
-    before any hashing or database write, hashes the secret with bcrypt, and
-    inserts the row with an application-generated UUID.
+    Normalizes the username. Validates, encrypts, and persists the secret.
+    Encryption rounds parameter is injected for override to improve test velocity.
 
-    Pass in a value or rounds to override the production default
-    (e.g., to improve velocity in tests).
-
-    Raises ValueError when the secret exceeds bcrypt's 72-byte limit.
+    Raises InvalidUsername or InvalidSecret (both ValueError) when an input breaks rules.
     Raises UsernameTaken when the normalized username is already registered.
     """
     return run_on_connection(
@@ -102,7 +94,7 @@ def _verify_on_connection(
     secret: str,
     conn: psycopg.Connection[psycopg.rows.TupleRow],
 ) -> UserId | None:
-    normalized_username = _normalize_username(username)
+    normalized_username = normalize_username(username)
 
     with conn.cursor(row_factory=psycopg.rows.class_row(_UserRow)) as cursor:
         cursor.execute(_SELECT_USER_SQL, (normalized_username,))

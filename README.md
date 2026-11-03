@@ -98,6 +98,7 @@ The loop is built from LangGraph nodes rather than custom Python to ensure:
 | langgraph            | graph orchestration (short and long-term memory) |
 | pydantic             | data validation                                  |
 | bcrypt               | user auth                                        |
+| nicegui              | web UI and sessions                              |
 | pytest               | test suite                                       |
 
 
@@ -127,9 +128,10 @@ Reads `pyproject.toml` and `uv.lock`, creates `.venv/`, and installs runtime + d
 Copy `.env.example` to `.env` and insert your API keys. 
 - `ANTHROPIC_API_KEY` (required at runtime): Go to console.anthropic.com to obtain a new key.
 - `OPENAI_API_KEY` (required for one-time embedding): Go to platform.openai.com to obtain a new key.
+- `CIVICA_SESSION_SECRET` (required to run the web app): Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`
 - `CIVICA_USER_AGENT` (optional): Identifies your traffic to the ministry site during ingestion. Please set this to a string that identifies your fork (especially if you make adjustments to the ingestion pipeline) so that requests you initiate are attributed correctly.
 
-_DATABASE_URL and TEST_DATABASE_URL variables are already present and correct for the default docker setup._
+_Notes: DATABASE_URL and TEST_DATABASE_URL variables are already populated and correct for the default docker setup. CIVICA_SESSION_SECRET signs the browser's login cookie for session management. Changing this secret will log out every user, but their coaching memories will remain intact._
 
 ### 5. Stand up database
 
@@ -287,7 +289,8 @@ civica/
   │     ├── progress/           # tracks learner history for scoring and review
   │     ├── retrieval/          # semantic search over the embedded corpus
   │     ├── scripts/            # offline operations intended for single use
-  │     └── users/              # user authentication
+  │     ├── ui/                 # web app and its view models
+  │     └── users/              # user authentication and registration rules
   │
   └── tests/                    
         ├── integration/        # integration tests*

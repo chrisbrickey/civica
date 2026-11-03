@@ -22,6 +22,7 @@ from civica.graph.trace import (
     record_step,
 )
 from civica.users.service import register
+from tests.support.users import TEST_BCRYPT_ROUNDS
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -29,8 +30,6 @@ from civica.users.service import register
 
 _USERNAME = "test-user"
 _SECRET = "sample-secret"
-# bcrypt cost factor: lowered for tests, matching the users-service tests.
-_TEST_BCRYPT_ROUNDS = 4
 
 _THREAD_ID = "sample-thread-001"
 _OTHER_THREAD_ID = "sample-thread-002"
@@ -62,7 +61,7 @@ _GAP_ROWS_SQL = "SELECT theme, query, occurred_at FROM retrieval_gaps ORDER BY i
 
 @pytest.fixture()
 def user_id(db_schema: psycopg.Connection[psycopg.rows.TupleRow]) -> UserId:
-    return register(_USERNAME, _SECRET, conn=db_schema, rounds=_TEST_BCRYPT_ROUNDS)
+    return register(_USERNAME, _SECRET, conn=db_schema, rounds=TEST_BCRYPT_ROUNDS)
 
 
 def _tool_step(user_id: UserId, step_index: int, tool_name: str = _TOOL_NAME) -> TraceStep:

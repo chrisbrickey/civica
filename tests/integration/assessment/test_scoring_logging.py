@@ -17,6 +17,7 @@ from civica.domain.user import UserId
 from civica.progress.quiz_log import log_answer
 from civica.users.service import register
 from tests.support.assessment import answers_with_correct_count, make_mock_exam_questions
+from tests.support.users import TEST_BCRYPT_ROUNDS
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -24,8 +25,6 @@ from tests.support.assessment import answers_with_correct_count, make_mock_exam_
 
 _USERNAME = "test-user"
 _SECRET = "sample-secret"
-# bcrypt cost factor: lowered for tests, matching the users-service tests.
-_TEST_BCRYPT_ROUNDS = 4
 
 _EXAM_SIZE = 40
 _CORRECT_COUNT = 31
@@ -41,7 +40,7 @@ _QUESTION_IDS_SQL = "SELECT question_id FROM quiz_answers WHERE user_id = %s"
 
 @pytest.fixture()
 def user_id(db_schema: psycopg.Connection[psycopg.rows.TupleRow]) -> UserId:
-    return register(_USERNAME, _SECRET, conn=db_schema, rounds=_TEST_BCRYPT_ROUNDS)
+    return register(_USERNAME, _SECRET, conn=db_schema, rounds=TEST_BCRYPT_ROUNDS)
 
 
 @pytest.fixture()

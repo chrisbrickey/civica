@@ -12,7 +12,9 @@ import psycopg.rows
 import pytest
 
 from civica.domain.user import UserId
+from civica.users.rules import InvalidSecret, InvalidUsername
 from civica.users.service import UsernameTaken, register, verify
+from tests.support.users import TEST_BCRYPT_ROUNDS
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -32,6 +34,14 @@ _UNKNOWN_USERNAME = "nobody-registered"
 # 73 single-byte ASCII characters is one byte past that limit.
 _OVER_LENGTH_SECRET = "a" * 73
 _OVER_LENGTH_USERNAME = "test-user-overlength"
+
+# The minimum secret length is 8 characters.
+_UNDER_LENGTH_SECRET = "a" * 7
+_MIN_LENGTH_SECRET = "sample-8"
+_UNDER_LENGTH_USERNAME = "test-user-underlength"
+
+_INVALID_USERNAME = "test user!"
+_COMMON_SECRET = "password"
 
 
 # ---------------------------------------------------------------------------
@@ -58,11 +68,6 @@ def _count_users_with_username(
 # Fixtures
 # ---------------------------------------------------------------------------
 
-# bcrypt cost factor:
-# In production this value is close to library default of 12.
-# Each hash consumes roughly ~0.24s as of 2026 so we lower it in tests to avoid wasteful cycles.
-_TEST_BCRYPT_ROUNDS = 4
-
 
 @pytest.fixture()
 def do_register(
@@ -74,7 +79,7 @@ def do_register(
     """
 
     def _register(username: str, secret: str) -> UserId:
-        return register(username, secret, conn=db_schema, rounds=_TEST_BCRYPT_ROUNDS)
+        return register(username, secret, conn=db_schema, rounds=TEST_BCRYPT_ROUNDS)
 
     return _register
 
@@ -203,3 +208,50 @@ class TestOverLengthSecret:
             do_register(_OVER_LENGTH_USERNAME, _OVER_LENGTH_SECRET)
 
         assert _count_users_with_username(db_schema, _OVER_LENGTH_USERNAME) == 0
+
+
+class TestUnderLengthSecret:
+    """Rejects a secret shorter than the minimum before writing."""
+
+    def test_under_length_secret_raises_value_error_and_writes_no_row(
+        self,
+        do_register: Callable[[str, str], UserId],
+        db_schema: psycopg.Connection[psycopg.rows.TupleRow],
+    ) -> None:
+        with pytest.raises(ValueError):
+            do_register(_UNDER_LENGTH_USERNAME, _UNDER_LENGTH_SECRET)
+
+        assert _count_users_with_username(db_schema, _UNDER_LENGTH_USERNAME) == 0
+
+    def test_minimum_length_secret_registers(
+        self,
+        do_register: Callable[[str, str], UserId],
+        do_verify: Callable[[str, str], UserId | None],
+    ) -> None:
+        user_id = do_register(_USERNAME, _MIN_LENGTH_SECRET)
+
+        assert do_verify(_USERNAME, _MIN_LENGTH_SECRET) == user_id
+
+
+class TestRegistrationRules:
+    """Rejects usernames and secrets that break the registration rules before writing."""
+
+    def test_invalid_username_raises_and_writes_no_row(
+        self,
+        do_register: Callable[[str, str], UserId],
+        db_schema: psycopg.Connection[psycopg.rows.TupleRow],
+    ) -> None:
+        with pytest.raises(InvalidUsername):
+            do_register(_INVALID_USERNAME, _SECRET)
+
+        assert _count_users_with_username(db_schema, _INVALID_USERNAME) == 0
+
+    def test_common_secret_raises_and_writes_no_row(
+        self,
+        do_register: Callable[[str, str], UserId],
+        db_schema: psycopg.Connection[psycopg.rows.TupleRow],
+    ) -> None:
+        with pytest.raises(InvalidSecret):
+            do_register(_USERNAME, _COMMON_SECRET)
+
+        assert _count_users_with_username(db_schema, _USERNAME) == 0
