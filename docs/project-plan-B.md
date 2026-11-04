@@ -570,7 +570,7 @@ This addresses a silent failure mode that I discovered while implementing this s
 
 ---
 
-## Step 6B: Session Management and Minimal UI
+## ✅ Step 6B: Session Management and Minimal UI
 
 **Goals:**
 - A browser interface where a user can register, log in, and log out.
@@ -589,7 +589,11 @@ _This step was added and implemented after some of the subsequent steps, but thi
 - NiceGUI's `User` test fixture can drive pages built with injected `AppDeps` (including the per-test `db_schema` connection)
 - `app.py` passes mypy strict
 - whether `pytest-asyncio` is needed
-- **Check In:** Report the findings to the Product Owner to determine if ok to move to subsequent instructions.
+- **Check In:** Report the findings to the Product Owner to determine if ok to move to subsequent instructions. Results:
+  - PASS: NiceGUI `User` fixture can drive pages built with injected AppDeps, including the per-test db_schema connection. A spike test registered a user through the login page and confirmed the users row through db_schema. It then refreshed the page and stayed signed in, logged out, and was redirected to /login on the next visit. Both spike tests passed. 
+  - PASS: `app.py` passes mypy strict. NiceGUI ships type information (py.typed). The spike app passed mypy --strict --disallow-any-explicit with no errors.
+  - PASS: Loading the plugin for the whole suite causes no regressions. 413 passed and 4 deselected with -p nicegui.testing.user_plugin and asyncio_mode=auto.
+  - CONFIRMED: `pytest-asyncio` is required. Without it, NiceGUI's async fixtures fail with a pytest fixture error.
 
 **Setup**
 - Add dependency: `nicegui`, capped below the next major version (`<4`) so a breaking release cannot arrive through a routine `uv lock --upgrade`. Add dev dependency `pytest-asyncio` if the validation demonstrates that the NiceGUI test plugin requires it.
@@ -666,6 +670,11 @@ _This step was added and implemented after some of the subsequent steps, but thi
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Replaced NiceGUI's default tab icon (a face) with a book emoji: `favicon="📘"` in `ui.run(...)`.
+    - Username rules: 3 to 32 characters; only lowercase letters, digits, `.`, `_` and `-`; must start and end with a letter or digit; `admin`, `root`, `system`, `civica` and `support` are reserved. Uppercase input is lowercased before checking.
+    - Password rules: 8 to 72 characters, any characters allowed (spaces and accents included). 72 is really a byte limit, so accented letters use it up faster. Rejects about 50 very common passwords (including a few French ones) and a password equal to the username. Kept the minimum at 8 rather than the 15 that NIST now recommends when a password is the only sign-in factor, since the app holds study progress, not sensitive data.
+    - Renamed `tests/integration/ui/test_app.py` to `test_auth.py` because many new web app tests will be added as functionality is added and I don't want them all thrown together in a giant integration test file.
+    - Extracted a shared `TEST_BCRYPT_ROUNDS` to `tests/support/users.py` to avoid this being defined in multiple places.
 
 ---
 
@@ -1224,7 +1233,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - An exception raised inside the generator reaches the awaiting caller.
   - Other coroutines keep running while the generator blocks, so one slow turn does not freeze the app.
 - **Test:** `tests/unit/llm/test_client.py`: each profile's model carries its caller tag (`planner`, `explanation`, `quiz`).
-- **Test:** extend `tests/integration/ui/test_app.py`. The real graph from `build_graph(...)` is added to the injected `AppDeps`, compiled with the existing fakes in `tests/support/planner.py` (fake planner and content models, fake retriever, fake trace writer and answer logger), `InMemoryStore`, and `InMemorySaver`. Only external services are faked, so wiring bugs such as a missing runtime `context` or unstreamed subgraph steps fail the test.
+- **Test:** create `tests/integration/ui/test_lessons.py`. Add a `signed_in_user` fixture to `tests/integration/ui/conftest.py` so each feature test file can start signed in without copying the helpers in `test_auth.py`. The real graph from `build_graph(...)` is added to the injected `AppDeps`, compiled with the existing fakes in `tests/support/planner.py` (fake planner and content models, fake retriever, fake trace writer and answer logger), `InMemoryStore`, and `InMemorySaver`. Only external services are faked, so wiring bugs such as a missing runtime `context` or unstreamed subgraph steps fail the test.
   - Log in and submit a prompt: the fake reply and at least one citation render.
   - The lesson text streams: the fake explanation model emits it in several chunks, and the final rendered lesson matches the checkpointed state.
   - The step log shows the planner's tool steps (from inside the planner subgraph), not only the outer graph's nodes.
@@ -1303,7 +1312,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 **Implementation**
 - **Test:** extend `tests/unit/ui/test_turn_view.py`: `check_choice` reports right and wrong choices and returns the question's sources.
-- **Test:** extend `tests/integration/ui/test_app.py` (same wiring as Step 12)
+- **Test:** create `tests/integration/ui/test_quiz.py` (same wiring as Step 12)
   - **Quiz me** sends the message, and the turn renders the questions with none preselected.
   - **Check** shows the result and the question's sources, and the fake answer logger records nothing.
   - A lesson's comprehension-check question also has **Check**.
@@ -1334,7 +1343,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Calls made through two different profiles in one run are totaled separately per caller, and the turn total is their sum.
   - Input, output, and reasoning tokens are each summed. A reply without `usage_metadata` adds nothing and does not error.
   - A fresh tally starts at zero so that one turn's usage never leaks into the next.
-- **Test:** extend `tests/integration/ui/test_app.py`: after a lesson turn the inspector shows the turn's token totals per caller.
+- **Test:** create `tests/integration/ui/test_inspector.py`: after a lesson turn the inspector shows the turn's token totals per caller.
 - Extend `src/civica/llm/client.py`:
   - Reuse the caller tags added in Step 12 so that usage can be split by caller even though every profile uses the same model.
   - Add a small usage callback handler that follows LangChain's `UsageMetadataCallbackHandler` pattern but is keyed by caller tag (instead of model name), so totals separate the planner from the explanation and question generation.
@@ -1382,7 +1391,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `update_mastery`: the **only** writer of `topic_mastery`, computed from `quiz_answers`. See the two-allowlist rule in Step 10A.
   - Route: `answer` -> `score_answer` -> `explain_answer` (wrong answers only) -> `update_mastery` -> `memory_writer`.
 - Extend `src/civica/retrieval/content.py`: `search` takes an optional `sources: Collection[SourceRef] | None` filter that limits results to those `(page_slug, section_id)` pairs.
-- **UI:** extend `tests/integration/ui/test_app.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in Step 12) and renders the scored result, with the explanation and its citations under a wrong answer; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
+- **UI:** extend `tests/integration/ui/test_quiz.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in Step 12) and renders the scored result, with the explanation and its citations under a wrong answer; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
   - In `src/civica/ui/app.py`, replace the practice-only **Check** (Step 13) with a real submit that sends an `answer` input. Remove the "not scored or saved yet" label.
   - Lock each question once answered: render it from the checkpointed `answered` results with the radio and submit disabled (`.disable()`).
   - Show the updated mastery for the answered theme in the inspector panel.
@@ -1413,7 +1422,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `mock_exam_generate`: calls `generate_mock_exam`. It raises `QuestionGenerationError` when the critic cannot fill a theme and saves nothing; retry once, then show a "try again" message rather than crash the graph.
   - `mock_exam_score`: scores via `MockExam.score`, which logs all 40 answers and then runs `update_mastery` like any other assessed path. The result (pass/fail and per-theme scores) stays in the exam thread's checkpointed state, so the UI can render it again after a reload. Only the latest exam is kept; a history of past scores is post-MVP.
   - Routes: `mock_start` -> `mock_exam_generate` -> `memory_writer`; `mock_submit` -> `mock_exam_score` -> `update_mastery` -> `memory_writer`.
-- **UI:** extend `tests/integration/ui/test_app.py` first: selecting **Mock Exam** and starting renders the questions (graph compiled with fakes, as in Step 12); switching back to **Coach** shows the coach conversation unchanged; submitting renders pass/fail and the per-theme breakdown; reloading after submitting shows the same result; a generation failure renders the "try again" message.
+- **UI:** create `tests/integration/ui/test_mock_exam.py` first: selecting **Mock Exam** and starting renders the questions (graph compiled with fakes, as in Step 12); switching back to **Coach** shows the coach conversation unchanged; submitting renders pass/fail and the per-theme breakdown; reloading after submitting shows the same result; a generation failure renders the "try again" message.
   - Create `src/civica/ui/modes.py` with `AppMode(StrEnum)` (`COACH`, `MOCK_EXAM`) and add a Coach / Mock Exam `ui.toggle` to `src/civica/ui/app.py`. The mock exam uses its own thread (`f"{user_id}:mock_exam"`), so it never disturbs the coach conversation. Mock Exam mode: start button, 40 questions each as a `ui.radio`, submit, pass/fail plus per-theme scores. No countdown timer yet (Step 20). This mode calls the deterministic mock-exam path, not the planner.
 - **Check In:** Stop and confirm with user that the implementation is satisfactory. Prompt the user to run one mock exam in the UI (note the generation time and cost of 40 questions).
 
@@ -1488,7 +1497,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `get_coverage_gaps(user_id, theme) -> CoverageReport` - deterministic, no LLM. The universe of sections comes from `content_chunks`, minus the course-objective sections that assessment skips (Step 9C), so they never show as gaps. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`. **Taught** coverage comes from `lesson_sources`.
   - `CoverageReport` is a frozen pydantic model: `theme`, `covered: list[SourceRef]`, `gaps: list[SourceRef]`, `covered_fraction: float`.
 - Bind `get_coverage_gaps` as a planner tool so the planner can deliberately steer toward unseen material instead of re-teaching whatever retrieval happens to surface.
-- **UI (coverage readout):** extend `tests/integration/ui/test_app.py` first: the readout renders one `covered_fraction` per theme for the logged-in user.
+- **UI (coverage readout):** create `tests/integration/ui/test_coverage.py` first: the readout renders one `covered_fraction` per theme for the logged-in user.
   - Show per-theme coverage in `src/civica/ui/app.py`, e.g. "you have not seen 40% of this theme yet."
 - **Check In:** Stop and confirm with the user that the coverage definition is right. "Taught" counts a section as covered once a grounded lesson cites it, not when the learner shows they read it. Prompt the user to confirm in the UI that the readout moves after a lesson on an unseen passage.
 
@@ -1506,14 +1515,16 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 **Goal:** Complete the user experience by adding to the UI: onboarding, mock exam timer, and learner-facing polish.
 
-- **Test:** extend `tests/integration/ui/test_app.py`
+- **Test:** create `tests/integration/ui/test_onboarding.py`
   - A signed-in user with no `LearnerProfile` (new, or registered before this step) is prompted for a study goal; submitting it writes a `LearnerProfile` that `read_learner_state` returns. Skipping it writes nothing and the prompt does not reappear on the next visit from that browser.
+- **Test:** extend `tests/integration/ui/test_mock_exam.py`
   - While a mock exam is in progress (started, not yet submitted), the **Coach** toggle is disabled. It is enabled again after submit or auto-submit.
   - The mock exam shows a countdown and submits automatically when time runs out (drive time through an injected clock, not a real wait).
   - A submit that arrives after the deadline is scored as an auto-submit, not accepted as a late answer set.
   - Reload mid-exam: opening `/` again shows the same questions with the answers already picked still selected, and the countdown continues from the checkpointed `started_at`; it does not restart at 45 minutes.
   - Submitting the exam clears the saved draft answers.
   - Logout during an exam asks for confirmation. Cancelling keeps the exam and its draft answers; confirming signs out and discards the draft answers.
+- **Test:** extend `tests/integration/ui/test_inspector.py`
   - With the debug flag off, the inspector panel is hidden.
 - Extend `src/civica/ui/app.py`:
   - **Onboarding capture (populates `LearnerProfile`):** whenever the signed-in user has no `LearnerProfile` (not only at first registration, so users who registered earlier are also asked), prompt for their study goal (free text) and write it via `memory.writer.put(user_id, "current", LearnerProfile(goal=...))`. This is the only writer of `LearnerProfile` in the plan; the `goal` field is bounded free-form prose (`max_length=500`) consumed as personalization context by the `teach`/`evaluate` prompts, not as branching logic. If onboarding is skipped, no `LearnerProfile` is written and reads return `None`; a skip flag in `app.storage.user` stops the prompt from reappearing on every visit.

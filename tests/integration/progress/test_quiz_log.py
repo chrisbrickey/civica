@@ -18,6 +18,7 @@ from civica.domain.themes import DROITS_ET_DEVOIRS, HISTOIRE_GEOGRAPHIE_ET_CULTU
 from civica.domain.user import UserId
 from civica.progress.quiz_log import log_answer, recent_mistakes
 from civica.users.service import register
+from tests.support.users import TEST_BCRYPT_ROUNDS
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -49,9 +50,6 @@ _MISTAKE_LIMIT = 3
 # The three most recent incorrect answers, most recent first.
 _EXPECTED_RECENT_MISTAKE_IDS = ["question-005", "question-004", "question-003"]
 
-# bcrypt cost factor: lowered for tests, matching the users-service tests.
-_TEST_BCRYPT_ROUNDS = 4
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -64,7 +62,7 @@ def user_id(db_schema: psycopg.Connection[psycopg.rows.TupleRow]) -> UserId:
 
     Injects the lowered bcrypt cost factor to improve test velocity.
     """
-    return register(_USERNAME, _SECRET, conn=db_schema, rounds=_TEST_BCRYPT_ROUNDS)
+    return register(_USERNAME, _SECRET, conn=db_schema, rounds=TEST_BCRYPT_ROUNDS)
 
 
 @pytest.fixture()
