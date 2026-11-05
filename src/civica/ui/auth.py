@@ -10,6 +10,7 @@ from starlette.responses import Response
 
 from civica.domain.user import UserId
 
+HOME_PATH = "/"
 LOGIN_PATH = "/login"
 REGISTER_PATH = "/register"
 _NICEGUI_ASSETS_PREFIX = "/_nicegui/"
