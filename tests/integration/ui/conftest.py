@@ -7,8 +7,8 @@ import psycopg.rows
 import pytest
 from nicegui.testing import User, user_simulation
 
-from civica.ui.app import register_pages
 from civica.ui.deps import AppDeps
+from civica.ui.pages import register_pages
 from tests.support.users import TEST_BCRYPT_ROUNDS
 
 

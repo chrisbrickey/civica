@@ -1257,7 +1257,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - Create `src/civica/ui/turn_view.py`: frozen dataclasses `TurnView`, `CitationView`, `QuizItemView` built from the planner's final state (`reply`, `lesson`, `quiz_questions`, `tool_calls`, `halt_reason`). No NiceGUI import, so the shaping logic is unit-testable.
 - Extend `src/civica/ui/deps.py`: add `graph` to `AppDeps`. `default_app_deps()` builds it once per process with `build_graph()`, so the chat models and pool are not rebuilt per page visit. Tests pass their own graph through `register_pages(deps)`; no new seams.
   - Also add `turn_locks: dict[UserId, asyncio.Lock]` (empty by default) so each test gets fresh locks. The locks are per process, which is enough while the app runs as one process; a multi-process deployment would need a database lock instead.
-- Extend `src/civica/ui/app.py`.
+- Create `src/civica/ui/pages/coach.py` for the coach and `src/civica/ui/pages/inspector.py` for the inspector panel. `src/civica/ui/pages/home.py` keeps the route and the sign-in check, and calls both.
   - **One conversation:** every coach turn uses `thread_id = f"{user_id}:coach"` so `PostgresSaver` restores it. The mock exam gets its own thread in Step 16.
   - **Prompt input:** a text input with a send button (Enter also sends). Disabled while a turn runs.
   - **Streamed turn:** run `graph.stream(input, config={"configurable": {"thread_id": ...}}, context=PlannerContext(user_id=...), stream_mode=["updates", "messages"], subgraphs=True)` through `iterate_in_thread`. A lesson turn takes about 15s, so show progress two ways as it runs. This is the payoff of the graph-native loop from Step 10B.
@@ -1320,7 +1320,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - A lesson turn after a quiz turn no longer shows the quiz questions.
   - The quick-action buttons are disabled while a turn runs.
 - Extend `src/civica/ui/turn_view.py`: `check_choice(question, choice)` for the practice answer check.
-- Extend `src/civica/ui/app.py`:
+- Extend `src/civica/ui/pages/coach.py`:
   - **Quick actions:** **Teach me** and **Quiz me** buttons that submit those messages through the same path as typed input. Disabled while a turn runs.
   - **Questions:** each question as a `ui.radio` (no option preselected) with a **Check** button that reveals correct/incorrect and the question's sources.
   - The check is practice only, labeled "not scored or saved yet". It writes nothing to `quiz_answers` and never moves mastery; Step 15 replaces it with a real `answer` input through the graph.
@@ -1347,9 +1347,9 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - Extend `src/civica/llm/client.py`:
   - Reuse the caller tags added in Step 12 so that usage can be split by caller even though every profile uses the same model.
   - Add a small usage callback handler that follows LangChain's `UsageMetadataCallbackHandler` pattern but is keyed by caller tag (instead of model name), so totals separate the planner from the explanation and question generation.
-- Extend `src/civica/ui/app.py`:
-  - Pass a fresh handler in the graph config (`config={"callbacks": [handler], ...}`) for each turn. LangChain propagates config callbacks to every model call made inside the graph's nodes and tools, so no engine signature changes and no caller has to return its usage.
-  - Show the per-caller and total tokens for the turn in the inspector panel.
+- Extend `src/civica/ui/pages/coach.py` and `src/civica/ui/pages/inspector.py`:
+  - In `coach.py`, pass a fresh handler in the graph config (`config={"callbacks": [handler], ...}`) for each turn. LangChain propagates config callbacks to every model call made inside the graph's nodes and tools, so no engine signature changes and no caller has to return its usage.
+  - In `inspector.py`, show the per-caller and total tokens for the turn.
 - **Check In:** 
     - Stop and confirm with the user that the token totals look right on a few real lesson and quiz turns. 
     - Then decide together, using that data, whether to change any cap (e.g. `EXPLANATION_PROFILE` is `max_tokens=2048`) or set `reasoning_effort`. Change nothing without data. 
@@ -1392,7 +1392,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Route: `answer` -> `score_answer` -> `explain_answer` (wrong answers only) -> `update_mastery` -> `memory_writer`.
 - Extend `src/civica/retrieval/content.py`: `search` takes an optional `sources: Collection[SourceRef] | None` filter that limits results to those `(page_slug, section_id)` pairs.
 - **UI:** extend `tests/integration/ui/test_quiz.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in Step 12) and renders the scored result, with the explanation and its citations under a wrong answer; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
-  - In `src/civica/ui/app.py`, replace the practice-only **Check** (Step 13) with a real submit that sends an `answer` input. Remove the "not scored or saved yet" label.
+  - In `src/civica/ui/pages/coach.py`, replace the practice-only **Check** (Step 13) with a real submit that sends an `answer` input. Remove the "not scored or saved yet" label.
   - Lock each question once answered: render it from the checkpointed `answered` results with the radio and submit disabled (`.disable()`).
   - Show the updated mastery for the answered theme in the inspector panel.
 - **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right. Prompt the user to answer a few questions in the UI and watch mastery move.
@@ -1423,7 +1423,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `mock_exam_score`: scores via `MockExam.score`, which logs all 40 answers and then runs `update_mastery` like any other assessed path. The result (pass/fail and per-theme scores) stays in the exam thread's checkpointed state, so the UI can render it again after a reload. Only the latest exam is kept; a history of past scores is post-MVP.
   - Routes: `mock_start` -> `mock_exam_generate` -> `memory_writer`; `mock_submit` -> `mock_exam_score` -> `update_mastery` -> `memory_writer`.
 - **UI:** create `tests/integration/ui/test_mock_exam.py` first: selecting **Mock Exam** and starting renders the questions (graph compiled with fakes, as in Step 12); switching back to **Coach** shows the coach conversation unchanged; submitting renders pass/fail and the per-theme breakdown; reloading after submitting shows the same result; a generation failure renders the "try again" message.
-  - Create `src/civica/ui/modes.py` with `AppMode(StrEnum)` (`COACH`, `MOCK_EXAM`) and add a Coach / Mock Exam `ui.toggle` to `src/civica/ui/app.py`. The mock exam uses its own thread (`f"{user_id}:mock_exam"`), so it never disturbs the coach conversation. Mock Exam mode: start button, 40 questions each as a `ui.radio`, submit, pass/fail plus per-theme scores. No countdown timer yet (Step 20). This mode calls the deterministic mock-exam path, not the planner.
+  - Create `src/civica/ui/modes.py` with `AppMode(StrEnum)` (`COACH`, `MOCK_EXAM`) and add a Coach / Mock Exam `ui.toggle` to `src/civica/ui/pages/coach.py`. The mock exam uses its own thread (`f"{user_id}:mock_exam"`), so it never disturbs the coach conversation. Create `src/civica/ui/pages/mock_exam.py` for Mock Exam mode: start button, 40 questions each as a `ui.radio`, submit, pass/fail plus per-theme scores. No countdown timer yet (Step 20). This mode calls the deterministic mock-exam path, not the planner.
 - **Check In:** Stop and confirm with user that the implementation is satisfactory. Prompt the user to run one mock exam in the UI (note the generation time and cost of 40 questions).
 
 - **README:**
@@ -1467,7 +1467,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - Add `STUDY_PLAN` to `PLANNER_WRITE_ALLOWLIST` (Step 10A) by hand. This is a deliberate widening: the plan is exactly the kind of narrative, revisable state an agent should own, and it carries no numeric score the agent could inflate in its own favor.
 - Planner tools: `read_study_plan() -> StudyPlan | None` (read at the start of every coach turn) and `revise_study_plan(...)` routed through `record_outcome`. The system prompt instructs the planner to read the plan first, act consistently with it, and revise it when the learner's state has moved.
 - **UI ("why this next"):** extend `tests/unit/ui/test_turn_view.py` first: the line comes from `StudyPlan.rationale` when a plan exists, and falls back to the turn's last tool call (highest `step_index`) when none does.
-  - Show the line above each coach turn in `src/civica/ui/app.py` (e.g. "Reviewing *Laïcité*: you missed a question here last session"). Read it from state; no branching logic in the UI.
+  - Show the line above each coach turn in `src/civica/ui/pages/coach.py` (e.g. "Reviewing *Laïcité*: you missed a question here last session"). Read it from state; no branching logic in the UI.
   - Show the current study plan (focus themes, next action) in the inspector panel.
 - **Check In:** Stop and confirm with the user that the study-plan record shape is right. Prompt the user to run two coaching sessions in the UI and confirm the second one follows the plan written in the first.
 
@@ -1498,7 +1498,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `CoverageReport` is a frozen pydantic model: `theme`, `covered: list[SourceRef]`, `gaps: list[SourceRef]`, `covered_fraction: float`.
 - Bind `get_coverage_gaps` as a planner tool so the planner can deliberately steer toward unseen material instead of re-teaching whatever retrieval happens to surface.
 - **UI (coverage readout):** create `tests/integration/ui/test_coverage.py` first: the readout renders one `covered_fraction` per theme for the logged-in user.
-  - Show per-theme coverage in `src/civica/ui/app.py`, e.g. "you have not seen 40% of this theme yet."
+  - Show per-theme coverage in `src/civica/ui/pages/inspector.py`, e.g. "you have not seen 40% of this theme yet."
 - **Check In:** Stop and confirm with the user that the coverage definition is right. "Taught" counts a section as covered once a grounded lesson cites it, not when the learner shows they read it. Prompt the user to confirm in the UI that the readout moves after a lesson on an unseen passage.
 
 - **README:**
@@ -1526,17 +1526,17 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Logout during an exam asks for confirmation. Cancelling keeps the exam and its draft answers; confirming signs out and discards the draft answers.
 - **Test:** extend `tests/integration/ui/test_inspector.py`
   - With the debug flag off, the inspector panel is hidden.
-- Extend `src/civica/ui/app.py`:
-  - **Onboarding capture (populates `LearnerProfile`):** whenever the signed-in user has no `LearnerProfile` (not only at first registration, so users who registered earlier are also asked), prompt for their study goal (free text) and write it via `memory.writer.put(user_id, "current", LearnerProfile(goal=...))`. This is the only writer of `LearnerProfile` in the plan; the `goal` field is bounded free-form prose (`max_length=500`) consumed as personalization context by the `teach`/`evaluate` prompts, not as branching logic. If onboarding is skipped, no `LearnerProfile` is written and reads return `None`; a skip flag in `app.storage.user` stops the prompt from reappearing on every visit.
-  - **Mock Exam timer:** 45-minute countdown with auto-submit at zero.
+- Extend the modules in `src/civica/ui/pages/`:
+  - **Onboarding capture (populates `LearnerProfile`), in `home.py`:** whenever the signed-in user has no `LearnerProfile` (not only at first registration, so users who registered earlier are also asked), prompt for their study goal (free text) and write it via `memory.writer.put(user_id, "current", LearnerProfile(goal=...))`. This is the only writer of `LearnerProfile` in the plan; the `goal` field is bounded free-form prose (`max_length=500`) consumed as personalization context by the `teach`/`evaluate` prompts, not as branching logic. If onboarding is skipped, no `LearnerProfile` is written and reads return `None`; a skip flag in `app.storage.user` stops the prompt from reappearing on every visit.
+  - **Mock Exam timer, in `mock_exam.py`:** 45-minute countdown with auto-submit at zero.
     - `mock_exam_generate` records `started_at` in checkpointed state, read through an injected clock. The UI derives the deadline from it, so a browser refresh does not reset the timer.
     - Update the countdown label with a `ui.timer(1.0, ...)`. The callback only reads the clock and updates the label, so it never blocks the page.
     - When the timer sees the deadline has passed, it submits the current answers. The submit handler re-checks the deadline server-side. Unanswered questions score as wrong.
-  - **Draft answers survive refresh:** save each pick to `app.storage.user` under the exam's `thread_id` as it is made, restore the picks when the page is built, and clear them on submit. A refresh therefore loses nothing, so no refresh warning is needed.
-  - **Logout during an exam:** the **Log out** button opens a `ui.dialog`: "You have an exam in progress. Logging out will discard your unsubmitted answers." Logout already should clear all per-user session storage (previous step), including the draft answers. The questions and `started_at` stay in the checkpointer.
-  - **No coaching during an exam:** disable the **Coach** toggle while the exam thread has questions and no result. The real exam is closed-book, so open coaching would make the mock score meaningless.
-  - **Inspector behind a flag:** hide the inspector drawer unless `CIVICA_DEBUG` is set, so learners see the coach and developers still see the trace.
-  - Layout polish for the learner: the Coach / Mock Exam picker and readable citations.
+  - **Draft answers survive refresh, in `mock_exam.py`:** save each pick to `app.storage.user` under the exam's `thread_id` as it is made, restore the picks when the page is built, and clear them on submit. A refresh therefore loses nothing, so no refresh warning is needed.
+  - **Logout during an exam, in `home.py`:** the **Log out** button opens a `ui.dialog`: "You have an exam in progress. Logging out will discard your unsubmitted answers." Logout already should clear all per-user session storage (previous step), including the draft answers. The questions and `started_at` stay in the checkpointer.
+  - **No coaching during an exam, in `coach.py`:** disable the **Coach** toggle while the exam thread has questions and no result. The real exam is closed-book, so open coaching would make the mock score meaningless.
+  - **Inspector behind a flag, in `inspector.py`:** hide the inspector drawer unless `CIVICA_DEBUG` is set, so learners see the coach and developers still see the trace.
+  - Layout polish for the learner, in `coach.py`: the Coach / Mock Exam picker and readable citations.
 
 - **Check In:** Stop and confirm with the user that the implementation is satisfactory. Manually exercise the full loop (register → onboarding → quiz a theme → mock exam) end-to-end before declaring MVP done.
 
