@@ -59,7 +59,22 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
 
 ```
 
-### Planner Graph
+### Learner Graph
+
+Every turn enters through `route_input` and every path ends at `memory_writer`, which persists a summary of the turn. 
+
+```
+START ─► route_input
+           │
+           └─ message ────────────► planner loop (below) ──────────────► memory_writer ─► END
+```
+
+
+### Planner Loop
+
+`start_turn` clears the previous turn's messages and step count.
+`planner_model` makes one model call and `planner_tools` runs the tools it asked for. The two repeat until the model sends a final message. 
+A fallback lesson will be served if `MAX_PLANNER_STEPS` is exceeded or if there is a write outside the planner's allowlist.
 
 ```
                            ┌─────────────────┐   tool call    ┌───────────────┐
@@ -74,16 +89,12 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
                                ▼                       ▼
                              exit                    exit
 ```
-
-`start_turn` clears the previous turn's messages and step count.
-`planner_model` makes one model call and `planner_tools` runs the tools it asked for. The two repeat until the model sends a final message. 
-A fallback lesson will be served if `MAX_PLANNER_STEPS` is exceeded or if there is a write outside the planner's allowlist.
-
-The loop is built from LangGraph nodes rather than custom Python to ensure:
-- Progress is checkpointed after every tool step, so a crash can resume mid-turn.
+The planner loop is built from LangGraph nodes rather than custom Python to ensure:
+- Progress is checkpointed after every tool step so that a crash can resume mid-turn.
 - Each step can be streamed to the UI as it happens.
 - The graph can pause before a tool runs (human-in-the-loop interrupts).
 - Each step is visible in LangGraph tooling.
+
 
 ### Technology
 
@@ -279,10 +290,10 @@ civica/
   ├── src/civica/               # application package
   │     ├── assessment/         # quiz and mock exam generation and scoring
   │     ├── db/                 # connection pool and schema migration
-  │     ├── domain/             # pure business logic, no I/O
+  │     ├── domain/             # official exam constants and core data models
   │     ├── embeddings/         # embedding client shared by ingestion and retrieval
-  │     ├── explanation/        # corpus-grounded explanations for learner questions
-  │     ├── graph/              # LLM planner that picks what to teach or quiz next
+  │     ├── explanation/        # corpus-grounded explanations
+  │     ├── graph/              # orchestrates each coaching turn
   │     ├── ingestion/          # corpus chunking and persistence into pgvector
   │     ├── llm/                # chat-model factory shared by generation engines
   │     ├── memory/             # orchestration of short and long-term memory

@@ -5,12 +5,19 @@ store. No network, no database.
 """
 
 from civica.domain.themes import SYSTEME_INSTITUTIONNEL_ET_POLITIQUE
-from civica.graph.planner import MAX_PLANNER_STEPS, PROFILE_KEY, read_learner_state
-from civica.memory.records import LearnerProfile
+from civica.graph.planner import (
+    MAX_PLANNER_STEPS,
+    PROFILE_KEY,
+    SUMMARY_KEY,
+    read_learner_state,
+)
+from civica.memory.records import LearnerProfile, SessionSummary
 from civica.memory.writer import put
 from tests.support.memory import FULL_MASTERY, HALF_MASTERY, seed_mastery
 from tests.support.planner import DEFAULT_THEME, GOAL, MISTAKE, SAMPLE_KEY, PlannerFakes
 from tests.support.users import USER_ID
+
+SUMMARY = "sample-session-summary"
 
 # The longest scripted turn in test_planner_graph.py: three model replies, the last a final message.
 LONGEST_SCRIPTED_TURN = 3
@@ -42,3 +49,11 @@ class TestReadLearnerState:
         assert state.mastery == {}
         assert state.mistakes == ()
         assert state.goal is None
+        assert state.last_session is None
+
+    def test_returns_the_last_session_summary(self, planner_fakes: PlannerFakes) -> None:
+        put(USER_ID, SUMMARY_KEY, SessionSummary(summary=SUMMARY), planner_fakes.store)
+
+        state = read_learner_state(USER_ID, planner_fakes.store)
+
+        assert state.last_session == SUMMARY

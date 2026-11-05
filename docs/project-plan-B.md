@@ -675,6 +675,7 @@ _This step was added and implemented after some of the subsequent steps, but thi
     - Password rules: 8 to 72 characters, any characters allowed (spaces and accents included). 72 is really a byte limit, so accented letters use it up faster. Rejects about 50 very common passwords (including a few French ones) and a password equal to the username. Kept the minimum at 8 rather than the 15 that NIST now recommends when a password is the only sign-in factor, since the app holds study progress, not sensitive data.
     - Renamed `tests/integration/ui/test_app.py` to `test_auth.py` because many new web app tests will be added as functionality is added and I don't want them all thrown together in a giant integration test file.
     - Extracted a shared `TEST_BCRYPT_ROUNDS` to `tests/support/users.py` to avoid this being defined in multiple places.
+    - Extracted UI functionality into separate modules to clarify the entrypoint and so that subsequent functionality would not crowd a single file: `src/ui/app.py`.
 
 ---
 
@@ -1136,7 +1137,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 11: Graph assembly and persistence
+## ✅ Step 11: Graph assembly and persistence
 
 **Goal:** Coach turns run end to end against the dev database. To support this, the full graph must be compiled on Postgres (checkpointer + store) with an input router and a `memory_writer` terminal node.
 
@@ -1183,6 +1184,11 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Graph input is `{"kind": InputKind.MESSAGE, "learner_message": ...}`, with no `mode` key because modes have been removed at this point. Later kinds add an `InputKind` member and a `_ROUTES` entry.
+    - The session summary is a deterministic recap of turn outcomes, written only by `memory_writer` and read through `read_learner_state`. An LLM-written recap is written up in the backlog so that it can be implemented when deemed necessary.
+    - `get_saver` registers checkpointed types in `_STATE_TYPES` (`memory/checkpointer.py`), because unlisted types are blocked on read. Every step that adds a type to checkpointed state must add it there.
+    - Tool `theme` parameters use the `ThemeSlug` enum to ensure that the LLM is using only the official slugs.
+    - `WRITING_STYLE` was extracted from the planner and explanation prompts so there is one place that directs the grammar and tone instructions when the LLM response should be prose in natural language. (It's not relevant for responses that are not user-facing such as JSON.)
 
 ---
 
@@ -1385,6 +1391,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - **Test:** `tests/unit/graph/test_mastery.py`: mastery is the correct share of the learner's last 20 answers on the theme (fewer answers use what exists; no answers leaves mastery unwritten).
 - Add to `src/civica/graph/nodes.py`:
   - The `answer` input carries the `question_id` it answers, and `score_answer` first checks that id is in the checkpointed `quiz_questions`. If not (the learner moved on and the quiz was cleared, or the id is unknown), it replies that the question has expired and routes straight to `memory_writer` without scoring.
+  - Register any new type held in checkpointed state (such as the answer result) in `_STATE_TYPES` in `memory/checkpointer.py`, and add the `answer` member to `InputKind`.
   - Checkpointed state keeps each answered question's result (`answered: dict[question_id, result]`), cleared with `quiz_questions` in `start_turn`. `score_answer` rejects an id already in it with an "already answered" reply, routed straight to `memory_writer`. The UI lock below is the visible part; this check is what enforces it.
   - `score_answer`: rebuilds the `Quiz` from the checkpointed `quiz_questions` with `deps.answer_logger` (Step 10B keeps only serializable data in state), then scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (Step 9). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
   - `explain_answer` (wrong answers only): calls `explain()` with a prompt built from the question, the chosen option, and the correct option. Its `retriever` is `search` pinned to the question's `sources`, so the explanation is grounded in the passages the question was generated from. One LLM call per wrong answer; correct answers cost nothing extra. Step 22's teaching strategy can later plug in here.
@@ -1419,6 +1426,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `mock_submit` reports pass/fail and **writes 40 `quiz_answers` rows**, and `topic_mastery` moves for every theme the exam covered. A mock exam that scores without logging would silently discard the densest signal the system gets.
   - Mock exam failure: when the critic cannot fill a theme, `mock_exam_generate` retries once, then returns a "try again" message, saving no questions and no `quiz_answers` rows.
 - Add to `src/civica/graph/nodes.py`:
+  - Register any new type held in checkpointed state (such as the exam and its result) in `_STATE_TYPES` in `memory/checkpointer.py`, and add the `mock_start` and `mock_submit` members to `InputKind`.
   - `mock_exam_generate`: calls `generate_mock_exam`. It raises `QuestionGenerationError` when the critic cannot fill a theme and saves nothing; retry once, then show a "try again" message rather than crash the graph.
   - `mock_exam_score`: scores via `MockExam.score`, which logs all 40 answers and then runs `update_mastery` like any other assessed path. The result (pass/fail and per-theme scores) stays in the exam thread's checkpointed state, so the UI can render it again after a reload. Only the latest exam is kept; a history of past scores is post-MVP.
   - Routes: `mock_start` -> `mock_exam_generate` -> `memory_writer`; `mock_submit` -> `mock_exam_score` -> `update_mastery` -> `memory_writer`.
@@ -1527,7 +1535,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - **Test:** extend `tests/integration/ui/test_inspector.py`
   - With the debug flag off, the inspector panel is hidden.
 - Extend the modules in `src/civica/ui/pages/`:
-  - **Onboarding capture (populates `LearnerProfile`), in `home.py`:** whenever the signed-in user has no `LearnerProfile` (not only at first registration, so users who registered earlier are also asked), prompt for their study goal (free text) and write it via `memory.writer.put(user_id, "current", LearnerProfile(goal=...))`. This is the only writer of `LearnerProfile` in the plan; the `goal` field is bounded free-form prose (`max_length=500`) consumed as personalization context by the `teach`/`evaluate` prompts, not as branching logic. If onboarding is skipped, no `LearnerProfile` is written and reads return `None`; a skip flag in `app.storage.user` stops the prompt from reappearing on every visit.
+  - **Onboarding capture (populates `LearnerProfile`), in `home.py`:** whenever the signed-in user has no `LearnerProfile` (not only at first registration, so users who registered earlier are also asked), prompt for their study goal (free text) and write it via `memory.writer.put(user_id, PROFILE_KEY, LearnerProfile(goal=...))`, using the same `PROFILE_KEY` that `read_learner_state` reads. This is the only writer of `LearnerProfile` in the plan; the `goal` field is bounded free-form prose (`max_length=500`) consumed as personalization context by the `teach`/`evaluate` prompts, not as branching logic. If onboarding is skipped, no `LearnerProfile` is written and reads return `None`; a skip flag in `app.storage.user` stops the prompt from reappearing on every visit.
   - **Mock Exam timer, in `mock_exam.py`:** 45-minute countdown with auto-submit at zero.
     - `mock_exam_generate` records `started_at` in checkpointed state, read through an injected clock. The UI derives the deadline from it, so a browser refresh does not reset the timer.
     - Update the countdown label with a `ui.timer(1.0, ...)`. The callback only reads the clock and updates the label, so it never blocks the page.

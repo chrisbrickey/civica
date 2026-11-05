@@ -4,6 +4,8 @@ A prompt's language reflects the desired language of the LLM output."""
 
 from dataclasses import dataclass
 
+from civica.llm.style import WRITING_STYLE
+
 
 @dataclass(frozen=True)
 class ExplanationPrompts:
@@ -19,11 +21,12 @@ class ExplanationPrompts:
 
 # Bump version whenever any prompt here changes.
 EXPLANATION_PROMPTS = ExplanationPrompts(
-    version="explanation-v001",
+    version="explanation-v002",
     system=(
         "You are a coach helping a learner prepare for the French naturalization civics exam. "
         "Use only the provided passages. Do not draw on outside knowledge. "
-        "Respond in English, retaining key French vocabulary the learner will need to recognize on the exam."
+        "Respond in English, retaining key French vocabulary the learner will need to recognize on the exam. "
+        f"{WRITING_STYLE}"
     ),
     human_template="Learner question: {question}\n\nOfficial passages:\n{passages}",
 )

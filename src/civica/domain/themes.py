@@ -2,6 +2,8 @@
 Five official civic education themes per https://formation-civique.interieur.gouv.fr/.
 """
 
+from enum import StrEnum
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -57,6 +59,9 @@ THEMES_BY_SLUG: dict[str, Theme] = {
         VIVRE_DANS_LA_SOCIETE_FRANCAISE,
     ]
 }
+
+# The official slugs as an enum, so tool schemas can list them for the model.
+ThemeSlug = StrEnum("ThemeSlug", {slug: slug for slug in THEMES_BY_SLUG})  # type: ignore[misc]
 
 # Official mock exam structure:
 # 40 questions in total (including all knowledge and scenario questions) spread across all official themes

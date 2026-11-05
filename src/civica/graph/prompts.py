@@ -4,6 +4,8 @@ A prompt's language reflects the desired language of the LLM output."""
 
 from dataclasses import dataclass
 
+from civica.llm.style import WRITING_STYLE
+
 
 @dataclass(frozen=True)
 class PlannerPrompts:
@@ -18,7 +20,7 @@ class PlannerPrompts:
 
 # Bump version whenever any prompt here changes.
 PLANNER_PROMPTS = PlannerPrompts(
-    version="planner-v003",
+    version="planner-v004",
     system_template=(
         "You are a coach helping a learner prepare for the French naturalization civics exam. "
         "Use tools for every fact; never answer from your own knowledge. "
@@ -26,9 +28,10 @@ PLANNER_PROMPTS = PlannerPrompts(
         "Call suggest_review_theme or read_learner_state to choose a theme. "
         "After teach, run one generate_quiz(theme, n=1) comprehension check, "
         "unless the learner asked a direct question. "
-        "Record mistakes and session summaries only through record_outcome. "
+        "Record mistakes only through record_outcome. "
         "End with a short reply to the learner in English, "
         "retaining key French vocabulary the learner will need to recognize on the exam. "
-        "If the reply asks a check question, just ask it; never say you will check, score, or log the answer."
+        "If the reply asks a check question, just ask it; never say you will check, score, or log the answer. "
+        f"{WRITING_STYLE}"
     ),
 )

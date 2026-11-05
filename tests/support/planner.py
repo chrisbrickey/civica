@@ -15,7 +15,9 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 
+from civica.assessment.critic import CritiqueFn
 from civica.domain.themes import DROITS_ET_DEVOIRS
+from civica.graph.planner import PlannerDeps
 from civica.graph.trace import RetrievalGap, TraceStep
 from civica.memory.records import MistakeEpisode
 
@@ -81,6 +83,10 @@ class FakePlannerModel(FakeChatModelBase):
         self._bound_tools = list(tools)
         return self  # type: ignore[return-value]
 
+    def bound_tools(self) -> list[ToolLike]:
+        """The tools the planner offered the model."""
+        return self._bound_tools
+
     def offered_tools(self) -> dict[str, dict[str, Any]]:  # type: ignore[explicit-any]
         """Each bound tool's name mapped to its JSON-schema parameters."""
         functions = [convert_to_openai_tool(tool)["function"] for tool in self._bound_tools]
@@ -130,3 +136,20 @@ class PlannerFakes:
     answer_logger: FakeAnswerLogger
     rejection_store: FakeRejectionStore
     trace: FakeTraceWriter
+
+
+def planner_deps(
+    fakes: PlannerFakes, planner_model: FakePlannerModel, critic: CritiqueFn | None = None
+) -> PlannerDeps:
+    """Planner dependencies with every seam faked."""
+    return PlannerDeps(
+        planner_model=planner_model,
+        store=fakes.store,
+        content_model=fakes.content_model,
+        retriever=fakes.retriever,
+        question_store=fakes.question_store,
+        answer_logger=fakes.answer_logger,
+        critic=critic,
+        rejection_store=fakes.rejection_store,
+        trace=fakes.trace,
+    )
