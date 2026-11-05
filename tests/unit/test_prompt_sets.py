@@ -12,6 +12,7 @@ import pytest
 from civica.assessment.prompts import QUIZ_PROMPTS
 from civica.explanation.prompts import EXPLANATION_PROMPTS
 from civica.graph.prompts import PLANNER_PROMPTS
+from civica.llm.style import WRITING_STYLE
 from tests.support.prompts import prompt_text_hash
 
 if TYPE_CHECKING:
@@ -20,8 +21,8 @@ if TYPE_CHECKING:
 # Editing a prompt means bumping its set's version and re-pinning the hash here, together.
 _PINS: list[tuple["DataclassInstance", str, str]] = [
     (QUIZ_PROMPTS, "quiz-v004", "92d4cd828fe7ae437dc1eb5ee57abdd4e5549b269794e6ac0cb84495e3727702"),
-    (PLANNER_PROMPTS, "planner-v003", "72780e00633f172dbc21048b59fdf42a79eada5529fd3f0e87d983efa36c8aa8"),
-    (EXPLANATION_PROMPTS, "explanation-v001", "4c7a28ecf0f4646688feb4ff83016ede2f399b962c1cbfaf414a7da53f055da4"),
+    (PLANNER_PROMPTS, "planner-v004", "0fb20a6a2c1240a0d96a6969c40ba005949d6db41ce27d1bd7744409492bf8c0"),
+    (EXPLANATION_PROMPTS, "explanation-v002", "de590047f994ac36b07f3fe51837addd190f5ae81d0b7a0cc2aa83fd8476a28e"),
 ]
 _PIN_IDS = ["quiz", "planner", "explanation"]
 
@@ -114,6 +115,10 @@ class TestRenderMethods:
 
     def test_planner_system_is_fully_rendered(self) -> None:
         assert "{" not in PLANNER_PROMPTS.system()
+
+    def test_english_coach_prompts_carry_the_shared_writing_style(self) -> None:
+        assert WRITING_STYLE in PLANNER_PROMPTS.system()
+        assert WRITING_STYLE in EXPLANATION_PROMPTS.system
 
     def test_explanation_human_carries_its_arguments(self) -> None:
         text = EXPLANATION_PROMPTS.human(question=_SAMPLE_QUESTION, passages=_SAMPLE_BODY)

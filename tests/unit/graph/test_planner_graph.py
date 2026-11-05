@@ -19,6 +19,7 @@ from civica.assessment.critic import CritiqueFn
 from civica.domain.themes import (
     EXAM_QUESTION_COUNTS,
     HISTOIRE_GEOGRAPHIE_ET_CULTURE,
+    THEMES_BY_SLUG,
     VIVRE_DANS_LA_SOCIETE_FRANCAISE,
 )
 from civica.graph.nodes import PlannerContext, build_planner_graph
@@ -26,13 +27,13 @@ from civica.graph.planner import (
     MAX_PLANNER_STEPS,
     MAX_QUIZ_QUESTIONS,
     PROFILE_KEY,
+    SUMMARY_KEY,
     HaltReason,
-    PlannerDeps,
     ToolCall,
 )
 from civica.graph.prompts import PLANNER_PROMPTS
 from civica.graph.trace import RetrievalGap, TraceStep
-from civica.memory.records import LearnerProfile, MistakeEpisode, TopicMastery
+from civica.memory.records import LearnerProfile, MistakeEpisode, SessionSummary, TopicMastery
 from civica.memory.writer import get, list_records, put
 from tests.support.assessment import FakeRetriever, reject_all_critic
 from tests.support.memory import (
@@ -51,6 +52,7 @@ from tests.support.planner import (
     PlannerFakes,
     final_message,
     parallel_tool_calls,
+    planner_deps,
     tool_call,
 )
 from tests.support.users import USER_ID
@@ -69,6 +71,7 @@ UNKNOWN_THEME_SLUG = "sample-unknown-theme"
 UNKNOWN_KIND = "sample-unknown-kind"
 UNKNOWN_TOOL = "sample-unknown-tool"
 SAMPLE_ARG_VALUE = "sample-arg-value"
+SUMMARY = "sample-session-summary"
 
 SUGGESTED_THEME = VIVRE_DANS_LA_SOCIETE_FRANCAISE
 MULTI_QUERY_THEME = HISTOIRE_GEOGRAPHIE_ET_CULTURE
@@ -130,27 +133,11 @@ PlannerGraph = CompiledStateGraph[Any, PlannerContext, Any, Any]  # type: ignore
 # ---------------------------------------------------------------------------
 
 
-def _deps(
-    fakes: PlannerFakes, planner_model: FakePlannerModel, critic: CritiqueFn | None = None
-) -> PlannerDeps:
-    return PlannerDeps(
-        planner_model=planner_model,
-        store=fakes.store,
-        content_model=fakes.content_model,
-        retriever=fakes.retriever,
-        question_store=fakes.question_store,
-        answer_logger=fakes.answer_logger,
-        critic=critic,
-        rejection_store=fakes.rejection_store,
-        trace=fakes.trace,
-    )
-
-
 def _compile(
     fakes: PlannerFakes, planner_model: FakePlannerModel, critic: CritiqueFn | None = None
 ) -> PlannerGraph:
     """The planner subgraph, compiled once so several turns can share a thread."""
-    return build_planner_graph(_deps(fakes, planner_model, critic)).compile(
+    return build_planner_graph(planner_deps(fakes, planner_model, critic)).compile(
         checkpointer=InMemorySaver(), store=fakes.store
     )
 
@@ -235,6 +222,16 @@ class TestToolSet:
 
         for name, parameters in model.offered_tools().items():
             assert not INJECTED_PARAMS & set(parameters.get("properties", {})), name
+
+    @pytest.mark.parametrize("name", [RETRIEVE, TEACH, GENERATE_QUIZ])
+    def test_theme_parameter_lists_the_official_slugs(
+        self, planner_fakes: PlannerFakes, name: str
+    ) -> None:
+        model = _scripted(final_message(FINAL_TEXT))
+
+        _run(planner_fakes, model)
+
+        assert set(model.offered_tools()[name]["properties"]["theme"]["enum"]) == set(THEMES_BY_SLUG)
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +481,18 @@ class TestComprehensionCheck:
         check = re.compile(rf"\b{TEACH}\b.*\b{GENERATE_QUIZ}\(\w+, n={COMPREHENSION_CHECK_SIZE}\)")
         assert any(check.search(text) for text in model.system_texts())
 
+    def test_model_is_not_asked_to_record_session_summaries(self, planner_fakes: PlannerFakes) -> None:
+        """memory_writer owns the summary, so a planner write would only waste a step."""
+        model = _scripted(final_message(FINAL_TEXT))
+
+        _run(planner_fakes, model)
+
+        record_tool = next(
+            tool for tool in model.bound_tools() if getattr(tool, "name", None) == RECORD
+        )
+        for text in (*model.system_texts(), str(getattr(record_tool, "description"))):
+            assert "summar" not in text.lower()
+
     def test_rejected_check_still_completes_with_the_lesson(self, planner_fakes: PlannerFakes) -> None:
         model = _scripted(
             _teach("call-teach"),
@@ -568,7 +577,7 @@ class TestBadToolArguments:
         assert state[HALT_REASON] == HaltReason.FINAL_MESSAGE
         assert state[REPLY] == FINAL_TEXT
         assert state[LESSON] is None
-        assert model.tool_output("call-teach")
+        assert DEFAULT_THEME.slug in model.tool_output("call-teach")
         assert planner_fakes.retriever.calls == []
         assert planner_fakes.content_model.invocation_count == 0
 
@@ -603,6 +612,14 @@ class TestReadTools:
         _run(planner_fakes, model)
 
         assert GOAL in model.tool_output("call-state")
+
+    def test_read_learner_state_shows_the_last_session(self, planner_fakes: PlannerFakes) -> None:
+        put(USER_ID, SUMMARY_KEY, SessionSummary(summary=SUMMARY), planner_fakes.store)
+        model = _scripted(tool_call(READ_STATE, "call-state"), final_message(FINAL_TEXT))
+
+        _run(planner_fakes, model)
+
+        assert SUMMARY in model.tool_output("call-state")
 
 
 # ---------------------------------------------------------------------------

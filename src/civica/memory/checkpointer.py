@@ -9,12 +9,13 @@ so it stays open for the life of the process.
 setup() runs once, on first construction, to create LangGraph's checkpoint DB tables.
 """
 
-from typing import cast
+from typing import Final, cast
 
 import psycopg
 import psycopg.rows
 import psycopg_pool
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from civica.db.pool import get_pool
 
@@ -26,11 +27,23 @@ _saver: PostgresSaver | None = None
 _DictPool = psycopg_pool.ConnectionPool[psycopg.Connection[psycopg.rows.DictRow]]
 
 
+# Our types held in checkpointed state. Reads refuse any other type, so add new state types here.
+_STATE_TYPES: Final = (
+    ("civica.domain.question", "Question"),
+    ("civica.domain.question", "QuestionKind"),
+    ("civica.explanation.engine", "Explanation"),
+    ("civica.graph.graph", "InputKind"),
+    ("civica.graph.planner", "ToolCall"),
+    ("civica.graph.trace", "HaltReason"),
+)
+
+
 def get_saver() -> PostgresSaver:
     """Return the singleton PostgresSaver, creating and setting it up once."""
     global _saver
     if _saver is None:
-        saver = PostgresSaver(cast(_DictPool, get_pool()))
+        serde = JsonPlusSerializer(allowed_msgpack_modules=_STATE_TYPES)
+        saver = PostgresSaver(cast(_DictPool, get_pool()), serde=serde)
         saver.setup()
         _saver = saver
     return _saver

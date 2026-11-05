@@ -12,6 +12,7 @@ from civica.domain.themes import (
     THEMES_BY_SLUG,
     VIVRE_DANS_LA_SOCIETE_FRANCAISE,
     Theme,
+    ThemeSlug,
 )
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,14 @@ EXPECTED_SCENARIO_COUNTS = {
 
 def test_from_slug_happy_path() -> None:
     assert Theme.from_slug(KNOWN_SLUG) is DROITS_ET_DEVOIRS
+
+
+def test_from_slug_accepts_a_theme_slug_member() -> None:
+    assert Theme.from_slug(ThemeSlug(KNOWN_SLUG)) is DROITS_ET_DEVOIRS
+
+
+def test_theme_slug_lists_exactly_the_official_slugs() -> None:
+    assert {slug.value for slug in ThemeSlug} == set(EXPECTED_CONSTANTS_BY_SLUG)
 
 
 # ---------------------------------------------------------------------------
