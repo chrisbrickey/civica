@@ -18,14 +18,21 @@ from nicegui.testing import User
 
 from civica.domain.user import UserId
 from civica.users.service import register
+from tests.support.ui import (
+    PASSWORD,
+    PASSWORD_MARKER,
+    SIGN_IN_MARKER,
+    USERNAME,
+    USERNAME_MARKER,
+    fill_sign_in_form,
+    sign_in,
+)
 from tests.support.users import TEST_BCRYPT_ROUNDS
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_USERNAME = "test-user"
-_PASSWORD = "sample-password"
 _WRONG_PASSWORD = "wrong-password"
 _OTHER_PASSWORD = "other-password"
 _UNKNOWN_USERNAME = "nobody-registered"
@@ -34,7 +41,7 @@ _UNKNOWN_USERNAME = "nobody-registered"
 _UNDER_LENGTH_PASSWORD = "a" * 7
 _OVER_LENGTH_PASSWORD = "a" * 73
 
-_SIGNED_IN_TEXT = f"Signed in as {_USERNAME}"
+_SIGNED_IN_TEXT = f"Signed in as {USERNAME}"
 _SIGN_IN_FAILED_TEXT = "Wrong username or password."
 _USERNAME_TAKEN_TEXT = "That username is taken."
 _PASSWORD_MISMATCH_TEXT = "Passwords do not match."
@@ -50,10 +57,7 @@ _MISSING_INPUT_TEXT = "Enter a username and a password."
 # A stylesheet the login page needs before anyone has signed in.
 _NICEGUI_ASSET_PATH = f"/_nicegui/{nicegui.__version__}/static/nicegui.css"
 
-_USERNAME_MARKER = "username"
-_PASSWORD_MARKER = "password"
 _CONFIRM_PASSWORD_MARKER = "confirm-password"
-_SIGN_IN_MARKER = "sign-in"
 _REGISTER_LINK_MARKER = "register-link"
 _SIGN_IN_LINK_MARKER = "sign-in-link"
 _CREATE_ACCOUNT_MARKER = "create-account"
@@ -87,7 +91,7 @@ def _count_users(conn: psycopg.Connection[psycopg.rows.TupleRow]) -> int:
 
 
 def _register_directly(conn: psycopg.Connection[psycopg.rows.TupleRow]) -> UserId:
-    return register(_USERNAME, _PASSWORD, conn=conn, rounds=TEST_BCRYPT_ROUNDS)
+    return register(USERNAME, PASSWORD, conn=conn, rounds=TEST_BCRYPT_ROUNDS)
 
 
 def _stored_user_id(conn: psycopg.Connection[psycopg.rows.TupleRow], username: str) -> UUID:
@@ -102,23 +106,12 @@ async def _redirect_location(user: User, path: str) -> str | None:
     return response.headers.get("location") if response.is_redirect else None
 
 
-async def _fill_sign_in_form(user: User, username: str, password: str) -> None:
-    await user.open("/login")
-    user.find(marker=_USERNAME_MARKER).type(username)
-    user.find(marker=_PASSWORD_MARKER).type(password)
-
-
-async def _sign_in(user: User, username: str, password: str) -> None:
-    await _fill_sign_in_form(user, username, password)
-    user.find(marker=_SIGN_IN_MARKER).click()
-
-
 async def _fill_account_form(
     user: User, username: str, password: str, confirmation: str | None = None
 ) -> None:
     await user.open("/register")
-    user.find(marker=_USERNAME_MARKER).type(username)
-    user.find(marker=_PASSWORD_MARKER).type(password)
+    user.find(marker=USERNAME_MARKER).type(username)
+    user.find(marker=PASSWORD_MARKER).type(password)
     user.find(marker=_CONFIRM_PASSWORD_MARKER).type(
         password if confirmation is None else confirmation
     )
@@ -133,7 +126,7 @@ async def _create_account(
 
 async def _log_out(user: User) -> None:
     user.find(marker=_LOGOUT_MARKER).click()
-    await user.should_see(marker=_SIGN_IN_MARKER)
+    await user.should_see(marker=SIGN_IN_MARKER)
 
 
 # modules that log registration, sign-in, and logout
@@ -177,7 +170,7 @@ async def test_unauthenticated_visit_redirects_to_login(ui_user: User) -> None:
     assert await _redirect_location(ui_user, "/") == "/login"
 
     await ui_user.open("/")
-    await ui_user.should_see(marker=_SIGN_IN_MARKER)
+    await ui_user.should_see(marker=SIGN_IN_MARKER)
 
 
 async def test_register_page_is_reachable_without_signing_in(ui_user: User) -> None:
@@ -200,7 +193,7 @@ async def test_sign_in_with_correct_password_signs_in(
 ) -> None:
     _register_directly(db_schema)
 
-    await _sign_in(ui_user, _USERNAME, _PASSWORD)
+    await sign_in(ui_user, USERNAME, PASSWORD)
 
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
@@ -210,8 +203,8 @@ async def test_enter_key_signs_in(
 ) -> None:
     _register_directly(db_schema)
 
-    await _fill_sign_in_form(ui_user, _USERNAME, _PASSWORD)
-    ui_user.find(marker=_PASSWORD_MARKER).trigger("keydown.enter")
+    await fill_sign_in_form(ui_user, USERNAME, PASSWORD)
+    ui_user.find(marker=PASSWORD_MARKER).trigger("keydown.enter")
 
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
@@ -221,7 +214,7 @@ async def test_sign_in_with_wrong_password_shows_error_and_stays_on_login(
 ) -> None:
     _register_directly(db_schema)
 
-    await _sign_in(ui_user, _USERNAME, _WRONG_PASSWORD)
+    await sign_in(ui_user, USERNAME, _WRONG_PASSWORD)
 
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
     await ui_user.should_not_see(_SIGNED_IN_TEXT)
@@ -231,7 +224,7 @@ async def test_sign_in_with_wrong_password_shows_error_and_stays_on_login(
 async def test_sign_in_with_unknown_username_shows_error_and_creates_no_user(
     ui_user: User, db_schema: psycopg.Connection[psycopg.rows.TupleRow]
 ) -> None:
-    await _sign_in(ui_user, _UNKNOWN_USERNAME, _PASSWORD)
+    await sign_in(ui_user, _UNKNOWN_USERNAME, PASSWORD)
 
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
     assert _count_users(db_schema) == 0
@@ -243,14 +236,14 @@ async def test_sign_in_with_over_length_password_shows_error(
 ) -> None:
     _register_directly(db_schema)
 
-    await _sign_in(ui_user, _USERNAME, _OVER_LENGTH_PASSWORD)
+    await sign_in(ui_user, USERNAME, _OVER_LENGTH_PASSWORD)
 
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
     assert await _redirect_location(ui_user, "/") == "/login"
 
 
 async def test_sign_in_with_empty_input_shows_error(ui_user: User) -> None:
-    await _sign_in(ui_user, "", "")
+    await sign_in(ui_user, "", "")
 
     await ui_user.should_see(_MISSING_INPUT_TEXT)
 
@@ -284,7 +277,7 @@ async def test_registration_page_shows_username_rules(ui_user: User) -> None:
 async def test_invalid_username_shows_rules_and_creates_no_user(
     ui_user: User, db_schema: psycopg.Connection[psycopg.rows.TupleRow]
 ) -> None:
-    await _create_account(ui_user, _INVALID_USERNAME, _PASSWORD)
+    await _create_account(ui_user, _INVALID_USERNAME, PASSWORD)
 
     await ui_user.should_see(_USERNAME_RULES_ERROR_TEXT)
     assert _count_users(db_schema) == 0
@@ -293,7 +286,7 @@ async def test_invalid_username_shows_rules_and_creates_no_user(
 async def test_common_password_shows_error_and_creates_no_user(
     ui_user: User, db_schema: psycopg.Connection[psycopg.rows.TupleRow]
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _COMMON_PASSWORD)
+    await _create_account(ui_user, USERNAME, _COMMON_PASSWORD)
 
     await ui_user.should_see(_COMMON_PASSWORD_TEXT)
     assert _count_users(db_schema) == 0
@@ -304,13 +297,13 @@ async def test_sign_in_link_returns_to_sign_in_page(ui_user: User) -> None:
 
     ui_user.find(marker=_SIGN_IN_LINK_MARKER).click()
 
-    await ui_user.should_see(marker=_SIGN_IN_MARKER)
+    await ui_user.should_see(marker=SIGN_IN_MARKER)
 
 
 async def test_create_account_registers_and_signs_in(
     ui_user: User, db_schema: psycopg.Connection[psycopg.rows.TupleRow]
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _PASSWORD)
+    await _create_account(ui_user, USERNAME, PASSWORD)
 
     await ui_user.should_see(_SIGNED_IN_TEXT)
     assert _count_users(db_schema) == 1
@@ -321,7 +314,7 @@ async def test_create_account_with_taken_username_shows_error(
 ) -> None:
     _register_directly(db_schema)
 
-    await _create_account(ui_user, _USERNAME, _OTHER_PASSWORD)
+    await _create_account(ui_user, USERNAME, _OTHER_PASSWORD)
 
     await ui_user.should_see(_USERNAME_TAKEN_TEXT)
     assert _count_users(db_schema) == 1
@@ -331,7 +324,7 @@ async def test_create_account_with_taken_username_shows_error(
 async def test_mismatched_confirmation_shows_error_and_creates_no_user(
     ui_user: User, db_schema: psycopg.Connection[psycopg.rows.TupleRow]
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _PASSWORD, confirmation=_OTHER_PASSWORD)
+    await _create_account(ui_user, USERNAME, PASSWORD, confirmation=_OTHER_PASSWORD)
 
     await ui_user.should_see(_PASSWORD_MISMATCH_TEXT)
     assert _count_users(db_schema) == 0
@@ -340,7 +333,7 @@ async def test_mismatched_confirmation_shows_error_and_creates_no_user(
 async def test_under_length_password_shows_rules_and_creates_no_user(
     ui_user: User, db_schema: psycopg.Connection[psycopg.rows.TupleRow]
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _UNDER_LENGTH_PASSWORD)
+    await _create_account(ui_user, USERNAME, _UNDER_LENGTH_PASSWORD)
 
     await ui_user.should_see(_PASSWORD_RULES_ERROR_TEXT)
     assert _count_users(db_schema) == 0
@@ -349,7 +342,7 @@ async def test_under_length_password_shows_rules_and_creates_no_user(
 async def test_over_length_password_shows_rules_and_creates_no_user(
     ui_user: User, db_schema: psycopg.Connection[psycopg.rows.TupleRow]
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _OVER_LENGTH_PASSWORD)
+    await _create_account(ui_user, USERNAME, _OVER_LENGTH_PASSWORD)
 
     await ui_user.should_see(_PASSWORD_RULES_ERROR_TEXT)
     assert _count_users(db_schema) == 0
@@ -370,34 +363,34 @@ async def test_create_account_with_empty_input_shows_error_and_creates_no_user(
 
 
 async def test_refresh_keeps_user_signed_in(ui_user: User) -> None:
-    await _create_account(ui_user, _USERNAME, _PASSWORD)
+    await _create_account(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
     await ui_user.open("/")
 
     await ui_user.should_see(_SIGNED_IN_TEXT)
-    await ui_user.should_not_see(marker=_SIGN_IN_MARKER)
+    await ui_user.should_not_see(marker=SIGN_IN_MARKER)
 
 
 async def test_logout_shows_login_and_blocks_signed_in_page(ui_user: User) -> None:
-    await _create_account(ui_user, _USERNAME, _PASSWORD)
+    await _create_account(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
     ui_user.find(marker=_LOGOUT_MARKER).click()
 
-    await ui_user.should_see(marker=_SIGN_IN_MARKER)
+    await ui_user.should_see(marker=SIGN_IN_MARKER)
     assert await _redirect_location(ui_user, "/") == "/login"
 
 
 async def test_signing_back_in_reaches_the_same_account(
     ui_user: User, db_schema: psycopg.Connection[psycopg.rows.TupleRow]
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _PASSWORD)
+    await _create_account(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
     ui_user.find(marker=_LOGOUT_MARKER).click()
-    await ui_user.should_see(marker=_SIGN_IN_MARKER)
+    await ui_user.should_see(marker=SIGN_IN_MARKER)
 
-    await _sign_in(ui_user, _USERNAME, _PASSWORD)
+    await sign_in(ui_user, USERNAME, PASSWORD)
 
     await ui_user.should_see(_SIGNED_IN_TEXT)
     assert _count_users(db_schema) == 1
@@ -413,10 +406,10 @@ async def test_registration_writes_one_info_line_with_the_user_id(
     db_schema: psycopg.Connection[psycopg.rows.TupleRow],
     app_logs: pytest.LogCaptureFixture,
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _PASSWORD)
+    await _create_account(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
-    user_id = _stored_user_id(db_schema, _USERNAME)
+    user_id = _stored_user_id(db_schema, USERNAME)
     assert [line.levelno for line in _auth_lines(app_logs, user_id)] == [logging.INFO]
 
 
@@ -427,7 +420,7 @@ async def test_sign_in_writes_one_info_line_with_the_user_id(
 ) -> None:
     user_id = _register_directly(db_schema)
 
-    await _sign_in(ui_user, _USERNAME, _PASSWORD)
+    await sign_in(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
     assert [line.levelno for line in _auth_lines(app_logs, user_id)] == [logging.INFO]
@@ -439,7 +432,7 @@ async def test_log_out_writes_one_info_line_with_the_user_id(
     app_logs: pytest.LogCaptureFixture,
 ) -> None:
     user_id = _register_directly(db_schema)
-    await _sign_in(ui_user, _USERNAME, _PASSWORD)
+    await sign_in(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
     start = len(app_logs.records)
 
@@ -454,13 +447,13 @@ async def test_registration_sign_in_and_log_out_lines_are_each_their_own_kind(
     db_schema: psycopg.Connection[psycopg.rows.TupleRow],
     app_logs: pytest.LogCaptureFixture,
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _PASSWORD)
+    await _create_account(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
     await _log_out(ui_user)
-    await _sign_in(ui_user, _USERNAME, _PASSWORD)
+    await sign_in(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
-    user_id = _stored_user_id(db_schema, _USERNAME)
+    user_id = _stored_user_id(db_schema, USERNAME)
     lines = _auth_lines(app_logs, user_id)
     # With the id removed, wording is all that is left, so this does not pin any of it.
     kinds = [line.getMessage().replace(str(user_id), "") for line in lines]
@@ -472,7 +465,7 @@ async def test_registration_sign_in_and_log_out_lines_are_each_their_own_kind(
     ("submitted_username", "submitted_password"),
     [
         pytest.param(_SCANNED_USERNAME, _WRONG_PASSWORD, id="wrong-password"),
-        pytest.param(_SCANNED_UNKNOWN_USERNAME, _PASSWORD, id="unknown-username"),
+        pytest.param(_SCANNED_UNKNOWN_USERNAME, PASSWORD, id="unknown-username"),
         pytest.param(_SCANNED_USERNAME, _OVER_LENGTH_PASSWORD, id="over-length-password"),
     ],
 )
@@ -483,11 +476,11 @@ async def test_failed_sign_in_writes_one_line_without_the_submitted_username(
     submitted_username: str,
     submitted_password: str,
 ) -> None:
-    register(_SCANNED_USERNAME, _PASSWORD, conn=db_schema, rounds=TEST_BCRYPT_ROUNDS)
-    await _fill_sign_in_form(ui_user, submitted_username, submitted_password)
+    register(_SCANNED_USERNAME, PASSWORD, conn=db_schema, rounds=TEST_BCRYPT_ROUNDS)
+    await fill_sign_in_form(ui_user, submitted_username, submitted_password)
     start = len(app_logs.records)
 
-    ui_user.find(marker=_SIGN_IN_MARKER).click()
+    ui_user.find(marker=SIGN_IN_MARKER).click()
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
 
     assert len(_all_auth_lines(app_logs, start)) == 1
@@ -497,10 +490,10 @@ async def test_failed_sign_in_writes_one_line_without_the_submitted_username(
 async def test_empty_sign_in_form_writes_no_line(
     ui_user: User, app_logs: pytest.LogCaptureFixture
 ) -> None:
-    await _fill_sign_in_form(ui_user, "", "")
+    await fill_sign_in_form(ui_user, "", "")
     start = len(app_logs.records)
 
-    ui_user.find(marker=_SIGN_IN_MARKER).click()
+    ui_user.find(marker=SIGN_IN_MARKER).click()
     await ui_user.should_see(_MISSING_INPUT_TEXT)
 
     assert _all_auth_lines(app_logs, start) == []
@@ -525,7 +518,7 @@ async def test_rejected_registration_writes_one_line_with_the_reason_and_no_subm
     confirmation: str | None,
     expected_error: str,
 ) -> None:
-    register(_SCANNED_USERNAME, _PASSWORD, conn=db_schema, rounds=TEST_BCRYPT_ROUNDS)
+    register(_SCANNED_USERNAME, PASSWORD, conn=db_schema, rounds=TEST_BCRYPT_ROUNDS)
     await _fill_account_form(ui_user, username, password, confirmation)
     start = len(app_logs.records)
 
@@ -542,15 +535,15 @@ async def test_rejected_registration_writes_one_line_with_the_reason_and_no_subm
 async def test_logs_never_contain_submitted_passwords(
     ui_user: User, app_logs: pytest.LogCaptureFixture
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _SCANNED_PASSWORD)
+    await _create_account(ui_user, USERNAME, _SCANNED_PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
     await _log_out(ui_user)
-    await _sign_in(ui_user, _USERNAME, _SCANNED_PASSWORD)
+    await sign_in(ui_user, USERNAME, _SCANNED_PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
     await _log_out(ui_user)
-    await _sign_in(ui_user, _USERNAME, _SCANNED_WRONG_PASSWORD)
+    await sign_in(ui_user, USERNAME, _SCANNED_WRONG_PASSWORD)
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
-    await _sign_in(ui_user, _USERNAME, _SCANNED_OVER_LENGTH_PASSWORD)
+    await sign_in(ui_user, USERNAME, _SCANNED_OVER_LENGTH_PASSWORD)
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
 
     assert app_logs.records
@@ -566,7 +559,7 @@ async def test_logs_never_contain_submitted_passwords(
 async def test_unhandled_error_in_an_event_handler_is_logged_with_its_traceback(
     ui_user: User, app_logs: pytest.LogCaptureFixture
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _PASSWORD)
+    await _create_account(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
     @ui.page(_FAILING_PAGE_PATH)
@@ -583,7 +576,7 @@ async def test_unhandled_error_in_an_event_handler_is_logged_with_its_traceback(
 async def test_unhandled_error_while_building_a_page_is_logged_with_its_traceback(
     ui_user: User, app_logs: pytest.LogCaptureFixture
 ) -> None:
-    await _create_account(ui_user, _USERNAME, _PASSWORD)
+    await _create_account(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
     @ui.page(_FAILING_PAGE_PATH)

@@ -16,9 +16,10 @@ if __name__ in {"__main__", "__mp_main__"}:  # __mp_main__ is needed for NiceGUI
         datefmt="%H:%M:%S",
     )
     load_dotenv()
+    storage_secret = session_secret()  # before building deps, so a missing secret fails fast
     register_pages(default_app_deps())
     ui.run(
-        storage_secret=session_secret(),
+        storage_secret=storage_secret,
         session_middleware_kwargs={"max_age": SESSION_MAX_AGE},
         title="Civica",
         favicon="📘",

@@ -1,5 +1,6 @@
 """Scripted tool-calling chat model and message builders for planner tests."""
 
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,6 +36,10 @@ SAMPLE_KEY = "sample-key-001"
 SAMPLE_QUESTION_ID = "sample-question-id-001"
 DEFAULT_THEME = DROITS_ET_DEVOIRS
 MISTAKE = MistakeEpisode(theme=DEFAULT_THEME, question_id=SAMPLE_QUESTION_ID)
+PLANNER_FAILURE_TEXT = "sample-planner-failure"
+
+# Bounds a held call, so a test that never releases it fails instead of hanging.
+_HOLD_TIMEOUT_SECONDS = 10
 
 # Shapes bind_tools accepts, mirroring BaseChatModel.bind_tools.
 ToolLike = dict[str, Any] | type | Callable[..., Any] | BaseTool  # type: ignore[explicit-any]
@@ -111,6 +116,29 @@ class FakePlannerModel(FakeChatModelBase):
         return "sample-fake-planner-model"
 
 
+class ControlledPlannerModel(FakePlannerModel):
+    """FakePlannerModel a test can hold or break at one call, to observe a turn in flight.
+
+    Calls are counted across turns, so the indexes follow the whole `script`.
+    """
+
+    hold_at_call: int | None = None
+    fail_at_call: int | None = None
+
+    _released: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def release(self) -> None:
+        """Let the held call continue."""
+        self._released.set()
+
+    def _reply_for(self, call_index: int) -> AIMessage:
+        if call_index == self.hold_at_call:
+            assert self._released.wait(_HOLD_TIMEOUT_SECONDS), "the held planner call was never released"
+        if call_index == self.fail_at_call:
+            raise RuntimeError(PLANNER_FAILURE_TEXT)
+        return super()._reply_for(call_index)
+
+
 @dataclass
 class FakeTraceWriter:
     """Keeps every step and retrieval gap in the order they were recorded."""
@@ -136,6 +164,19 @@ class PlannerFakes:
     answer_logger: FakeAnswerLogger
     rejection_store: FakeRejectionStore
     trace: FakeTraceWriter
+
+
+def make_planner_fakes(store: InMemoryStore, content_model: FakeChatModel | None = None) -> PlannerFakes:
+    """Every planner seam faked over `store`."""
+    return PlannerFakes(
+        store=store,
+        retriever=FakeRetriever(),
+        content_model=content_model or FakeChatModel(),
+        question_store=FakeQuestionStore(),
+        answer_logger=FakeAnswerLogger(),
+        rejection_store=FakeRejectionStore(),
+        trace=FakeTraceWriter(),
+    )
 
 
 def planner_deps(
