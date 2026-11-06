@@ -27,6 +27,8 @@ _SAMPLE_PASSAGE_TWO = "sample passage two about civic duties."
 _BELOW_FLOOR_SIMILARITY = MINIMUM_SIMILARITY - 0.1
 _ABOVE_FLOOR_SIMILARITY = MINIMUM_SIMILARITY + 0.1
 
+_ENGINE_LOGGER = "civica.explanation.engine"
+
 _BELOW_FLOOR_PASSAGE = "sample passage below the similarity floor."
 _ABOVE_FLOOR_PASSAGE = "sample passage above the similarity floor."
 _BOUNDARY_PASSAGE = "sample passage exactly at the similarity floor."
@@ -169,6 +171,14 @@ def boundary_chunk() -> ContentChunk:
 # ---------------------------------------------------------------------------
 
 
+def _engine_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.message
+        for record in caplog.records
+        if record.name == _ENGINE_LOGGER and record.levelno >= logging.WARNING
+    ]
+
+
 class TestPromptGrounding:
     """The prompt sent to the model must contain every retrieved passage verbatim."""
 
@@ -275,7 +285,7 @@ class TestTruncatedResponse:
                 _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client
             )
 
-        assert [record.message for record in caplog.records if record.levelno >= logging.WARNING]
+        assert _engine_warnings(caplog)
 
     def test_does_not_warn_when_the_response_finished_normally(
         self,
@@ -289,9 +299,7 @@ class TestTruncatedResponse:
                 _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client
             )
 
-        assert not [
-            record.message for record in caplog.records if record.levelno >= logging.WARNING
-        ]
+        assert not _engine_warnings(caplog)
 
 
 class TestRetrieverInvocation:
