@@ -6,7 +6,7 @@ Civica is a memory-aware learning coach for the French naturalization written ci
 This plan covers the MVP: a single web app that offers a coach conversation (lessons and quizzes chosen by an autonomous planner) and a mock exam mode, backed by generative AI for questions/responses, embeddings for content retrieval, and data store for the official corpus and agent memory. 
 It also includes autonomous agent flow and a system for self-improvement.
 
-See `docs/mvp-overview.md` for initial scope. `Project Plan B` diverges from `Project Plan A` only after step 10B, but also includes an additional inserted step 6B.
+See `docs/mvp-overview.md` for initial scope. `Project Plan B` diverges from `Project Plan A` only after the planner graph refactor step, but also includes an additional inserted Session Management and Minimal UI step.
 
 ## Terminology
 
@@ -37,7 +37,13 @@ See `docs/mvp-overview.md` for initial scope. `Project Plan B` diverges from `Pr
 - **HTML fixtures:** one small `<html>` file per capture-test scenario (minimal, real-shaped enough to exercise the normalizer). Store under `tests/fixtures/html/`.
 - **Question fixtures:** small hand-written multiple-choice questions in French (2–3 total) with an obviously fake correct-answer index. Never copy real ministry questions into tests.
 - **Learner fixtures:** synthetic `user_id`s like `test-user-alex`, `test-user-jordan`. Never use real names.
-- **DB fixtures:** the test DB is a dedicated `civica_test` database (separate from `civica`), reached via `TEST_DATABASE_URL`. Tests that write to real tables use a function-scoped, opt-in `db_schema` fixture defined in `tests/conftest.py`. It creates a fresh Postgres schema per test (e.g. `test_<uuid>`), sets it as the connection's `search_path`, applies `schema.sql` into it, and drops the schema on teardown. Tests that only need a live connection (e.g. Step 1's pool tests) do not request the fixture and pay no isolation cost. The fixture itself is built in Step 4, when the first table (`content_chunks`) makes isolation necessary. External tests (marked `@pytest.mark.external`) may hit real Anthropic/OpenAI endpoints; default `pytest` skips them.
+- **DB fixtures:** the test DB is a dedicated `civica_test` database (separate from `civica`), reached via `TEST_DATABASE_URL`. Tests that write to real tables use a function-scoped, opt-in `db_schema` fixture defined in `tests/conftest.py`. It creates a fresh Postgres schema per test (e.g. `test_<uuid>`), sets it as the connection's `search_path`, applies `schema.sql` into it, and drops the schema on teardown. Tests that only need a live connection (e.g. the scaffolding step's pool tests) do not request the fixture and pay no isolation cost. The fixture itself is built in the ingest step, when the first table (`content_chunks`) makes isolation necessary. External tests (marked `@pytest.mark.external`) may hit real Anthropic/OpenAI endpoints; default `pytest` skips them.
+- **UI test speed:** UI tests wait on events, never on time, so each new UI test adds as little as possible to the suite.
+  - No fixed `asyncio.sleep`. Wait for a turn to end with `ActiveTurn.wait` (Coach UI for lessons step) and for page content with `should_see`.
+  - Fake models answer at once. A test that needs a turn in flight holds the fake at one call and releases it, rather than adding a delay.
+  - Only `test_auth.py` signs in through the form. Other tests start signed in through a fixture.
+  - At every step that adds UI tests, run `uv run pytest tests/integration/ui --durations=10`: no UI test takes over 1 second. Note the UI suite's total time in the step's completion notes so growth is visible.
+  - If the UI suite still grows slow, consider `pytest-xdist`. The per-test schemas already keep tests independent.
 
 ## Schema convention
 
@@ -48,7 +54,7 @@ Every statement is idempotent (`CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE I
   ```
   uv run python -m civica.scripts.migrate
   ```
-- The migrate script and its accompanying `db.migrate.apply_schema()` function are created in Step 1. Later steps only append to `schema.sql`.
+- The migrate script and its accompanying `db.migrate.apply_schema()` function are created in the scaffolding step. Later steps only append to `schema.sql`.
 
 ## Dependency-injection convention (testability)
 
@@ -179,7 +185,7 @@ Production code exposes injection seams to separate concerns and reduce coupling
   - Added autoflake dependency to detect unused imports and variables. Added a test to run it as part of standard test suite.
   - Updated `src/civica/db/pool.py` to pass `open=True` explicitly to `psycopg_pool.ConnectionPool(...)` to enforce strictness, which addressed the psycopg_pool 4.x deprecation warning about the default changing to `False`.
   - Added init script (`docker/postgres/init/01-create-test-db.sql`) to create test database (`civica_test`) on first boot of Postgres database container.
-  - Deferred per-test schema isolation fixture (`db_schema` in `tests/conftest.py`) to Step 4 becuase nothing built in step 1 exercises this fixture.
+  - Deferred per-test schema isolation fixture (`db_schema` in `tests/conftest.py`) to the ingest step becuase nothing built in the scaffolding step exercises this fixture.
   - Made various improvements to setup and development instructions in `README.md`.
 
 ---
@@ -212,7 +218,7 @@ Production code exposes injection seams to separate concerns and reduce coupling
   
 - **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any deviations from the plan.
   - Bifurcated the test suite into `unit/` and `integration/` directories.
-  - Added proper logging. Replaced print statements on the migrate script (added in Step 1).
+  - Added proper logging. Replaced print statements on the migrate script (added in the scaffolding step).
   - Discovered that the top-level website provides a sitemap so that was incorporated into the script. Implemented a hybrid approach: 
     - The script's first pass uses the sitemap as the source of truth, but silently misses pages if the sitemap is stale.
     - The script's second pass searches all encountered links to catch new pages that may not be listed in the sitemap. A small amount of additional complexity to gain a comprehensive result.
@@ -350,7 +356,7 @@ Production code exposes injection seams to separate concerns and reduce coupling
   - Add `src/civica/ingest/` to the project structure diagram.
 
 - **Update this plan:** After the step ships, prefix the header with `✅` and add below notes on any deviations from the plan.
-  - pgvector's HNSW index caps the `vector` type at 2000 dimensions so I built the index on a `halfvec(3072)` cast which is half-precision and indexable up to 4000 dimensions. Step 5 was updated so retrieval queries use the same cast to hit the index.
+  - pgvector's HNSW index caps the `vector` type at 2000 dimensions so I built the index on a `halfvec(3072)` cast which is half-precision and indexable up to 4000 dimensions. The content retriever step was updated so retrieval queries use the same cast to hit the index.
   - Added `chunk_index` column so overlapping chunks within a section have a stable positional identity for citations and re-ingest diffs.
   - Added a `<page title> - <section heading>` prefix (part of the hashed text) to each chunk prior to embedding so that chunk retrieval stays anchored to the official topic. How? Adding the prefix encourages a co-location of chunks which come from the same topic in the official study materials within the vector DB. The goal is to minimize the chance that responses stray from the official material when studying a given topic. I would not have enforced this kind of categorization on a more general LLM applicationm, but it's appropriate for this narrowly focused exam prep app.
   - Used NFC-normalized UTF-8 on `content_hash` so that accent-encoding drift will not duplicate rows.
@@ -383,11 +389,11 @@ Production code exposes injection seams to separate concerns and reduce coupling
 
 - Create `src/civica/retrieval/__init__.py` and `src/civica/retrieval/content.py`:
   - `search(query: str, theme: Theme | None = None, k: int = 5, conn: psycopg.Connection | None = None) -> list[ContentChunk]`: the optional-connection convention matches `upsert_chunks` and `apply_schema` (pool by default, explicit connection in tests).
-  - Embeds the query with `embedder.embed_query`, runs cosine similarity via pgvector, optionally filters by `theme` (compare the `theme` column against `theme.slug`; `Theme` is a pydantic model per the Step 3 diversion, not an enum).
-  - The similarity query must order by `embedding::halfvec(N) <=> <query>::halfvec(N)`: the HNSW index is built on that cast (see Step 4 notes), so a plain `embedding <=> <query>` would fall back to a sequential scan. Build `N` into the SQL from `embedder.EMBEDDING_DIMENSIONS` (same constant `migrate.py` templates into `schema.sql`); never hardcode 3072.
+  - Embeds the query with `embedder.embed_query`, runs cosine similarity via pgvector, optionally filters by `theme` (compare the `theme` column against `theme.slug`; `Theme` is a pydantic model per the normalize step's diversion, not an enum).
+  - The similarity query must order by `embedding::halfvec(N) <=> <query>::halfvec(N)`: the HNSW index is built on that cast (see the ingest step's notes), so a plain `embedding <=> <query>` would fall back to a sequential scan. Build `N` into the SQL from `embedder.EMBEDDING_DIMENSIONS` (same constant `migrate.py` templates into `schema.sql`); never hardcode 3072.
   - Call `register_vector(conn)` before passing the query vector as a parameter, same as `repository.py` does.
   - `<=>` returns cosine *distance*; expose `similarity = 1 - distance` so the field means what its name says.
-  - `ContentChunk` is a small dataclass exposing `text`, `theme: Theme` (hydrated via `Theme.from_slug`), `page_slug`, `section_id`, `chunk_index`, `content_hash`, `similarity`. `chunk_index` and `content_hash` give citations a stable identity (the reason `chunk_index` was added in Step 4).
+  - `ContentChunk` is a small dataclass exposing `text`, `theme: Theme` (hydrated via `Theme.from_slug`), `page_slug`, `section_id`, `chunk_index`, `content_hash`, `similarity`. `chunk_index` and `content_hash` give citations a stable identity (the reason `chunk_index` was added in the ingest step).
   - NB: Chunks were embedded with the `<page title> - <section heading>` prefix but queries are embedded raw without a standard prefix. This asymmetry is acceptable for now. 
         The order of the two elements in the prefix should be neglible in terms of embedding location.
         Subsequent steps have been updated to prefix queries as appropriate when the category is known (e.g. tutoring or quizzing within an official topic).
@@ -467,12 +473,12 @@ The result should be that both carry `Theme` and the slug appears only at the SQ
 **Part 3: Read wrapper (retrieval).**
 
 - **Test:** update `tests/integration/retrieval/test_content.py`
-  - Adjust for the composed `ContentChunk` shape. The field round-trip still asserts `theme` is hydrated as a `Theme`; `similarity` is still `1 - cosine_distance` (existing 1e-2 tolerance from the Step 5 notes preserved).
+  - Adjust for the composed `ContentChunk` shape. The field round-trip still asserts `theme` is hydrated as a `Theme`; `similarity` is still `1 - cosine_distance` (existing 1e-2 tolerance from the content retriever step's notes preserved).
   - Existing `theme`-filter and `k`-limit assertions stay green.
 - Update `src/civica/retrieval/content.py`:
-  - `ContentChunk` becomes a pydantic `BaseModel` (`model_config = ConfigDict(frozen=True)`) composing the core plus the score: `chunk: Chunk`, `similarity: float`. Keep the name `ContentChunk` to limit downstream churn (Steps 8-10 reference it).
+  - `ContentChunk` becomes a pydantic `BaseModel` (`model_config = ConfigDict(frozen=True)`) composing the core plus the score: `chunk: Chunk`, `similarity: float`. Keep the name `ContentChunk` to limit downstream churn (the explanation, assessment and planner steps reference it).
   - Construction still hydrates `theme` via `Theme.from_slug(row[...])` (retrieval already does this) and computes `similarity = 1 - distance`.
-  - Decision to confirm at the check-in: nest (`result.chunk.text`) vs. flatten (re-expose `text`, `page_slug`, ... as passthrough properties so call sites keep `result.text`). Nesting is simpler but touches every call site and the citation access in Steps 8/9/10; flattening preserves the current surface at the cost of a little boilerplate. Recommend flattening the read wrapper's most-used fields so Step 8/9/10 code stays unchanged.
+  - Decision to confirm at the check-in: nest (`result.chunk.text`) vs. flatten (re-expose `text`, `page_slug`, ... as passthrough properties so call sites keep `result.text`). Nesting is simpler but touches every call site and the citation access in the explanation, assessment and planner steps; flattening preserves the current surface at the cost of a little boilerplate. Recommend flattening the read wrapper's most-used fields so explanation, assessment and planner code stays unchanged.
 - **Check In:** Stop and confirm the retrieval shape and the nest-vs-flatten decision. Check in with the user before going forward.
 
 **Part 4: Fold embedding-model identity into `content_hash` (for safer model migration).**
@@ -513,7 +519,7 @@ This addresses a silent failure mode that I discovered while implementing this s
 **Goal:** A `users` table plus register/verify flows. Every subsequent memory/quiz-log call is namespaced by `user_id`.
 
 **Design decisions (from the pre-implementation review; see the rationale bullets inline):**
-- `UserId` lives in the domain layer, not the auth service. Step 7B's `quiz_answers`, the Step 7 memory layer, and later the graph all import `UserId`; anchoring it in `domain/` (beside `Chunk` and `Theme`) keeps those data layers from importing the auth service and avoids an import cycle.
+- `UserId` lives in the domain layer, not the auth service. The quiz-answer log's `quiz_answers`, the memory layer, and later the graph all import `UserId`; anchoring it in `domain/` (beside `Chunk` and `Theme`) keeps those data layers from importing the auth service and avoids an import cycle.
 - The application owns the UUID. `register` generates `uuid4()` in Python and inserts it explicitly (no DB `DEFAULT`, no `RETURNING` roundtrip). This mirrors how `content_chunks` owns its own primary key (`content_hash` generated in Python) rather than delegating identity to the database.
 - `UsernameTaken` comes from the DB `UNIQUE` constraint, not a pre-check. `register` attempts the `INSERT` and catches `psycopg.errors.UniqueViolation`, translating it to `UsernameTaken`. A `SELECT`-then-`INSERT` would carry a time-of-check/time-of-use race; relying on the constraint is both correct and simpler.
 - Usernames are normalized at the service boundary (trim surrounding whitespace + `casefold()`) before hashing, insert, and lookup, so `Alex`, `alex`, and `alex ` resolve to one account. The stored column stays plain `TEXT UNIQUE` (no `CITEXT`, no functional index); normalization is a service-layer concern, keeping the schema simple.
@@ -682,12 +688,12 @@ _This step was added and implemented after some of the subsequent steps, but thi
 
 ## ✅ Step 7: Memory layer (LangGraph checkpointer + store + records + memory_writer)
 
-**Goal:** The LangGraph-backed learner memory: short-term thread state (checkpointer), a long-term namespaced store holding four record types, and an allowlist-guarded `memory_writer` helper over that store. The raw quiz-answer log lives outside LangGraph state and is built in Step 7B.
+**Goal:** The LangGraph-backed learner memory: short-term thread state (checkpointer), a long-term namespaced store holding four record types, and an allowlist-guarded `memory_writer` helper over that store. The raw quiz-answer log lives outside LangGraph state and is built in the quiz-answer log step.
 
 **Conventions to follow:**
 - `UserId` is imported from `domain/user.py`, never redefined here. The memory writer, the quiz log, and the record types all type their user parameter as `UserId`, keeping the namespace type single-sourced in the domain layer and this layer free of any dependency on the auth service.
 - Typing (mirror `domain/`): every record/row type is a **frozen pydantic `BaseModel`** (`model_config = ConfigDict(frozen=True)`, `Field(...)` constraints), matching `Chunk`/`Theme`. Each `BaseModel` class needs a `# type: ignore[explicit-any]` comment on its `class` line, because the project's `disallow_any_explicit = true` flags pydantic's base. No plain dataclasses in this layer.
-- `Theme` persists as its slug, everywhere. The `Theme` pydantic model is never stored whole. In store records, add a field serializer so `theme` dumps to `theme.slug` (rehydrate with `Theme.from_slug`); in `quiz_answers` the `theme TEXT` column holds `theme.slug`. Slug is the single wire form across the store JSON and the SQL column. (Applied in `records.py` below; the same rule governs `quiz_log.py` in Step 7B.)
+- `Theme` persists as its slug, everywhere. The `Theme` pydantic model is never stored whole. In store records, add a field serializer so `theme` dumps to `theme.slug` (rehydrate with `Theme.from_slug`); in `quiz_answers` the `theme TEXT` column holds `theme.slug`. Slug is the single wire form across the store JSON and the SQL column. (Applied in `records.py` below; the same rule governs `quiz_log.py` in the quiz-answer log step.)
 
 **Part 1**
 - Add dependency: `langgraph`, `langgraph-checkpoint-postgres` (or the equivalent monorepo package that ships `PostgresSaver` + `PostgresStore`).
@@ -713,11 +719,11 @@ _This step was added and implemented after some of the subsequent steps, but thi
   - Each of the four record models (`LearnerProfile`, `TopicMastery`, `MistakeEpisode`, `SessionSummary`) round-trips to an equal instance and exposes the expected `kind`.
   - Note: This is the fast test for the pydantic/typing layer.
 - Create `src/civica/domain/source_ref.py` and `src/civica/memory/records.py`:
-  - `domain/source_ref.py` - `SourceRef(BaseModel, frozen)` with `page_slug: str = Field(min_length=1)` and `section_id: str = Field(min_length=1)`. Lives in `domain/` (not `memory/`) because Step 9's `Question` also carries `list[SourceRef]` forward into `MistakeEpisode`. Replaces bare `(page_slug, section_id)` tuples and mirrors `Chunk`'s identity fields.
+  - `domain/source_ref.py` - `SourceRef(BaseModel, frozen)` with `page_slug: str = Field(min_length=1)` and `section_id: str = Field(min_length=1)`. Lives in `domain/` (not `memory/`) because the assessment engine's `Question` also carries `list[SourceRef]` forward into `MistakeEpisode`. Replaces bare `(page_slug, section_id)` tuples and mirrors `Chunk`'s identity fields.
   - `records.py`:
     - `MemoryKind(StrEnum)` with members `LEARNER_PROFILE = "learner_profile"`, `TOPIC_MASTERY = "topic_mastery"`, `MISTAKE_EPISODE = "mistake_episode"`, `SESSION_SUMMARY = "session_summary"`. Single source of truth for the namespaces.
     - Four frozen pydantic record models - `LearnerProfile`, `TopicMastery`, `MistakeEpisode`, `SessionSummary` - each declaring `kind: ClassVar[MemoryKind]` so the writer derives the namespace from the record (no separate stringly-typed `namespace_kind` param, no CamelCase-to-snake drift). Each has an obvious `Theme`-typed field where relevant (persisted as slug per the Theme rule above). No hidden state.
-    - `MistakeEpisode` captures the source context of the missed question, not just the theme: `theme`, `question_id: str`, and `sources: list[SourceRef]` (a question may draw on several passages). This is what lets Step 17's mistake-driven review reconstruct a corpus-prefix-style retrieval query and re-teach the exact passages the learner missed.
+    - `MistakeEpisode` captures the source context of the missed question, not just the theme: `theme`, `question_id: str`, and `sources: list[SourceRef]` (a question may draw on several passages). This is what lets a subsequent step's mistake-driven review reconstruct a corpus-prefix-style retrieval query and re-teach the exact passages the learner missed.
 - **Check In:** Stop and confirm with user that the implemenation is satisfactory.
 
 **Part 3**
@@ -801,7 +807,7 @@ _This step was added and implemented after some of the subsequent steps, but thi
 **Goal:** Given a theme and a learner question, produce a concise English explanation (with French vocabulary) grounded in retrieved French corpus chunks.
 
 - Add dependency: `langchain-anthropic`.
-- Create `src/civica/llm/client.py` - a thin chat-model factory mirroring `embeddings/embedder.py`: a module constant `GENERATION_MODEL = "claude-sonnet-5"` (named to parallel `embedder.py`'s `EMBEDDING_MODEL` - both name the *task*, embedding vs generation, not the provider) and `get_chat_model(model: str = GENERATION_MODEL) -> BaseChatModel` that lazily constructs `ChatAnthropic(model=model, max_tokens=...)` so importing never requires `ANTHROPIC_API_KEY`. The optional `model` override lets Step 9 request a stronger model for question generation without a second factory or a second constant; callers that omit it get the default. If you keep the lazy-cache pattern from `embedder.py`, key the cache by `model` (a small dict), since the override means more than one client can exist. This is the single place the generation provider and default model are chosen; Step 8 (`explain`) and Step 9 (assessment engine) both default their injected `chat_client` to it, so the provider choice is never duplicated. It is deliberately a thin wrapper, not a provider-abstraction service (see the NB below): `BaseChatModel` is the portability layer, so a future provider swap is a one-line constructor change here. No dedicated test (thin wrapper, exercised via the engines and the external tests), matching `embedder.py`.
+- Create `src/civica/llm/client.py` - a thin chat-model factory mirroring `embeddings/embedder.py`: a module constant `GENERATION_MODEL = "claude-sonnet-5"` (named to parallel `embedder.py`'s `EMBEDDING_MODEL` - both name the *task*, embedding vs generation, not the provider) and `get_chat_model(model: str = GENERATION_MODEL) -> BaseChatModel` that lazily constructs `ChatAnthropic(model=model, max_tokens=...)` so importing never requires `ANTHROPIC_API_KEY`. The optional `model` override lets the assessment engine request a stronger model for question generation without a second factory or a second constant; callers that omit it get the default. If you keep the lazy-cache pattern from `embedder.py`, key the cache by `model` (a small dict), since the override means more than one client can exist. This is the single place the generation provider and default model are chosen; the explanation engine (`explain`) and the assessment engine both default their injected `chat_client` to it, so the provider choice is never duplicated. It is deliberately a thin wrapper, not a provider-abstraction service (see the NB below): `BaseChatModel` is the portability layer, so a future provider swap is a one-line constructor change here. No dedicated test (thin wrapper, exercised via the engines and the external tests), matching `embedder.py`.
 - **Unit tests:** `tests/unit/explanation/test_engine.py`
   - Unit test (no DB, no network) with a fake retriever (returns fixed chunks) and a fake `ChatAnthropic` (records the prompt, returns a canned response), both injected into `explain` (see the dependency-injection note below). Assert:
     - The final prompt contains all retrieved passages verbatim.
@@ -809,15 +815,15 @@ _This step was added and implemented after some of the subsequent steps, but thi
     - The system message mandates English output while retaining French vocabulary (assert the exact substring is present). This is the second hard product contract alongside grounding: the exam is French, explanations are English.
     - Returned `Explanation.context_chunks` matches the fake retriever's output.
   - Empty-retrieval case: with a fake retriever that returns `[]`, `explain` returns an `Explanation` stating there is insufficient material and does **not** call the fake `ChatAnthropic` (assert the fake was never invoked). See the empty-retrieval short-circuit below.
-- Create `src/civica/explanation/engine.py` (noun-named package per the Step 5 naming convention; the public function stays the verb `explain`):
+- Create `src/civica/explanation/engine.py` (noun-named package per the content retriever step's naming convention; the public function stays the verb `explain`):
   - `explain(user_question: str, theme: Theme, *, retriever: SearchFn = search, chat_client: BaseChatModel | None = None) -> Explanation` - calls the injected `retriever` (a callable with the same shape as `retrieval.content.search`, which is the default), packs the retrieved passages into a Claude prompt with a fixed system message that mandates using only the provided passages and translating French → English, calls the injected `chat_client` (defaults to `llm.client.get_chat_model()`), returns a frozen `Explanation`.
   - Dependency injection: `retriever` and `chat_client` are keyword-only parameters with production defaults, per the dependency-inversion rule. This gives the unit test a real seam (pass a fake retriever and fake `ChatAnthropic`).
-  - `Explanation` is a **frozen pydantic model** (matching `Chunk` / `ContentChunk` / `QuizAnswerRow`, not a bare dataclass) with `text: str` and `context_chunks: list[ContentChunk]`. The field is named `context_chunks`, not `citations`: it holds every passage retrieved and packed into the prompt, i.e. the model's grounding context, not a verified per-claim attribution of what Claude actually cited. (Step 9's analogous field is `Question.sources`; the different name is deliberate - those are the specific chunks a question was generated from.)
+  - `Explanation` is a **frozen pydantic model** (matching `Chunk` / `ContentChunk` / `QuizAnswerRow`, not a bare dataclass) with `text: str` and `context_chunks: list[ContentChunk]`. The field is named `context_chunks`, not `citations`: it holds every passage retrieved and packed into the prompt, i.e. the model's grounding context, not a verified per-claim attribution of what Claude actually cited. (The assessment engine's analogous field is `Question.sources`; the different name is deliberate - those are the specific chunks a question was generated from.)
   - Model pinning and choice: the default model id lives in the `llm/client.py` `GENERATION_MODEL` constant (`claude-sonnet-5`), never an inline `"claude-..."` placeholder in the engine. Default to Sonnet, not Opus: explanation is a high-volume, tightly-scoped, retrieval-grounded task where Sonnet is the better cost/quality default; revisit at the check-in if quality disappoints. The factory must **not** set `temperature` (removed on current Claude models; passing it returns a 400), and should set an explicit `max_tokens` large enough that an explanation is never truncated (streaming is unnecessary at this size).
   - Empty-retrieval short-circuit: if the retriever returns no chunks (the `search` docstring notes a theme filter can return fewer than `k`, possibly zero), return an `Explanation` whose `text` states there is insufficient official material for the question, with `context_chunks=[]`, **without** calling the LLM. A grounded coach must not free-associate when it has no passages; this enforces the official-facts-only rule.
   - No `user_id`: `explain` intentionally takes no learner identity. Explanation draws only on the corpus, so keeping LangGraph memory out of this path is the strict data-type separation rule working as intended - do not add a `user_id` parameter here.
   - Prompt-injection boundary: interpolate `user_question` only into the user/human message, never into the system message. The fixed system message (grounding + English-output mandate) is the trusted channel; the learner question is untrusted input.
-  - Query construction: pass the learner's question to the retriever raw, scoped by the hard `theme` filter. Do not prepend theme context to the query here: a natural user question exists, the filter already scopes the theme deterministically, and prefix tokens would dilute the question's own signal. (Contrast with Step 9, where no natural question exists and the query is manufactured from context.)
+  - Query construction: pass the learner's question to the retriever raw, scoped by the hard `theme` filter. Do not prepend theme context to the query here: a natural user question exists, the filter already scopes the theme deterministically, and prefix tokens would dilute the question's own signal. (Contrast with the assessment engine, where no natural question exists and the query is manufactured from context.)
   - Prompt lives in a `PROMPTS` dict at module top so it can be tested without invoking the LLM.
 
 **Check In:** Stop and confirm with the user that the implementation is satisfactory. Eyeball the explanation quality on a real theme before moving on.
@@ -851,19 +857,19 @@ _This step was added and implemented after some of the subsequent steps, but thi
     - `generate_mock_exam` returns exactly 40 questions with the required per-theme counts.
     - `MockExamResult.passed` reflects the 80% threshold at boundaries (31 = fail, 32 = pass, 40 = pass).
     - The fake retriever records the query it was called with; assert the query is constructed from the theme's `display_name_fr` (never an empty string), per the query-construction rule below.
-    - Persistence: with a fake `question_store`, assert each returned `Question` is written exactly once, keyed by its content hash, so Step 21 can schedule and reuse items. Assert re-running with the same generated payload does not double-write (idempotent upsert). Assert the persisted row carries the current `prompt_version`.
+    - Persistence: with a fake `question_store`, assert each returned `Question` is written exactly once, keyed by its content hash, so a subsequent step can schedule and reuse items. Assert re-running with the same generated payload does not double-write (idempotent upsert). Assert the persisted row carries the current `prompt_version`.
     - Answer logging: with a fake answer-logger injected, assert `MockExam.score(answers)` emits exactly one log call per answer (40 for a full exam), carrying the right `theme`/`question_id`/`is_correct`. This is the assertion that keeps the densest mastery signal from bypassing `quiz_answers`.
 - Create `src/civica/assessment/engine.py`:
   - LLM client: `generate_quiz` and `generate_mock_exam` take keyword-only `retriever` (defaults to `content.search`) and `chat_client: BaseChatModel` (defaults to `llm.client.get_chat_model()`). This is the same injection seam and shared factory as the explanation engine. Do not construct a second `ChatAnthropic` here. If question generation needs a different model or a larger token cap than explanation (a mock exam is far longer than one explanation, so the 2048 cap will not fit), add a `QUIZ_PROFILE = AnthropicChat(...)` constant in `llm/client.py` and pass it to `get_chat_model(...)`, rather than inlining a model id or a token count at the call site.
-  - `generate_quiz(user_id: UserId, theme: Theme, n: int = 5) -> list[Question]` - retrieves corpus passages for the theme, prompts Claude to produce `n` MCQ questions in French (4 options, exactly one correct), returns typed `Question` records. Each `Question` carries `sources: list[(page_slug, section_id)]` taken from the retrieved `ContentChunk`s it was generated from, so a wrong answer can be logged as a `MistakeEpisode` (Step 7) with enough context for targeted re-teaching (Step 17).
-  - Query construction: no natural user question exists here, so manufacture the retrieval query from context in the same style as the corpus chunk prefix (`<page title> - <section heading>`, see Step 4 notes): at minimum `theme.display_name_fr`, or `<theme display_name_fr> - <page title>` when targeting a specific page. Combined with the hard `theme` filter, this pulls the query embedding toward that topic's chunk cluster without any corpus change. Vary the targeted page/section across the `n` questions so a quiz batch draws on more than one passage cluster.
+  - `generate_quiz(user_id: UserId, theme: Theme, n: int = 5) -> list[Question]` - retrieves corpus passages for the theme, prompts Claude to produce `n` MCQ questions in French (4 options, exactly one correct), returns typed `Question` records. Each `Question` carries `sources: list[(page_slug, section_id)]` taken from the retrieved `ContentChunk`s it was generated from, so a wrong answer can be logged as a `MistakeEpisode` (memory layer) with enough context for targeted re-teaching in a subsequent step.
+  - Query construction: no natural user question exists here, so manufacture the retrieval query from context in the same style as the corpus chunk prefix (`<page title> - <section heading>`, see the ingest step's notes): at minimum `theme.display_name_fr`, or `<theme display_name_fr> - <page title>` when targeting a specific page. Combined with the hard `theme` filter, this pulls the query embedding toward that topic's chunk cluster without any corpus change. Vary the targeted page/section across the `n` questions so a quiz batch draws on more than one passage cluster.
   - `generate_mock_exam(user_id: UserId) -> MockExam` - produces exactly 40 questions in the fixed theme distribution (11, 11, 8, 6, 4), also mirroring 28 knowledge + 12 scenario if separable via prompt. `MockExam` exposes `questions`, `time_limit_seconds = 45 * 60`, and a `score(answers) -> MockExamResult` method. Retrieval per theme follows the same query-construction rule as `generate_quiz`.
   - `MockExamResult` exposes `total_correct`, `passed` (>= 32/40), and `per_theme_scores: dict[Theme, int]`.
-  - Persist the question bank (required to enable self-improvement): generated questions are written to a `generated_questions` table via an injected `question_store` (keyword-only, defaults to the production store), keyed by a sha256 hash of the question text so writes are idempotent. Each row stores the MCQ, the marked answer, the `theme`, the `sources: list[SourceRef]` it was generated from, and a `prompt_version` stamp. Today `Question` records are ephemeral; persisting them is what lets Step 21 schedule items per learner, rest mastered ones, and resurface missed ones instead of paying to regenerate every time.
-  - `prompt_version`: a short constant declared beside the generation prompt in the module `PROMPTS` dict and bumped by hand whenever that prompt changes. Stamping it costs one column and turns every later prompt edit into a measurable A/B rather than a guess. Step 9B pairs it with persisted critic-rejection reasons so rejection rate per prompt version becomes the accumulating quality signal.
-  - `generate_quiz` may prefer persisted items that are due for a learner before generating new ones once the bank is warm (behind the `PREFER_SCHEDULED_QUESTIONS` flag, default `False`; Step 21 flips it on after its scheduling check-in).
+  - Persist the question bank (required to enable self-improvement): generated questions are written to a `generated_questions` table via an injected `question_store` (keyword-only, defaults to the production store), keyed by a sha256 hash of the question text so writes are idempotent. Each row stores the MCQ, the marked answer, the `theme`, the `sources: list[SourceRef]` it was generated from, and a `prompt_version` stamp. Today `Question` records are ephemeral; persisting them is what lets a subsequent step schedule items per learner, rest mastered ones, and resurface missed ones instead of paying to regenerate every time.
+  - `prompt_version`: a short constant declared beside the generation prompt in the module `PROMPTS` dict and bumped by hand whenever that prompt changes. Stamping it costs one column and turns every later prompt edit into a measurable A/B rather than a guess. The question critic step pairs it with persisted critic-rejection reasons so rejection rate per prompt version becomes the accumulating quality signal.
+  - `generate_quiz` may prefer persisted items that are due for a learner before generating new ones once the bank is warm (behind the `PREFER_SCHEDULED_QUESTIONS` flag, default `False`; a subsequent step flips it on after its scheduling check-in).
   - Add the `generated_questions` table to `schema.sql` (idempotent `CREATE TABLE IF NOT EXISTS`).
-  - **Every scored answer is logged.** `MockExam.score(answers)` and the quiz scoring path both write one `quiz_answers` row per answer via Step 7B's `log_answer`. A mock exam is 40 answers in one sitting and is the densest mastery signal the system ever receives; it must not bypass the log. Step 16's `mock_exam_node` inherits this rule.
+  - **Every scored answer is logged.** `MockExam.score(answers)` and the quiz scoring path both write one `quiz_answers` row per answer via the quiz-answer log's `log_answer`. A mock exam is 40 answers in one sitting and is the densest mastery signal the system ever receives; it must not bypass the log. The `mock_exam_node` in a subsequent step inherits this rule.
 
 - **Check In:** 
   - Confirm with the user that the implementation is satisfactory.
@@ -881,8 +887,8 @@ _This step was added and implemented after some of the subsequent steps, but thi
       - The full breakdown by theme is: 8/3 Principes et valeurs de la République, 8/3 Droits et devoirs, 6/2 Histoire géographie et culture, 4/2 Système intitutionnel et politique, 2/2 Vivre dans la société française.
     - Mock exam generates all five themes before saving once. Any failure saves nothing.
     - One retrieval and one LLM call per theme. Chunks are grouped by section into one passage group per question. `sources` and `kind` are assigned in code.
-    - `PREFER_SCHEDULED_QUESTIONS` was dropped from this step; Step 21 adds it when it has something to gate.
-    - Bug discovered after merge: Questions cites several unrelated sections. Step 9C added to address this.
+    - `PREFER_SCHEDULED_QUESTIONS` was dropped from this step; a subsequent step adds it when it has something to gate.
+    - Bug discovered after merge: Questions cites several unrelated sections. The retrieval optimization step was added to address this.
 
 ---
 
@@ -891,8 +897,8 @@ _This step was added and implemented after some of the subsequent steps, but thi
 **Goal:** 
 - A verifier pass that rejects ungrounded or malformed MCQs (multiple choice questions) before they reach the learner. 
 - This is primarily a quality/safety gate that improves each output at generation time.
-- It also leaves an accumulating trail: paired with Step 9's `prompt_version` stamp, persisted rejection reasons make "did that prompt edit actually help?" a query instead of an opinion.
-- It remains independent of the learner-facing self-improvement loops in Steps 21 and 22.
+- It also leaves an accumulating trail: paired with the assessment engine's `prompt_version` stamp, persisted rejection reasons make "did that prompt edit actually help?" a query instead of an opinion.
+- It remains independent of the learner-facing self-improvement loops in subsequent steps.
 
 - **Test:** `tests/unit/assessment/test_critic.py`
   - With a fake Claude client scripted to return one malformed item on the first pass (zero or two correct options, or an option absent from the retrieved chunks) and a valid item on the retry, assert the malformed item never reaches the returned batch and that every returned `Question` is one that passed the critic.
@@ -902,8 +908,8 @@ _This step was added and implemented after some of the subsequent steps, but thi
   - After the generation call, each candidate MCQ passes through a critic step before it is returned. 
   - The critic is a second LLM call over the same retrieved chunks that checks three hard properties: (1) exactly one option is correct, (2) every option and the marked answer are grounded in the provided passages (no outside knowledge), (3) the distractors are plausible but wrong. Items that fail are regenerated up to a bounded number of attempts (`MAX_REFINE_ATTEMPTS`, small constant); if an item still fails, it is dropped rather than shown.
   - Implement the critic as an injected callable (`critic: CritiqueFn = default_critic`) defaulting to a `get_chat_model()`-backed check, so the unit test drives it with a fake, same seam as `retriever`/`chat_client`. The critic prompt lives in the module `PROMPTS` dict alongside the generation prompt so it is testable without the LLM. Do not inline a model id here; if the critic needs a different model or a smaller token cap, add a `CRITIC_PROFILE` constant in `llm/client.py` and pass it to `get_chat_model(...)`.
-  - Only critic-passed questions are persisted to `generated_questions` (tightens the Step 9 persistence rule from "generated" to "generated and validated"), so the self-improvement loop (Step 21) schedules validated items instead of first-pass items.
-  - Persist rejections too: a small append-only `rejected_questions` table (`prompt_version`, `theme`, `reason`, `attempt`, `rejected_at`) written whenever the critic fails an item. Rejected questions are still not shown to the learner; only the reason is kept. Rejection rate grouped by `prompt_version` then answers whether a prompt change improved generation, which converts the critic's doubled LLM cost into data. One table and one insert; do not build a UI for it (the Step 21/22 reflection dashboard reads it).
+  - Only critic-passed questions are persisted to `generated_questions` (tightens the assessment engine's persistence rule from "generated" to "generated and validated"), so the self-improvement loop (a subsequent step) schedules validated items instead of first-pass items.
+  - Persist rejections too: a small append-only `rejected_questions` table (`prompt_version`, `theme`, `reason`, `attempt`, `rejected_at`) written whenever the critic fails an item. Rejected questions are still not shown to the learner; only the reason is kept. Rejection rate grouped by `prompt_version` then answers whether a prompt change improved generation, which converts the critic's doubled LLM cost into data. One table and one insert; do not build a UI for it (a subsequent step's reflection dashboard reads it).
 
 - **Check In:** Confirm with the user that the critic meaningfully improves quality on a small real run (compare a raw batch to a critiqued batch) before keeping it on by default - it doubles the LLM calls per question, so the quality gain must justify the cost.
 
@@ -943,7 +949,7 @@ _This step was added and implemented after some of the subsequent steps, but thi
 
 - **Check In:** Rerun the comparison script on all themes, then with `--exam`. Confirm:
   - Each question cites one relevant section.
-  - A batch no longer repeats a topic (the Step 9B run had two questions on the national motto, from overlapping passage groups).
+  - A batch no longer repeats a topic (the question critic step's run had two questions on the national motto, from overlapping passage groups).
   - Scenario questions are clear, realistic, and have one defensible answer. If they are weak, try Opus for question generation (one-line change to `QUIZ_PROFILE`).
   - If "objectifs-de-la-fiche" introductions still dominate the top-ranked sections, raise it with the user as a separate retrieval follow-up (query construction or filtering), not part of this fix.
 
@@ -980,8 +986,8 @@ _This step was added and implemented after some of the subsequent steps, but thi
 **Goal:** 
 - An autonomous LLM planner that decides its own next action over a bounded tool set for the Teach and Quiz flows. 
 - The mastery-weighted priority heuristic is preserved but demoted from controller to one tool the planner may call. 
-- This step is pure back end and fully unit-testable with a fake model (no LangGraph wiring, no DB). The following Step 10B assembles it into the graph.
-- The allowlist and corpus-grounding short-circuits that were implemented in Step 7 provide the guardrails for this autonomous loop.
+- This step is pure back end and fully unit-testable with a fake model (no LangGraph wiring, no DB). The following planner graph refactor step assembles it into the graph.
+- The allowlist and corpus-grounding short-circuits that were implemented in the memory layer step provide the guardrails for this autonomous loop.
 
 - **Test:** `tests/unit/graph/test_router.py` (unit: stub `memory.writer.get` to return synthetic mastery/mistake values; the heuristic is pure once reads are stubbed)
   - Given synthetic mastery values and no mistakes, assert `suggest_review_theme` returns the highest-priority theme.
@@ -995,7 +1001,7 @@ _This step was added and implemented after some of the subsequent steps, but thi
   - Assert the planner cannot exceed `MAX_PLANNER_STEPS`: a fake model that always emits a tool call is halted at the bound, the learner receives the fallback lesson (not an error and not a partial trace), and the graph still reaches `memory_writer`.
   - Allowlist guard end-to-end: a fake model that tries to write memory through `record_outcome` with a kind outside `PLANNER_WRITE_ALLOWLIST` causes `MemoryNotAllowed` to surface (the planner cannot smuggle arbitrary writes past the boundary).
   - Mastery guard specifically: a fake model that tries to write `topic_mastery` through `record_outcome` raises `MemoryNotAllowed`, even though that kind is a legitimate target for the in-process `memory.writer.put` used by `update_mastery_node`. The two allowlists must be observably different.
-  - Grounding guard: a fake model that calls `teach`/`generate_quiz` for a theme whose fake retriever returns `[]` gets the insufficient-material short-circuit (Step 8), not a fabricated lesson.
+  - Grounding guard: a fake model that calls `teach`/`generate_quiz` for a theme whose fake retriever returns `[]` gets the insufficient-material short-circuit (explanation engine), not a fabricated lesson.
 - **Test:** extend `tests/integration/memory/test_writer.py` (integration: real `PostgresStore`, matching the existing `put`/`get` coverage)
   - `list_records` returns every record past the store's default page size, scoped to the requesting user.
   - `put_planner` writes an allowlisted kind and raises `MemoryNotAllowed` for `topic_mastery` without touching the store.
@@ -1005,7 +1011,7 @@ _This step was added and implemented after some of the subsequent steps, but thi
     - `suggest_review_theme(user_id) -> Theme` - the demoted heuristic above.
     - `retrieve_corpus(theme, query) -> list[ContentChunk]` - wraps `retrieval.content.search`.
     - `teach(theme, focus) -> Explanation` - wraps `explanation.explain` (retains its empty-retrieval short-circuit).
-    - `generate_quiz(theme, n) -> list[Question]` and `score_answer(question_id, choice) -> bool` - wrap the assessment engine and correctness gate (implemented in Step 9 and 9B).
+    - `generate_quiz(theme, n) -> list[Question]` and `score_answer(question_id, choice) -> bool` - wrap the assessment engine and correctness gate (implemented in the assessment engine and question critic steps).
       - NB: `generate_quiz` returns a `Quiz` (scored via `Quiz.score`), not a `list[Question]`. With the critic on, it may raise `QuestionGenerationError` when every question is rejected; the tool must treat that like the empty-retrieval short-circuit, not fail the turn.
     - `read_learner_state(user_id) -> LearnerState` - wraps `memory.writer.get` (mastery, recent mistakes, `LearnerProfile.goal`).
     - `record_outcome(...)` - the **only** write tool; wraps `memory.writer.put_raw`, so every autonomous write still passes an allowlist and raises `MemoryNotAllowed` on any kind outside it. This is exactly why the allowlist exists: it is the safety boundary for an LLM that decides its own writes.
@@ -1016,20 +1022,20 @@ _This step was added and implemented after some of the subsequent steps, but thi
         MemoryKind.SESSION_SUMMARY,
     })
     ```
-    Enumerate the members literally; never derive this one from `MemoryKind`, so adding a kind never grants the planner access by accident. Step 18 adds `STUDY_PLAN` to it deliberately.
-  - **Mastery is derived, never written by the LLM.** `topic_mastery` is computed deterministically from `quiz_answers` by `update_mastery_node` (Step 10B) and is *not* in `PLANNER_WRITE_ALLOWLIST`. The planner's writes are restricted to episodic and semantic records (mistake episodes, session summaries). This closes the "the LLM grades its own homework" hole and is what makes Step 22's mastery-gain reward trustworthy: an agent that can both choose a teaching strategy and write its own score has no reward signal at all.
+    Enumerate the members literally; never derive this one from `MemoryKind`, so adding a kind never grants the planner access by accident. A subsequent step adds `STUDY_PLAN` to it deliberately.
+  - **Mastery is derived, never written by the LLM.** `topic_mastery` is computed deterministically from `quiz_answers` by `update_mastery_node` (planner graph refactor) and is *not* in `PLANNER_WRITE_ALLOWLIST`. The planner's writes are restricted to episodic and semantic records (mistake episodes, session summaries). This closes the "the LLM grades its own homework" hole and is what makes a subsequent step's mastery-gain reward trustworthy: an agent that can both choose a teaching strategy and write its own score has no reward signal at all.
   - **Halt fallback.** When the loop hits `MAX_PLANNER_STEPS` without a final message, the turn does not error and does not surface a partial tool trace. It falls back to `suggest_review_theme` plus a plain `teach` turn on that theme, and records `halt_reason="max_steps"` on the trace. The learner sees a normal lesson; the operator sees the halt in `planner_trace`.
-  - **Comprehension check after teach.** Instruct the planner in its system prompt to follow a `teach` call with a single `generate_quiz(theme, n=1)` drawn from the just-taught passage before ending the turn. This needs no new tool or business logic (the tools already compose), it closes the teach-assess loop inside one turn, and it gives Step 22's bandit a dense immediate reward instead of one that waits for the next quiz session. Test it as a prompt convention, not a hard code path: the planner may skip it when the learner asked a direct question.
+  - **Comprehension check after teach.** Instruct the planner in its system prompt to follow a `teach` call with a single `generate_quiz(theme, n=1)` drawn from the just-taught passage before ending the turn. This needs no new tool or business logic (the tools already compose), it closes the teach-assess loop inside one turn, and it gives a subsequent step's bandit a dense immediate reward instead of one that waits for the next quiz session. Test it as a prompt convention, not a hard code path: the planner may skip it when the learner asked a direct question.
     - NB: With `n=1` a single critic rejection leaves nothing to ask. If `generate_quiz` raises `QuestionGenerationError`, end the turn after the lesson without the check rather than erroring.
-  - Guardrails (state them; the tests above enforce them): bounded loop (`MAX_PLANNER_STEPS`) with the halt fallback above; writes only via `record_outcome` behind `PLANNER_WRITE_ALLOWLIST`; numeric mastery never LLM-written; facts only via the corpus-grounded `teach`/`generate_quiz` tools, which short-circuit on empty retrieval so the planner cannot free-associate; the untrusted learner message is interpolated only into the human turn, never the system prompt (Step 8's prompt-injection boundary).
+  - Guardrails (state them; the tests above enforce them): bounded loop (`MAX_PLANNER_STEPS`) with the halt fallback above; writes only via `record_outcome` behind `PLANNER_WRITE_ALLOWLIST`; numeric mastery never LLM-written; facts only via the corpus-grounded `teach`/`generate_quiz` tools, which short-circuit on empty retrieval so the planner cannot free-associate; the untrusted learner message is interpolated only into the human turn, never the system prompt (the explanation engine's prompt-injection boundary).
   - Live validation: one Teach turn against real agent on the dev database where the learner asked to work on their weakest area.
     - The planner called `read_learner_state`, `suggest_review_theme`, `teach` and `generate_quiz(n=1)`, then ended with `final_message`. That is 5 trace rows, 5 of the 6 allowed steps, no writes attempted and no retrieval gaps.
     - The lesson was grounded in the corpus. `teach` took about 11s, and the check question plus the final reply took about 4s.
-    - The final reply asked only the check question, so Step 12 must show the lesson, the question and the reply together. The reply also promised to "check it and log the result", which is the graph's job (Step 10B); tighten that wording at the next planner prompt change.
+    - The final reply asked only the check question, so the Coach UI for lessons step must show the lesson, the question and the reply together. The reply also promised to "check it and log the result", which is the graph's job (planner graph refactor); tighten that wording at the next planner prompt change.
 
 **Planner trace + insufficient-material telemetry**
 
-The MVP overview already lists "log retrieved memories per turn" as the MVP debugging policy, and Step 18's "why this next" UI line has nothing to read from without this. It is also the prerequisite for ever improving the planner itself and for Step 19's coverage tracker.
+The MVP overview already lists "log retrieved memories per turn" as the MVP debugging policy, and a subsequent step's "why this next" UI line has nothing to read from without this. It is also the prerequisite for ever improving the planner itself and for a subsequent step's coverage tracker.
 
 - **Test:** extend `tests/unit/graph/test_planner.py`
   - A scripted multi-tool turn writes one `planner_trace` row per tool call, in order, with the arguments the model supplied.
@@ -1086,7 +1092,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
     - A generated quiz's questions are kept in state, and the model's tool output still hides the correct answer.
 - Update `src/civica/graph/planner.py`:
   - Remove `run_planner`, `PlannerResult`, and `_TurnState`. There should be one loop implementation and it is the graph.
-  - Tools read `user_id` from an injected `ToolRuntime` instead of a closure, because the full graph is compiled once for all learners. The model still never sees a `user_id` argument (Step 10A).
+  - Tools read `user_id` from an injected `ToolRuntime` instead of a closure, because the full graph is compiled once for all learners. The model still never sees a `user_id` argument (autonomous planner step).
   - `teach` and `generate_quiz` return `Command(update=...)` to put the lesson or quiz questions in state.
   - `read_learner_state`, `default_planner_deps`, and their unit tests stay as they are.
 - Create `src/civica/graph/nodes.py`:
@@ -1096,7 +1102,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `planner_tools`: the prebuilt `ToolNode`, with `handle_tool_errors=(ValueError, ToolException)` so bad arguments go back to the model as text, and a `wrap_tool_call` hook that writes one trace row per call and turns `MemoryNotAllowed` into a `forbidden_write` halt in state. Writes stay fail-closed; the learner never sees an error.
   - `fallback_lesson`: `suggest_review_theme` plus a plain `teach` on that theme, used for `max_steps` and `forbidden_write`. Writes the terminal trace row.
   - Conditional edges: after `planner_model`, the step bound routes to `fallback_lesson` when `MAX_PLANNER_STEPS` is reached; otherwise `tools_condition` routes a tool call to `planner_tools` and a final message to the exit. After `planner_tools`, a forbidden write routes to `fallback_lesson`; anything else returns to `planner_model`.
-  - `thread_id` comes from the graph config and `user_id` from the runtime `context`, never from tool arguments (Step 10A).
+  - `thread_id` comes from the graph config and `user_id` from the runtime `context`, never from tool arguments (autonomous planner step).
   - State holds only checkpointer-serializable data. The quiz is kept as its questions, since `Quiz` holds an answer-logger function.
   - Each node is a plain function `(state, runtime) -> state_update`. Business logic lives in `explanation`, `assessment`, `memory`; nodes only orchestrate.
   - Known differences from 10A: a forbidden write no longer raises (`put_planner` still raises; `planner_tools` catches it). `ToolNode` runs the tool calls of one model reply concurrently, so other calls in a reply containing a forbidden write still run. Trace rows may be inserted in any order, so each row's `step_index` is computed, not counted: the number of tool calls in earlier replies of the turn plus the call's position in the current reply. Sorting by `step_index` gives cause-and-effect order across replies and the model's listing order within a reply.
@@ -1146,15 +1152,15 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Integration test using real `explanation`/`assessment` code but fake Claude + fake retriever (no network; writes real store rows). Drive the graph through a planner-backed coach turn for a test user with a fake model that emits a realistic tool-call sequence, and assert:
     - `memory_writer` runs before the graph terminates regardless of the planner's path, including a turn halted at `MAX_PLANNER_STEPS` (assert the store row exists after any successful turn).
     - The planner runs on `default_planner_deps()` with only the chat models faked, so the default retrievers (including `retrieve_corpus`) and the Postgres-backed stores are exercised against the test database.
-    - `planner_trace` rows exist for the turn and are readable by `user_id` + `thread_id`, in tool-call order when sorted by `step_index` (Step 10B; insert order is not guaranteed, so trace readers order by `step_index`, never `id` or `created_at`).
+    - `planner_trace` rows exist for the turn and are readable by `user_id` + `thread_id`, in tool-call order when sorted by `step_index` (planner graph refactor; insert order is not guaranteed, so trace readers order by `step_index`, never `id` or `created_at`).
     - A turn whose retrieval comes back empty writes a `retrieval_gaps` row with its theme and query.
     - Checkpointer resume: a second invocation on the same `thread_id` sees the state saved by the first (the UI steps rely on this).
-    - The per-turn message history is reset at the start of each turn (by `start_turn`, Step 10B), so the checkpoint does not grow with every turn.
+    - The per-turn message history is reset at the start of each turn (by `start_turn`, from the planner graph refactor), so the checkpoint does not grow with every turn.
     - Forbidden write: a planner turn that attempts a `topic_mastery` write through `record_outcome` leaves the store untouched, records `halt_reason="forbidden_write"` in `planner_trace`, and the learner gets the fallback lesson rather than an error.
 - **Test (external):** `tests/integration/graph/test_planner_external.py`, marked `@pytest.mark.external`, needs `ANTHROPIC_API_KEY`. One contract test: real Claude with the planner's tools bound returns tool calls matching the tool schemas and ends the turn with a final message.
 
 - Create `src/civica/graph/graph.py`:
-  - `build_graph(deps: PlannerDeps | None = None, checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph` - compiles the graph with `deps.store` as store and `checkpointer` as checkpointer. Defaults are `default_planner_deps()` and the shared `get_saver()`, so production gets Postgres and tests inject fakes (e.g. `InMemorySaver`, fake models) without monkeypatching. Callers pass `user_id` in the runtime `context` (`PlannerContext`) and `thread_id` in the config (Step 10B). The planner loop comes from the uncompiled `build_planner_graph(deps)`.
+  - `build_graph(deps: PlannerDeps | None = None, checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph` - compiles the graph with `deps.store` as store and `checkpointer` as checkpointer. Defaults are `default_planner_deps()` and the shared `get_saver()`, so production gets Postgres and tests inject fakes (e.g. `InMemorySaver`, fake models) without monkeypatching. Callers pass `user_id` in the runtime `context` (`PlannerContext`) and `thread_id` in the config (planner graph refactor). The planner loop comes from the uncompiled `build_planner_graph(deps)`.
   - The parent graph's state shares the planner's output keys (`reply`, `lesson`, `quiz_questions`, `tool_calls`, `halt_reason`) so callers read a turn's result with `graph.get_state(config).values` after streaming.
   - Planner state holds pydantic `Explanation` and `Question` objects. The default checkpoint serializer accepts them; if `LANGGRAPH_STRICT_MSGPACK` is ever enabled, register their modules in `allowed_msgpack_modules`.
   - `route_input`: graph input is a tagged union by kind (`message`, later `answer`, `mock_start`, `mock_submit`). This step handles `message` only, which enters the planner subgraph.
@@ -1178,7 +1184,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
                ├─ mock_start ────────────► mock_exam_generate ───────────────────────► memory_writer ─► END
                └─ mock_submit ───────────► mock_exam_score ───► update_mastery ──────► memory_writer ─► END
     ```
-    `*` wrong answers only (Step 15).
+    `*` wrong answers only (added in a subsequent step).
   - State that every turn enters through `route_input`, every path ends at `memory_writer`, and study plan, coverage and mistake-driven review are planner tools, not separate nodes.
   - Add `graph` to `src/civica/graph/` in the project structure diagram.
 
@@ -1194,93 +1200,170 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 ---
 
 ## Step 12: Coach UI for lessons
+The learner submits a prompt, watches the spinner, and reads the finished turn. Text appears when the turn ends. This section proves the server-owned turn before anything builds on it.
 
 **Goal:** The learner chats with the coach in the web app and watches lessons arrive. There is one coach conversation per user. The planner reads intent from the learner's message. At this point, a logged-in user can:
+  - See an introduction explaining the app and how to use it:
+    - A welcome card appears in the turn area whenever the learner has no saved turn. It names the five official themes and suggests example prompts.
+    - A '?' button in the header reopens the same introduction in a dialog at any time.
   - Ask for a lesson:
-    - Type a prompt such as "Teach me about the principles of the Republic" and press Enter or the Submit button.
-    - Observe each planner step (e.g. reading learner state, retrieving passages, teaching) appearing in a step log as it happens.
-    - See the lesson text appear word by word as it is generated.
-    - Read the finished lesson with citations: the source page, the section, and the match score for each passage it drew on.
-  - Not enough material: if retrieval finds nothing for the request, the lesson says there is not enough material and shows no citations.
-  - See questions read-only: the one-question comprehension check that usually follows a lesson (and the questions from a "Quiz me" request) shows with its options, but no option can be checked yet (Step 13).
+    - Type a prompt such as "Teach me about the principles of the Republic" and press Enter or the send button. The input clears.
+    - Until the response appears, the user sees a spinner with a playful verb beside it (for example "Consulting the sources…") that changes every few seconds. This prevents the user from thinking that the app is broken for longer responses.
+    - While the program is in process, the user is blocked from entering more text in the input window and from hitting the send button. Hitting 'Enter' during this time has no impact.
+    - Read the finished lesson in one coach bubble. Its sources sit in a closed footer inside the bubble, grouped by page title, and each section opens to its passage. The learner never sees slugs, similarity scores, or tool names.
+    - The planner's closing reply is shown only on a turn with no lesson and no quiz, since otherwise it would repeat what the learner already sees.
+  - See a quiz (read only in this step):
+    - If the user requests something like "Quiz me", the coach shows the questions in one "Check your comprehension" card, questions numbered and options lettered. It looks the same as the comprehension check after a lesson, without the hooked line, since there is no lesson to hang from. Answers cannot be selected yet.
+    - Following a lesson, the coach may add a comprehension-check question in the same card, hooked onto the lesson visually. NB: The planner skips such a comprehension check if the learner asked a direct question. It's also possible that generating the question can fail and will therefore not display.
+  - Not enough material:
+    - If retrieval finds nothing for a request, the coach says there is not enough material and shows no sources.
   - Recognize a fallback lesson:
     - If the planner exceeds its step limit or attempts a forbidden write, the user gets a fallback lesson instead of an error.
     - The fallback lesson comes from the graph's `fallback_lesson` node, so it was not chosen by the planner.
-    - The inspector flags that the lesson shown is a fallback. Learners stop seeing this flag once the inspector is hidden behind the debug flag (Step 20).
-  - Start a new turn: a new turn replaces the previous one on screen; the previous lesson is not shown.
-  - Refresh without losing the turn: the user reloads the browser and the page shows the same turn, read back from the persisted conversation.
-  - Come back later: the user sees the most recent turn after logging out and back in, after closing the tab and opening the app in a new tab, or after logging in from a different browser or computer (the conversation is saved per user, not per browser). Earlier turns are not shown: turn history is out of MVP scope.
-  - Cannot double submit: the prompt input is disabled while a turn is running, so a second click on Submit (or pressing Enter a second time) does not start an overlapping turn.
-  - One turn at a time per user: submitting from a second tab or browser while a turn runs shows "A turn is already running" and starts nothing, so two turns never write to the same conversation at once.
-  - Recover from a failed turn: if a turn errors (e.g. the Anthropic API or the database is unavailable), the user sees "Something went wrong, please try again." and the prompt input works again.
-  - View the inspector (developer view, open by default for now). A right-hand panel shows:
-    - the tools the planner called, in order, with their arguments
-    - why the turn ended (`halt_reason`) and the fallback flag
-    - the learner's current state: goal, mastery by theme, recent mistakes. Expect it to be mostly empty: the goal is set at onboarding (Step 20), mastery is written only once answers are scored (Step 15), and mistakes appear only when the planner records one during a turn.
+    - A small note under the lesson says "This is a fallback lesson."
+  - Start a new turn: 
+    - The learner asks for a different lesson and a new turn replaces the previous one on the screen. 
+    - The previous lesson is not shown.
+  - Return after dropping a session mid-turn:
+    - The learner reloads during a turn, and the page shows the running turn and then its result.
+    - The learner reloads after a turn finishes, and the page shows the same turn, read back from the persisted conversation.
+    - A new tab or another browser has the same result.
+    - The learner closes the current tab during a turn and the turn still finishes and is saved. 
+    - When the learner returns later (following logout/login), they see the most recent turn.
+  - One learner, one turn:
+    - After the learner types a prompt and clicks send, the input field and the send button are disabled while the turn is running. 
+    - While the turn is running, a second click on send (or pressing Enter a second time) does not start an overlapping turn. 
+    - The learner opens a second tab or browser during the turn and the current turn displays in a running state with the input disabled.
+    - If a tab submits just as a turn starts elsewhere, that tab shows a "A turn is already running" notification and nothing new starts. Two turns never write to the same conversation at once.
+  - Recover from a failed turn:
+    - A turn errors (e.g. external service or database is unavailable). The user sees "Something went wrong. Please try again." under their message and the prompt input becomes available again. 
+    - If the most recent turn never finished (it failed, or the server restarted), reopening the page shows "Your last request didn't finish. Please try again." and not the previous lesson.
+    - If the saved conversation cannot be read, the page shows "Something went wrong. Please try again." and no welcome card.
 
-**What the user cannot do yet** (added in subsequent steps):
-  - check an answer, or use the **Teach me** / **Quiz me** quick actions (Step 13)
-  - see token costs (Step 14)
-  - answer questions for real, with scoring, logging, and mastery (Step 15)
-  - take a mock exam (Step 16)
-  - see a "why this next" line (Step 18) or coverage (Step 19)
-  - set a study goal at onboarding, or hide the inspector (Step 20)
+What the user cannot do **yet**:
+  - watch the lesson appear word by word as it is generated
+  - ask a follow-up question about the previous turn
+  - select answers to multiple choice quizes in the quiz card
+  - check a written answer; At this point, answers are not scored, logged, or recorded for mastery.
+  - use quick actions such as 'Teach me' or 'Quiz me' buttons
+  - take a mock exam
+  - set an overall study goal
 
-**Implementation**
+**Internal Tests**
 - **Test:** `tests/unit/ui/test_turn_view.py` (unit: build final planner states by hand; no graph, no DB)
-  - A grounded lesson yields one citation per context chunk, in retrieval order, with `page_slug`, `section_id`, and similarity.
-  - An insufficient-material lesson yields no citations.
-  - Quiz questions map to read-only items that never expose the correct answer.
-  - A turn that ended in `max_steps` or `forbidden_write` is flagged as a fallback lesson.
-- **Test:** `tests/unit/ui/test_reply_stream.py` (unit: hand-built `(message_chunk, metadata)` pairs; no graph)
-  - Text chunks from the planner's final message and from the explanation model are yielded in order.
-  - Tool-call chunks, and chunks from question generation or the critic, are dropped.
-- **Test:** `tests/unit/ui/test_stream_bridge.py` (unit: plain sync generators; no graph)
-  - Items from a sync generator arrive in order through the async bridge, and the bridge ends when the generator ends.
-  - An exception raised inside the generator reaches the awaiting caller.
-  - Other coroutines keep running while the generator blocks, so one slow turn does not freeze the app.
-- **Test:** `tests/unit/llm/test_client.py`: each profile's model carries its caller tag (`planner`, `explanation`, `quiz`).
-- **Test:** create `tests/integration/ui/test_lessons.py`. Add a `signed_in_user` fixture to `tests/integration/ui/conftest.py` so each feature test file can start signed in without copying the helpers in `test_auth.py`. The real graph from `build_graph(...)` is added to the injected `AppDeps`, compiled with the existing fakes in `tests/support/planner.py` (fake planner and content models, fake retriever, fake trace writer and answer logger), `InMemoryStore`, and `InMemorySaver`. Only external services are faked, so wiring bugs such as a missing runtime `context` or unstreamed subgraph steps fail the test.
-  - Log in and submit a prompt: the fake reply and at least one citation render.
-  - The lesson text streams: the fake explanation model emits it in several chunks, and the final rendered lesson matches the checkpointed state.
-  - The step log shows the planner's tool steps (from inside the planner subgraph), not only the outer graph's nodes.
-  - A turn that produced questions shows them with their options, none preselected, and no **Check** control.
-  - Reload: opening `/` again shows the same lesson and questions (rendered from the checkpointer, since a NiceGUI page rebuilds on every visit).
+  - A turn with no lesson or quiz shows the learner message and the reply. A turn with a lesson or quiz hides the reply.
+  - A grounded lesson yields one source per section, in retrieval order, each with its page title, section heading, and passage, and no slug or score.
+  - Sources are rebuilt from the chunk text as ingest wrote it (`<title> - <heading>\n\n<passage>`). A title may contain the separator; a chunk with one label uses it as the title; a chunk with none gets a plain title, never a slug.
+  - Two chunks from one section are one source. Overlap between adjacent chunks appears once, and text left out at the start, in a gap, or at a cut end is marked.
+  - Sources group by page title, pages in first-seen order.
+  - An insufficient-material lesson yields no sources.
+  - Quiz questions map to read-only items, in order, that never expose the correct answer.
+  - A turn that ended in `max_steps` or `forbidden_write` is flagged as a fallback lesson, and its text appears once even though `reply` and `lesson.text` match. A turn ended by a final message is not a fallback.
+  - An empty thread yields no turn view.
+  - An unfinished turn (`snapshot.next` is not empty) yields "Your last request didn't finish. Please try again." and none of the stale turn content, including on the first turn of a thread.
+- **Test:** `tests/unit/ui/test_turns.py` (unit: fake graph and plain threads; no NiceGUI)
+  - A turn that streams to its end finishes, and its `turn_id` and `halt_reason` are read from the updates.
+  - The graph runs with the user in its `context`.
+  - `active` finds the live turn, and nothing once it has ended.
+  - A second start for the same user raises `TurnAlreadyRunning`, a different user is unaffected, and the same user can start again after a finished turn.
+  - A graph that raises marks the turn failed with the error type, logs the exception, and frees the user to start again.
+  - The caller is never blocked while a turn runs.
+  - `wait` returns as soon as the turn ends, finished or failed, and returns `False` at its timeout while the turn still runs.
+- **Test:** `tests/unit/llm/test_client.py`: each profile's model has a request timeout.
+- **Test:** update the pin in `tests/unit/test_prompt_sets.py` for the new planner prompt version.
+- **Test:** shared UI test support, so each feature test file can start signed in without copying the helpers in `test_auth.py`:
+  - `tests/support/ui.py`: test credentials, element markers, and sign-in helpers. `test_auth.py` uses it too.
+  - `tests/support/planner.py`: `ControlledPlannerModel`, a fake planner a test can hold or break at one call to observe a turn in flight, and `make_planner_fakes` to build every planner fake over one store.
+  - `tests/integration/ui/conftest.py`: the real graph from `build_graph(...)` is added to the injected `AppDeps`, compiled with the fakes in `tests/support/planner.py` (planner and content models, retriever, trace writer, answer logger), `InMemoryStore`, and `InMemorySaver` using the production serializer. Only external services are faked, so wiring bugs such as a missing runtime `context` or unstreamed subgraph steps fail the test. Add `learner_id`, `signed_in_user`, and `second_browser` fixtures.
+  - `signed_in_user` and `second_browser` start signed in without the sign-in form, for example by writing the session through `civica.ui.auth.sign_in` in the simulated browser's storage. Check first that NiceGUI's `User` allows this; if not, keep the form and note why in the completion notes.
+- **Test speed:** follow the UI test speed convention (Test fixture conventions).
+  - `ControlledPlannerModel` holds and releases with a `threading.Event`, not a delay.
+  - Tests wait for a turn to end with `ActiveTurn.wait`, not by polling `turn_runner.active`.
+  - The no-scroll tests in `test_prompt_placement.py` wait for the turn's final draw, then check the recorded scripts. No settle delay.
+  - Done when the new UI files pass the 1 second per-test limit, and the UI suite's total time is noted.
+- **Test:** create `tests/integration/ui/test_lessons.py`
+  - Submit a prompt: the lesson renders once, not repeated in a reply, and the input clears.
+  - The learner sees no slugs, scores, or tool names.
+  - Sources sit inside the lesson as one closed section of closed passages, each page title shows once, and they survive a reload.
+  - While a turn runs, a spinner verb from the fixed list shows beside the spinner.
+  - A turn that produced questions shows them in one quiz card, titled with no question count, numbered with lettered options, none preselected, and no way to answer. A quiz-only turn draws the same card with no hooked line.
+  - Reload: opening `/` again shows the same learner message, lesson, and questions (rendered from the checkpointer, since a NiceGUI page rebuilds on every visit).
+  - Reload during a turn: the new page shows the running turn with the prompt input disabled, then shows the finished result.
+  - A closed page does not stop the turn: the result is shown on the next visit.
   - A second turn replaces the first: the previous lesson is no longer shown.
   - The prompt input is disabled while a turn runs, so a second submit cannot start an overlapping turn.
-  - A second simulated browser for the same user, submitting while a turn runs, shows "A turn is already running" and the graph is invoked once.
-  - A graph that raises partway through the stream shows the friendly error, logs the exception, and leaves the prompt input enabled.
-- **Test:** `tests/browser/test_coach_smoke.py` is a real-browser smoke test. 
-  - NiceGUI's `User` fixture (existing tests) skips the page's JavaScript, the live websocket between page and server, and the browser's cookie handling, which this step starts to rely on for streaming.
+  - A blank prompt starts nothing.
+  - A second simulated browser for the same user, submitting while a turn runs, is told "A turn is already running" and the graph is invoked once.
+  - A graph that raises partway through the stream shows "Something went wrong. Please try again.", logs the exception, and leaves the prompt input enabled. Reloading afterwards shows "Your last request didn't finish. Please try again." and not the previous lesson.
+  - Opening the page logs one line saying what it found: no turn yet, a saved turn, a running turn, or an unfinished turn.
+- **Test:** create `tests/integration/ui/test_intro.py`
+  - A new learner sees the welcome card in the turn area, naming every theme.
+  - No welcome card once a turn starts, after a finished turn (lesson or reply only), after a failed turn, or when the saved thread cannot be read. Each holds after a reload.
+  - The header button stands out from the header, opens the intro on an empty thread and after a finished turn, and closes from inside.
+- **Test:** create `tests/integration/ui/test_prompt_placement.py`
+  - The prompt and send button are page content after the whole turn area: after the welcome card, after a running turn's message and spinner, and after a lesson and quiz.
+  - Drawing a running or finished turn does not scroll to the end of the page.
+
+**Implementation**
+- Extend `src/civica/llm/client.py`: set a request `timeout` on `AnthropicChat` (`REQUEST_TIMEOUT_SECONDS`, starting at 120 seconds), so a hung call cannot leave the prompt input disabled indefinitely. Revisit the value at the check-in.
+- Extend `src/civica/memory/checkpointer.py`: expose the serializer (`state_serializer()`) so test savers use the production allow-list of state types. A state type missing from the list then fails in tests, not at runtime.
+- Extend `src/civica/graph/prompts.py`: the learner already sees the lesson and any quiz questions, so the planner's final message must not repeat or recap them and must not ask the check question. Remove the line about asking a check question in the reply. Bump `PLANNER_PROMPTS.version` to the next version and re-pin its hash.
+- Create `src/civica/ui/turns.py`: the server owns each running turn and pages only display it. No NiceGUI import.
+  - Why: a page handler that owned the turn could not be rejoined after a reload, and other tabs would show nothing. The graph, checkpointer, and store use sync psycopg, and NiceGUI runs every user on one event loop, so the turn must run off that loop anyway. Moving the stack to LangGraph's async saver and store is deferred; a worker thread keeps the back end unchanged.
+  - `coach_config(user_id)`: the config of the user's one coach conversation.
+  - `TurnRunner(graph)`: `start(user_id, graph_input) -> ActiveTurn` raises `TurnAlreadyRunning` if that user has a live turn. `active(user_id) -> ActiveTurn | None` finds the live turn. Each turn runs in its own worker thread.
+  - `ActiveTurn`: thread-safe progress. `snapshot()` returns a frozen view of the status (running, finished, failed) and error type. `wait(timeout) -> bool` blocks until the turn ends (a `threading.Event` set with the final status), so tests and callers wait on the turn instead of polling.
+  - Run `graph.stream(input, config={"configurable": {"thread_id": ...}}, context=PlannerContext(user_id=...), stream_mode=["updates"], subgraphs=True)`. This is the payoff of the graph-native loop from the planner graph refactor.
+    - `updates`: read `turn_id` from the `start_turn` update and `halt_reason` when it is set. `memory_writer` updates are `None`.
+    - `subgraphs=True` is required: the planner is a subgraph, and without it the stream emits only one update for the whole planner, so `turn_id` would arrive only at the end of the turn.
+    - `user_id` goes only in `context`, never in the input or config (planner graph refactor).
+  - **One turn per user:** the runner tracks live turns per user. This is per process, which is enough while the app runs as one process; a multi-process deployment would need a database lock instead.
+  - **Failed turn:** catch the exception in the worker, log it with `logger.exception`, and mark the turn failed. Set the final status before freeing the user, so the user is always freed and an error never leaves the input locked.
+  - **Logging:** log turn start, and turn end with status, `user_id`, `turn_id`, `halt_reason`, and duration, using the web app's existing logging setup. Read `turn_id` from the `start_turn` update. Log lines carry no learner text.
+- Create `src/civica/ui/turn_view.py`: frozen dataclasses `TurnView`, `SourceView`, `SourcePage`, `QuizItemView` built from the graph's state (`learner_message`, `reply`, `lesson`, `quiz_questions`, `tool_calls`, `halt_reason`), plus `group_by_page`. No NiceGUI import, so the shaping logic is unit-testable.
+  - `TurnView` holds the learner message, the reply (empty when there is a lesson or quiz), the lesson text, the sources, the quiz items, the fallback flag, and a notice for an unfinished turn.
+  - Sources are rebuilt per section from the lesson's `context_chunks`, joining chunks by `chunk_index` and the chunker's `CHUNK_SIZE` and `OVERLAP`.
+- Create `src/civica/ui/intro.py`: one function draws the intro text, shared by the welcome card and the header dialog.
+- Extend `src/civica/ui/deps.py`: add required `graph` and `turn_runner` to `AppDeps`. `default_app_deps()` builds both once per process, so the chat models and pool are not rebuilt per page visit. Tests pass their own through `register_pages(deps)`; no new seams.
+  - `ui_user` in `tests/integration/ui/conftest.py` must now supply a graph.
+  - `tests/integration/ui/test_entrypoint.py` now builds the real graph, so it needs the database and possibly a dummy API key.
+  - In `src/civica/ui/app.py`, call `session_secret()` before building deps, so a missing secret still fails fast.
+- Create `src/civica/ui/pages/coach.py` for the coach. `src/civica/ui/pages/home.py` keeps the route and the sign-in check, draws the header (username, intro button, log out), and calls it.
+  - **One conversation:** every coach turn uses `coach_config(user_id)` (`thread_id = f"{user_id}:coach"`) so `PostgresSaver` restores it. The mock exam gets its own thread in a subsequent step.
+  - **Layout:** the turn area, then the prompt as page content right after it, not in a footer. Do not scroll the page when a turn is drawn. See `coach-ui.md`.
+  - **Prompt input:** a text input with a send button (Enter also sends) and the hint "Ask for a lesson or a quiz". Blank prompts are ignored, length is capped with `maxlength`, and the input clears after sending. Disabled while a turn runs. Each turn stands alone until the follow-up context step, so the hint steers learners to new requests.
+  - **Live turn:** each page runs one `ui.timer(0.1)` that reads `turn_runner.active(user_id)` and draws its snapshot. A lesson turn takes about 15s, so the page must look alive while it runs.
+    - Show the learner message and a spinner with a spinner verb beside it. Pick verbs at random from a fixed list (see `coach-ui.md`) and change the verb every few seconds. The verb is decoration, not real progress.
+    - The same timer picks up a turn started from another tab or after a reload.
+    - When the turn finishes, redraw from `graph.get_state(config)` rather than rebuilding it from the streamed updates.
+  - **Turn already running:** catch `TurnAlreadyRunning`, show a "A turn is already running" notification, and start nothing. That page then follows the running turn.
+  - **Failed turn:** show the learner message and "Something went wrong. Please try again.", and re-enable the input.
+  - **Unfinished turn:** when the page opens on a turn that never finished, show "Your last request didn't finish. Please try again." and no stale content.
+  - **Empty thread:** show the welcome card.
+  - **Turn rendering:** in generation order, so nothing moves when the turn ends: the learner's message (`ui.chat_message(sent=True)`), the lesson bubble with its sources footer, the quiz card (read only), the reply bubble (only when there is no lesson or quiz), and the fallback note. The live view uses the same order.
+    - Survive reloads: a NiceGUI page function runs on every visit, so build the page from `graph.get_state(config)`, not only right after streaming.
+    - Make the page function async and read through `await run.io_bound(...)`. If the read fails, log the exception and show "Something went wrong. Please try again." A sync read on the event loop could freeze every user for the pool timeout if the database is down.
+  - **Logging:** when the page opens, log one line with the `user_id` and what it found: no turn yet, saved turn, unfinished turn, running turn, or read failed.
+
+**Check In:** 
+Stop and confirm with user that the implemented code is satisfactory. Prompt the user to run `uv run python -m civica.ui.app`:
+  - Log in, ask for a lesson, and confirm the welcome card, spinner verbs, sources, and read-only comprehension question are sensible.
+  - A second turn must not show the previous turn's lesson.
+  - Reload during a turn, and open a second tab during a turn: both must show the running turn.
+  - Close the tab during a turn and reopen it: the saved result must appear.
+
+**Smoke Test**
+`tests/integration/ui/test_coach_smoke_external.py` is a real-browser smoke test. It sits under `tests/integration/` so that it can use `db_schema` from the integration conftest.
+  - NiceGUI's `User` fixture (existing tests) skips the page's JavaScript, the live websocket between page and server, and the browser's cookie handling, which the timer-driven turn view relies on in a real browser.
   - Use NiceGUI's `Screen` fixture (Selenium driving Chrome against a running server) to implement the smoke test. Add dev dependency `selenium`, and load both fixtures by switching `addopts` to `-p nicegui.testing.plugin`.
-  - Keep it to 1 to 3 tests: sign in, submit a prompt, see the streamed reply render; reload and see the same turn.
-  - Add a `browser` marker and exclude it from the default run (`-m 'not external and not browser'`). Document the requirements (Chrome and its driver) at the top of the file.
-  - Confirm how the running server receives test deps (the per-test DB schema and the fake graph) before writing the tests; the `User` fixture's in-process wiring may not carry over.
-- Extend `src/civica/llm/client.py`: tag each profile's model with its caller name (`ChatAnthropic` accepts `tags`). The reply stream filters on these tags, and Step 14 reuses them to split token usage by caller.
-- Extend `FakeChatModelBase` in `tests/support/llm.py` with `_stream`, so fakes emit text in several chunks and token streaming is exercised in tests.
-- Create `src/civica/ui/reply_stream.py`: `reply_text(chunks) -> Iterator[str]` filters the `messages` stream down to learner-facing text (the planner's final message and the explanation model, by caller tag), dropping tool-call chunks. No NiceGUI import.
-- Create `src/civica/ui/stream_bridge.py`: `iterate_in_thread(make_iter) -> AsyncIterator[T]` runs a sync iterator in a worker thread and hands each item back to the event loop through an `asyncio.Queue`. Plain asyncio, no NiceGUI import.
-  - Why: the graph, checkpointer, and store use sync psycopg. NiceGUI runs every user on one event loop, so calling `graph.stream()` directly would freeze the app for everyone during a ~15s turn. Moving the stack to LangGraph's async saver and store is deferred; this bridge keeps the back end unchanged.
-- Create `src/civica/ui/turn_view.py`: frozen dataclasses `TurnView`, `CitationView`, `QuizItemView` built from the planner's final state (`reply`, `lesson`, `quiz_questions`, `tool_calls`, `halt_reason`). No NiceGUI import, so the shaping logic is unit-testable.
-- Extend `src/civica/ui/deps.py`: add `graph` to `AppDeps`. `default_app_deps()` builds it once per process with `build_graph()`, so the chat models and pool are not rebuilt per page visit. Tests pass their own graph through `register_pages(deps)`; no new seams.
-  - Also add `turn_locks: dict[UserId, asyncio.Lock]` (empty by default) so each test gets fresh locks. The locks are per process, which is enough while the app runs as one process; a multi-process deployment would need a database lock instead.
-- Create `src/civica/ui/pages/coach.py` for the coach and `src/civica/ui/pages/inspector.py` for the inspector panel. `src/civica/ui/pages/home.py` keeps the route and the sign-in check, and calls both.
-  - **One conversation:** every coach turn uses `thread_id = f"{user_id}:coach"` so `PostgresSaver` restores it. The mock exam gets its own thread in Step 16.
-  - **Prompt input:** a text input with a send button (Enter also sends). Disabled while a turn runs.
-  - **Streamed turn:** run `graph.stream(input, config={"configurable": {"thread_id": ...}}, context=PlannerContext(user_id=...), stream_mode=["updates", "messages"], subgraphs=True)` through `iterate_in_thread`. A lesson turn takes about 15s, so show progress two ways as it runs. This is the payoff of the graph-native loop from Step 10B.
-      - `updates`: append each step to a step log (`ui.expansion`) as it runs.
-      - `messages`: pass the token chunks through `reply_text` and append them to a `ui.markdown` inside a `ui.chat_message`, so the lesson and reply appear word by word. LangGraph captures tokens from chat models called inside tools, so no engine changes are needed.
-    - `subgraphs=True` is required: the planner is a subgraph, and without it the stream emits only one update for the whole planner instead of one per step.
-    - Once the stream ends, replace the streamed text with the full turn rendering below.
-    - `user_id` goes only in `context`, never in the input or config (Step 10B).
-    - After the stream ends, read the turn's result with `graph.get_state(config).values` rather than rebuilding it from the streamed updates.
-  - **One turn per user:** take the user's lock from `deps.turn_locks` before streaming. If it is already held, show "A turn is already running" and return without invoking the graph.
-  - **Failed turn:** wrap the streamed turn in `try`/`except`/`finally`. On an exception, log it with `logger.exception` and show "Something went wrong, please try again." The `finally` releases the lock and re-enables the turn controls, so an error never leaves the input locked. The stream bridge already re-raises worker-thread errors in the caller.
-  - **Turn rendering:** the planner `reply`, the lesson text with its citations, and any questions read-only (options listed, no control to choose one).
-    - Survive reloads: a NiceGUI page function runs on every visit, so build the page from `graph.get_state(config).values` (a cheap checkpointer read), not only right after streaming.
-  - **Inspector panel** in a `ui.right_drawer` (open by default while developing), kept apart from the learner's view: tool calls in order with their arguments, `halt_reason`, and the fallback-lesson flag, all read from the graph's final state. Also the learner state (goal, mastery, mistakes) from the existing `read_learner_state` against the graph's store. No new DB readers.
-- **Check In:** Stop and confirm with user that the UI is satisfactory. Prompt the user to run `uv run python -m civica.ui.app`, log in, ask for a lesson, and confirm the streamed steps, citations, read-only comprehension question, and inspector trace are sensible. A second turn must not show the previous turn's lesson.
-  - Review word-by-word streaming with the user: is it worth keeping, or is a plain ~15s wait with the step log preferable? If streaming is dropped, remove `messages` from `stream_mode`, `reply_stream.py`, and its tests. Keep the caller tags (Step 14 needs them) and the stream bridge (the step log still needs it).
+  - Keep it to 1 to 3 tests: sign in, submit a prompt, see the lesson render; reload and see the same turn.
+  - Mark it `@pytest.mark.external`, which keeps it out of the default run because it needs a real Chrome. Document the requirement (Chrome) at the top of the file.
+  - The driver is not a project dependency, because its version must match the installed Chrome. Selenium Manager (part of `selenium`) fetches the matching driver on the first run, which needs network access. Set `SE_CACHE_PATH` to `.selenium-cache/` in the test file, before the driver starts, so the driver stays inside the project. Confirm on the first run that it lands there.
+  - Add `.selenium-cache/` and `screenshots/` (written by `Screen`) to `.gitignore`.
+  - The `Screen` server runs in a thread of the test process, so tests call `register_pages(deps)` directly and set `storage_secret` through `screen.ui_run_kwargs`. Confirm this works with the per-test connection before writing the tests.
+
+**Check In:**
+Stop and confirm with user that the implemented code is satisfactory. Prompt the user to run `uv run pytest -m external`.
 
 - **README:**
   - Replace `TBD` under **Usage** with:
@@ -1295,8 +1378,40 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
     > Your study history and coaching memory persist across sessions. Logging out or session expiration end only the browser session.
     >     
     > 3. Chat with the coach  
-    > Ask for a lesson or a quiz in your own words. 
-    > The inspector panel exposes the planner steps, tools called, and reason for end of turn.
+    > Ask for a lesson or a quiz in your own words. The **?** button in the header shows how to use Civica.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 12B: Follow-up context
+
+**Goal:** 
+- The coach remembers the previous exchange, so a learner can follow up on the last turn. 
+- At this point, a logged-in user can type "explain that more simply" or "give me another example" and get an answer about the previous lesson. 
+- The screen still shows only the latest turn.
+
+**Why this needs new state:**
+The graph input overwrites `learner_message` before the planner runs, and `start_turn` clears `messages`, so nothing from the previous turn reaches the model. 
+The previous exchange must be saved when a turn completes.
+
+- **Test:** extend `tests/unit/graph/test_planner_graph.py`
+  - The second turn's planner prompt contains the first turn's learner message and reply.
+  - The first turn on a thread has no previous exchange in its prompt.
+  - A long lesson is cut to the fixed limit.
+  - A failed turn leaves the last good exchange in place.
+- **Test:** extend `tests/integration/graph/test_graph.py`: the previous exchange survives the real checkpointer, and any new state type is registered in `_STATE_TYPES`.
+- **Test:** extend `tests/integration/graph/test_planner_external.py`: one real follow-up stays on the previous topic.
+- Extend `src/civica/graph/graph.py`: add a `previous_exchange` state field, written when a turn completes and passed into the planner. Keep it bounded: the learner message, the reply, and the lesson text cut to a fixed limit.
+- Extend `src/civica/graph/nodes.py`: `planner_model` adds the previous exchange to the model call as context. Like the system prompt, it is not stored in `messages`.
+- Extend `src/civica/graph/prompts.py`: tell the planner how to use the previous exchange, and bump `PLANNER_PROMPTS.version` to the next version and re-pin its hash. Facts must still come from tools.
+- Extend `src/civica/ui/pages/coach.py`: change the input hint to invite follow-ups.
+- **Check In:** Stop and confirm with the user. Prompt the user to try several follow-ups in the running app and judge whether the answers are useful enough to justify the added tokens per turn.
+
+- **README:**
+  - Add to the **Usage → Web UI** text: "The coach remembers your last exchange, so you can ask follow-up questions."
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -1310,16 +1425,16 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Use quick actions: **Teach me** and **Quiz me** buttons above the prompt input send those messages, so a learner who does not know what to type can start. They are shortcuts for a message, not modes.
   - Ask for a quiz:
     - Type a prompt such as "Quiz me" (or press **Quiz me**).
-    - Observe the step log. The planner's short reply streams word by word; the questions appear all at once when the turn finishes (question generation is not streamed).
+    - Watch the spinner. The questions appear when the turn finishes. The planner's reply is not shown on a quiz turn, since it would only repeat the questions.
     - See the set of multiple-choice questions. No options are preselected.
-  - Practice check: on any question (from a quiz or a lesson's comprehension check), select an answer and press **Check** to see whether it is correct and the source passages behind the question. Checks are labeled "not scored or saved yet": nothing is logged and mastery does not change (real answers arrive in Step 15).
-  - Fallback on a quiz request: if the planner hits its step limit or a forbidden write, the user gets a fallback lesson instead of a quiz, flagged in the inspector.
+  - Practice check: on any question (from a quiz or a lesson's comprehension check), select an answer and press **Check** to see whether it is correct and the source passages behind the question. Checks are labeled "not scored or saved yet": nothing is logged and mastery does not change (real answers arrive in the answers + derived mastery step).
+  - Fallback on a quiz request: if the planner hits its step limit or a forbidden write, the user gets a fallback lesson instead of a quiz, with the fallback note under it.
   - Move on: a lesson after a quiz replaces the quiz questions on screen (`start_turn` clears them at the start of every turn).
   - Refresh or come back later: the page shows the same questions. Practice checks are not saved, so questions the user had checked show as unanswered again.
 
 **Implementation**
 - **Test:** extend `tests/unit/ui/test_turn_view.py`: `check_choice` reports right and wrong choices and returns the question's sources.
-- **Test:** create `tests/integration/ui/test_quiz.py` (same wiring as Step 12)
+- **Test:** create `tests/integration/ui/test_quiz.py` (same wiring as the Coach UI for lessons step)
   - **Quiz me** sends the message, and the turn renders the questions with none preselected.
   - **Check** shows the result and the question's sources, and the fake answer logger records nothing.
   - A lesson's comprehension-check question also has **Check**.
@@ -1328,9 +1443,9 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - The quick-action buttons are disabled while a turn runs.
 - Extend `src/civica/ui/turn_view.py`: `check_choice(question, choice)` for the practice answer check.
 - Extend `src/civica/ui/pages/coach.py`:
-  - **Quick actions:** **Teach me** and **Quiz me** buttons that submit those messages through the same path as typed input. Disabled while a turn runs.
-  - **Questions:** each question as a `ui.radio` (no option preselected) with a **Check** button that reveals correct/incorrect and the question's sources.
-  - The check is practice only, labeled "not scored or saved yet". It writes nothing to `quiz_answers` and never moves mastery; Step 15 replaces it with a real `answer` input through the graph.
+  - **Quick actions:** **Teach me** and **Quiz me** buttons that submit those messages through the same path as typed input (`TurnRunner.start`). Disabled while a turn runs.
+  - **Questions:** inside the quiz card, each question's lettered options become a `ui.radio` (no option preselected) with a **Check** button that reveals correct/incorrect and the question's sources, shown the same way as lesson sources (see `coach-ui.md`).
+  - The check is practice only, labeled "not scored or saved yet". It writes nothing to `quiz_answers` and never moves mastery; the answers + derived mastery step replaces it with a real `answer` input through the graph.
 - **Check In:** Stop and confirm with user that the UI is satisfactory. Prompt the user to press **Quiz me** in the running app and confirm the planner returns a quiz (it follows explicit requests now that there are no modes), that **Check** works on quiz and comprehension questions, and that a following lesson replaces the quiz.
 
 - **README:**
@@ -1342,21 +1457,124 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 14: Token usage per turn
+## Step 14: UI logging
 
-**Goal:** Show what each turn costs. Total the token usage of every LLM call in a turn (planner, explanation, question generation, critic), split by caller, and show it in the inspector. Then use real numbers to size the token caps and inform the LLM choice.
+**Goal:** A developer can follow every learner action in the server logs, from the page opening to the turn ending, and match a turn to its `planner_trace` rows. Logs never carry learner text. At this point the web app logs:
+  - account events (session management and minimal UI): registration, registration rejected, sign-in, sign-in rejected, and log out
+  - the coach page opening and what it found (Coach UI for lessons)
+  - each request for a turn and how it was sent: typed, **Teach me**, or **Quiz me**
+  - a request rejected because a turn is already running
+  - each turn starting, failing, and ending, all carrying the same `turn_id`
+  - a failure to read the saved conversation
+  - each practice **Check** and whether it was right (Coach UI for quizzes). Checks are saved nowhere else, so this line is their only record until the answers + derived mastery step.
 
+**Implementation**
+- **Test:** extend `tests/unit/ui/test_turns.py`. Tests read only the `civica.ui.turns` logger.
+  - The start, failure, and end lines for a turn all carry the same `turn_id`.
+  - A turn that fails before `start_turn` runs still logs its failure, with the `turn_id` shown as unknown.
+  - The end line carries the status, `halt_reason`, duration, and, for a failed turn, the error type.
+- **Test:** extend `tests/integration/ui/test_lessons.py` and `tests/integration/ui/test_quiz.py`. Tests read only the `civica.ui.pages.coach` logger.
+  - A typed prompt, **Teach me**, and **Quiz me** each log one request line naming how the turn was sent.
+  - A submit rejected because a turn is already running logs one line.
+  - A practice **Check** logs one line with the question id and whether the choice was right.
+- **Test:** extend `tests/integration/graph/test_graph.py` or `tests/integration/ui/test_lessons.py`: the `turn_id` in the turn's log lines matches its `planner_trace` rows.
+- **Test:** a turn sent with a distinctive learner message writes no log line, from any logger, that contains the message, the lesson text, or a passage.
+- Extend `src/civica/ui/turns.py`: log the turn start when the `start_turn` update arrives, so every turn line carries the `turn_id`. Write the fields as `key=value` (`user_id=`, `turn_id=`, `status=`, `halt_reason=`, `error_type=`, `duration=`), so lines are easy to search.
+- Extend `src/civica/ui/pages/coach.py`: log each turn request with how it was sent, each rejected request, and each practice check, with the same `key=value` fields.
+- **Check In:** Stop and confirm with the user that the implementation is satisfactory. Prompt the user to run the app, then send a typed lesson request, press **Quiz me**, check an answer, submit from a second tab during a turn, and reload during a turn, then read the terminal logs and match one `turn_id` to its `planner_trace` rows.
+
+Out of scope: a log line per graph node or tool call. Tool arguments often repeat the learner's words, so they belong in the developer panel (developer mode step), not the logs. Opening and closing the intro dialog is not logged.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 15: Developer mode with a panel beside each coach response
+
+**Goal:** 
+- A developer launches the web app in developer mode and sees a panel explaining how that response was made. The panel is displayed beside each coach response: the lesson bubble, the quiz card, or the closing reply on a turn with no lesson or quiz. 
+- Each panel follows one generic formula so that every response gets the same lines. If a value does not exist for a response, the line appears with "none" as the value. 
+- Start by displaying everything the saved turn already holds. If panels are too long or busy, drop lines.
+- A turn that fails while the page is open shows a panel beside its error message with the error type.
+- Learners never see the developer panel and there is no other switch for it.
+
+**Out of scope at this point:** Tool results, model name, token counts, and timing. Turn ID and prompt version.
+
+The formula, for each response drawn:
+- **Produced by:** the tool call that wrote it with its arguments, for example `teach(theme=..., focus=...)` or `generate_quiz(theme=..., n=...)`; the planner's final message; or the `fallback_lesson` node.
+- **Tool calls before it:** the planner's calls, with arguments, since the previous response's producer. For example, the lesson's panel lists `read_learner_state()` before `teach`. Calls after the last drawn response, such as the planner's final message on a lesson turn, are listed on that response's panel.
+- **Grounding:** for a lesson, the retrieved chunks with page slug, section, and similarity, or "no passages found" for an insufficient-material lesson. For a quiz card, each question's sources with page slug and section.
+- **Turn:** why the turn ended (`halt_reason`), the fallback flag, and the `thread_id`.
+- **Learner state:** goal, mastery by theme, and recent mistakes, read when the panel is drawn. Expect this to be mostly empty: the goal is set at onboarding (Finish the UI step), mastery is written only after answers are scored (answers + derived mastery step), and mistakes appear only when the planner records one during a turn.
+
+**Implementation**
+- **Test:** `tests/unit/ui/test_dev_panel.py` (unit: final states built by hand; no NiceGUI, no DB)
+  - A lesson's panel names the `teach` call and its arguments as its producer, lists the calls before it, and lists each chunk with page slug, section, and similarity.
+  - A quiz card's panel names the `generate_quiz` call and its arguments as its producer, lists the calls since the lesson's producer (or since the turn began on a quiz-only turn), and lists each question's sources.
+  - Calls after the last drawn response are listed on that response's panel.
+  - A reply-only turn's panel names the planner's final message as its producer.
+  - A fallback turn's panel names the `fallback_lesson` node and shows the fallback flag.
+  - An insufficient-material lesson shows "no passages found". Any other empty line shows "none".
+- **Test:** create `tests/integration/ui/test_dev_panel.py` (same wiring as the Coach UI for lessons step, with developer mode on in `AppDeps`)
+  - Each green bubble and each quiz card sits in a row with its panel, labelled as a developer panel.
+  - A lesson turn with a comprehension check shows two panels (lesson and quiz card). A quiz-only turn shows one panel, beside the quiz card. A fallback turn, whose reply repeats the lesson, shows one panel. A hidden reply gets no panel.
+  - Panels look the same after a reload and in a second browser.
+  - A turn that fails while the page is open shows the error type in a panel.
+  - With developer mode off, the page shows no panel, slug, similarity, or tool name, and keeps the learner's sources.
+- **Test:** extend `tests/integration/ui/test_entrypoint.py`
+  - `--dev` turns developer mode on; a plain launch leaves it off.
+  - An unknown argument stops the app with usage help, and `--help` works without `CIVICA_SESSION_SECRET` set.
+  - The server logs `Developer mode on` or `Developer mode off` at startup.
+- Extend `src/civica/ui/app.py`: parse arguments (`argparse`) before reading the session secret, so `--help` needs no secret. `uv run python -m civica.ui.app --dev` starts developer mode. Log the mode at startup.
+- Extend `src/civica/ui/deps.py`: add `dev_mode: bool = False` to `AppDeps`.
+- Create `src/civica/ui/dev_panel.py`: frozen dataclasses for a panel and its lines, built from the saved turn (`tool_calls`, `lesson`, `reply`, `halt_reason`) and the thread config. No NiceGUI import, so the formula is unit-testable.
+- Extend `src/civica/ui/pages/coach.py`:
+  - In developer mode, draw each green bubble and quiz card in a row with its panel to the right, so the panel scrolls with its response. On narrow screens the panel stacks under its response.
+  - Panels read as log lines (monospace, small), not as headings.
+  - Read learner state through the existing `read_learner_state` against the graph's store, off the event loop with `run.io_bound`. No new DB readers.
+- **Check In:** Stop and confirm with the user that the implementation is satisfactory. Prompt the user to launch with `--dev`, run a lesson turn, a quiz turn, and a reply-only turn, and judge whether any panel line is too busy to keep. Then launch without `--dev` and confirm no panel shows.
+
+- **README:**
+  - Document both launch commands under **Usage → Web UI**: the plain launch is the learner view, and `--dev` adds the developer panel beside each coach response.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 16: Token usage per turn
+
+**Goal:** Show what each turn costs. Total the token usage of every LLM call in a turn (planner, explanation, question generation, critic), split by caller, and show it in the developer panel (developer mode step). Then use real numbers to size the token caps and inform the LLM choice.
+
+- **Test:** extend `tests/unit/llm/test_client.py`: each profile's model carries its caller tag (`planner`, `explanation`, `quiz`).
 - **Test:** `tests/unit/llm/test_usage.py` (unit: fake chat models whose replies carry `usage_metadata`; no network)
   - Calls made through two different profiles in one run are totaled separately per caller, and the turn total is their sum.
   - Input, output, and reasoning tokens are each summed. A reply without `usage_metadata` adds nothing and does not error.
   - A fresh tally starts at zero so that one turn's usage never leaks into the next.
-- **Test:** create `tests/integration/ui/test_inspector.py`: after a lesson turn the inspector shows the turn's token totals per caller.
-- Extend `src/civica/llm/client.py`:
-  - Reuse the caller tags added in Step 12 so that usage can be split by caller even though every profile uses the same model.
-  - Add a small usage callback handler that follows LangChain's `UsageMetadataCallbackHandler` pattern but is keyed by caller tag (instead of model name), so totals separate the planner from the explanation and question generation.
-- Extend `src/civica/ui/pages/coach.py` and `src/civica/ui/pages/inspector.py`:
-  - In `coach.py`, pass a fresh handler in the graph config (`config={"callbacks": [handler], ...}`) for each turn. LangChain propagates config callbacks to every model call made inside the graph's nodes and tools, so no engine signature changes and no caller has to return its usage.
-  - In `inspector.py`, show the per-caller and total tokens for the turn.
+- **Test:** extend `tests/integration/graph/test_graph.py`
+  - A turn run with a usage tally in its `context` saves that turn's totals in the final state, read back through the real checkpointer. This also proves the new type is registered in `_STATE_TYPES`.
+  - A turn run without a tally saves no totals and does not error.
+  - A second turn saves only its own totals.
+- **Test:** extend `tests/unit/ui/test_turns.py`
+  - Each turn gets a fresh tally, passed both in the graph config's callbacks and in `PlannerContext`.
+  - The turn end log line carries the turn's total tokens.
+- **Test:** extend `tests/integration/ui/test_dev_panel.py`: after a lesson turn the panel's **Turn** line shows the turn's token totals per caller, and they survive a reload.
+- Create `src/civica/llm/usage.py`:
+  - `UsageTally`: a small callback handler that follows LangChain's `UsageMetadataCallbackHandler` pattern but is keyed by caller tag (instead of model name), so totals separate the planner from the explanation and question generation.
+  - `TurnUsage`: a frozen dataclass of input, output, and reasoning tokens per caller, plus the total. `UsageTally.totals()` returns one.
+- Extend `src/civica/llm/client.py`: tag each profile's model with its caller name (`ChatAnthropic` accepts `tags`), so usage can be split by caller even though every profile uses the same model.
+- Extend `src/civica/graph/planner.py`: add `usage: UsageTally | None = None` to `PlannerContext`. Callers that do not count tokens, such as tests and scripts, leave it unset.
+- Extend `src/civica/graph/graph.py`: add `token_usage: TurnUsage | None` to `GraphState`. `memory_writer` returns `runtime.context.usage.totals()` (or `None` with no tally) in its update.
+  - Why here: `memory_writer` runs after the last model call of every path, so the totals are complete, and they are saved in the checkpoint `memory_writer` already writes. No extra save, no new table, and no new DB reader in the UI.
+  - A failed turn never reaches `memory_writer`, so it saves no totals. The page shows the unfinished-turn notice for it anyway.
+- Extend `src/civica/memory/checkpointer.py`: add `TurnUsage` to `_STATE_TYPES`.
+- Extend `src/civica/ui/turns.py`:
+  - Create a fresh `UsageTally` for each turn. Pass it in the graph config (`config={"callbacks": [tally], ...}`), so LangChain hands it every model call made inside the graph's nodes and tools, and in `PlannerContext(usage=tally)`, so `memory_writer` can save its totals. No engine signature changes, and no caller has to return its usage.
+  - Add the turn's total tokens to the turn end log line (`tokens=`), so totals across many turns can be pulled from the logs.
+- Extend `src/civica/ui/dev_panel.py` and `src/civica/ui/pages/coach.py`: show the per-caller and total tokens for the turn on the **Turn** line, read from the saved `token_usage`. A turn saved before this step shows "none".
 - **Check In:** 
     - Stop and confirm with the user that the token totals look right on a few real lesson and quiz turns. 
     - Then decide together, using that data, whether to change any cap (e.g. `EXPLANATION_PROFILE` is `max_tokens=2048`) or set `reasoning_effort`. Change nothing without data. 
@@ -1367,7 +1585,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
       - The truncation warning already in `explain()` is the signal that the cap is set too low. It has not fired in practice.
 
 - **README:**
-  - Add a line to the web app usage text that the inspector shows each turn's token usage by caller.
+  - Add a line to the web app usage text that the developer panel shows each turn's token usage by caller.
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -1375,9 +1593,9 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 15: Answers + derived mastery
+## Step 17: Answers + derived mastery
 
-**Goal:** Let the learner answer a quiz question in a later turn, log it, record mistakes, and recompute mastery deterministically. The planner has no scoring tool (Step 10A), so the model never supplies or scores an answer. A wrong answer also gets a short explanation grounded in the question's own sources, so quizzes deliver the grounded explanations the MVP overview promises.
+**Goal:** Let the learner answer a quiz question in a later turn, log it, record mistakes, and recompute mastery deterministically. The planner has no scoring tool (autonomous planner step), so the model never supplies or scores an answer. A wrong answer also gets a short explanation grounded in the question's own sources, so quizzes deliver the grounded explanations the MVP overview promises.
 
 - **Test:** extend `tests/integration/graph/test_graph.py`
   - The quiz questions created in one turn are kept in checkpointed state, and an `answer` input on the next turn scores them.
@@ -1390,23 +1608,27 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - If the explanation fails (no passages found, or the model errors), the scored result is still returned and logged; only the explanation is missing.
 - **Test:** extend `tests/integration/retrieval/test_content.py`: `search(..., sources=...)` returns only chunks from the given `(page_slug, section_id)` pairs, still ordered by similarity.
 - **Test:** `tests/unit/graph/test_mastery.py`: mastery is the correct share of the learner's last 20 answers on the theme (fewer answers use what exists; no answers leaves mastery unwritten).
+- **Turn on the question critic (grounding + correctness gate step) in production:** from this step, answers are scored and move mastery, so a question with a wrong answer key would mark a correct learner wrong. The critic is off by default today.
+  - **Test:** extend `tests/integration/graph/test_graph.py`, which already covers `default_planner_deps`: `default_planner_deps()` returns deps with a critic, so coach quizzes and the mock exam (next step) both run it. Test deps keep `critic=None` unless a test needs it.
+  - Extend `default_planner_deps()` to pass `critic=LlmCritic()`.
+  - The critic is one more LLM call per quiz, plus a rewrite and another check for each round with rejections. Its tokens show under the critic caller in the developer panel (token usage step).
 - Add to `src/civica/graph/nodes.py`:
   - The `answer` input carries the `question_id` it answers, and `score_answer` first checks that id is in the checkpointed `quiz_questions`. If not (the learner moved on and the quiz was cleared, or the id is unknown), it replies that the question has expired and routes straight to `memory_writer` without scoring.
   - Register any new type held in checkpointed state (such as the answer result) in `_STATE_TYPES` in `memory/checkpointer.py`, and add the `answer` member to `InputKind`.
   - Checkpointed state keeps each answered question's result (`answered: dict[question_id, result]`), cleared with `quiz_questions` in `start_turn`. `score_answer` rejects an id already in it with an "already answered" reply, routed straight to `memory_writer`. The UI lock below is the visible part; this check is what enforces it.
-  - `score_answer`: rebuilds the `Quiz` from the checkpointed `quiz_questions` with `deps.answer_logger` (Step 10B keeps only serializable data in state), then scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (Step 9). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
-  - `explain_answer` (wrong answers only): calls `explain()` with a prompt built from the question, the chosen option, and the correct option. Its `retriever` is `search` pinned to the question's `sources`, so the explanation is grounded in the passages the question was generated from. One LLM call per wrong answer; correct answers cost nothing extra. Step 22's teaching strategy can later plug in here.
-  - `update_mastery`: the **only** writer of `topic_mastery`, computed from `quiz_answers`. See the two-allowlist rule in Step 10A.
+  - `score_answer`: rebuilds the `Quiz` from the checkpointed `quiz_questions` with `deps.answer_logger` (the planner graph refactor keeps only serializable data in state), then scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (assessment engine). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
+  - `explain_answer` (wrong answers only): calls `explain()` with a prompt built from the question, the chosen option, and the correct option. Its `retriever` is `search` pinned to the question's `sources`, so the explanation is grounded in the passages the question was generated from. One LLM call per wrong answer; correct answers cost nothing extra. A learned teaching strategy (teaching strategy step) can later plug in here.
+  - `update_mastery`: the **only** writer of `topic_mastery`, computed from `quiz_answers`. See the two-allowlist rule in the autonomous planner step.
   - Route: `answer` -> `score_answer` -> `explain_answer` (wrong answers only) -> `update_mastery` -> `memory_writer`.
 - Extend `src/civica/retrieval/content.py`: `search` takes an optional `sources: Collection[SourceRef] | None` filter that limits results to those `(page_slug, section_id)` pairs.
-- **UI:** extend `tests/integration/ui/test_quiz.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in Step 12) and renders the scored result, with the explanation and its citations under a wrong answer; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
-  - In `src/civica/ui/pages/coach.py`, replace the practice-only **Check** (Step 13) with a real submit that sends an `answer` input. Remove the "not scored or saved yet" label.
+- **UI:** extend `tests/integration/ui/test_quiz.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in the Coach UI for lessons step) and renders the scored result, with the explanation and its citations under a wrong answer; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
+  - In `src/civica/ui/pages/coach.py`, replace the practice-only **Check** (Coach UI for quizzes) with a real submit that sends an `answer` input through `TurnRunner.start`. Remove the "not scored or saved yet" label.
   - Lock each question once answered: render it from the checkpointed `answered` results with the radio and submit disabled (`.disable()`).
-  - Show the updated mastery for the answered theme in the inspector panel.
-- **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right. Prompt the user to answer a few questions in the UI and watch mastery move.
+  - The developer panel's **Learner state** line shows the updated mastery for the answered theme.
+- **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right. Prompt the user to answer a few questions in the UI and watch mastery move. Show the critic's added tokens and wait time per quiz turn, and confirm the user accepts them.
 
 - **README:**
-  - Add the `answer` row to the routing diagram (see Step 11), and a line that answers are scored without the LLM, a wrong answer gets one grounded explanation call, and `update_mastery` is the only node that writes `topic_mastery`.
+  - Add the `answer` row to the routing diagram (see the graph assembly step), and a line that answers are scored without the LLM, a wrong answer gets one grounded explanation call, and `update_mastery` is the only node that writes `topic_mastery`.
   - Remove "Quiz answers are practice only until answer scoring ships" from the web app usage text.
   - Add this note to the "Learner graph" section:
     > Decision against using LangGraph's `interrupt` convention: In civica, user responses to questions result in a new turn tagged `answer`, rather than resuming a LangGraph `interrupt`. This is an intentional decision to ensure that learners are free to skip a question and move on. A new turn handles such a learner redirect like any other turn and always finishes at `memory_writer` with persistence and logging. LangGraph's `interrupt`, which encapsulates both a question and an answer in a single turn, pauses waiting for a learner's response. If the learner chose to redirect after being asked a question and we were using LangGraphs's `interrupt`, that would leave a turn unfinished (no persistence). 
@@ -1418,7 +1640,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 16: Mock exam path
+## Step 18: Mock exam path
 
 **Goal:** A deterministic 40-question mock exam that bypasses the *planner*, never the *logging*.
 
@@ -1426,13 +1648,19 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `mock_start` produces 40 questions held in checkpointed state (this path bypasses the planner).
   - `mock_submit` reports pass/fail and **writes 40 `quiz_answers` rows**, and `topic_mastery` moves for every theme the exam covered. A mock exam that scores without logging would silently discard the densest signal the system gets.
   - Mock exam failure: when the critic cannot fill a theme, `mock_exam_generate` retries once, then returns a "try again" message, saving no questions and no `quiz_answers` rows.
+- **Mock exams never reuse quiz questions (Product Owner decision, 2026-11-09):** a mock exam should test the learner on questions they have not practiced.
+  - **Test:** extend `tests/unit/assessment/test_engine.py`: a generated mock exam question whose `question_id` is already saved as a quiz question is regenerated like a critic rejection, and is never returned. If a theme still cannot be filled, `generate_mock_exam` raises `QuestionGenerationError` as it does today.
+  - **Test:** extend `tests/integration/assessment/test_store.py`: each saved question records its origin (`quiz` or `mock_exam`). Saving a mock exam question over an existing quiz row keeps `quiz`. Rows saved before this step read as `quiz`.
+  - Extend `src/civica/db/schema.sql`: add `origin TEXT NOT NULL DEFAULT 'quiz'` to `generated_questions` with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so the migration stays idempotent. Old rows default to `quiz` because their origin is unknown, and treating them as quiz questions keeps them out of mock exams.
+  - Extend `src/civica/assessment/store.py`: `save` takes the origin, and the upsert never changes `quiz` to `mock_exam`. Add a read that tells which of a set of `question_id`s are quiz questions, so the engine checks a whole batch in one query.
+  - Limitation: this blocks exact repeats only. A quiz and a mock exam can still ask about the same fact in different words.
 - Add to `src/civica/graph/nodes.py`:
   - Register any new type held in checkpointed state (such as the exam and its result) in `_STATE_TYPES` in `memory/checkpointer.py`, and add the `mock_start` and `mock_submit` members to `InputKind`.
   - `mock_exam_generate`: calls `generate_mock_exam`. It raises `QuestionGenerationError` when the critic cannot fill a theme and saves nothing; retry once, then show a "try again" message rather than crash the graph.
   - `mock_exam_score`: scores via `MockExam.score`, which logs all 40 answers and then runs `update_mastery` like any other assessed path. The result (pass/fail and per-theme scores) stays in the exam thread's checkpointed state, so the UI can render it again after a reload. Only the latest exam is kept; a history of past scores is post-MVP.
   - Routes: `mock_start` -> `mock_exam_generate` -> `memory_writer`; `mock_submit` -> `mock_exam_score` -> `update_mastery` -> `memory_writer`.
-- **UI:** create `tests/integration/ui/test_mock_exam.py` first: selecting **Mock Exam** and starting renders the questions (graph compiled with fakes, as in Step 12); switching back to **Coach** shows the coach conversation unchanged; submitting renders pass/fail and the per-theme breakdown; reloading after submitting shows the same result; a generation failure renders the "try again" message.
-  - Create `src/civica/ui/modes.py` with `AppMode(StrEnum)` (`COACH`, `MOCK_EXAM`) and add a Coach / Mock Exam `ui.toggle` to `src/civica/ui/pages/coach.py`. The mock exam uses its own thread (`f"{user_id}:mock_exam"`), so it never disturbs the coach conversation. Create `src/civica/ui/pages/mock_exam.py` for Mock Exam mode: start button, 40 questions each as a `ui.radio`, submit, pass/fail plus per-theme scores. No countdown timer yet (Step 20). This mode calls the deterministic mock-exam path, not the planner.
+- **UI:** create `tests/integration/ui/test_mock_exam.py` first: selecting **Mock Exam** and starting renders the questions (graph compiled with fakes, as in the Coach UI for lessons step); switching back to **Coach** shows the coach conversation unchanged; submitting renders pass/fail and the per-theme breakdown; reloading after submitting shows the same result; a generation failure renders the "try again" message.
+  - Create `src/civica/ui/modes.py` with `AppMode(StrEnum)` (`COACH`, `MOCK_EXAM`) and add a Coach / Mock Exam `ui.toggle` to `src/civica/ui/pages/coach.py`. The mock exam uses its own thread (`f"{user_id}:mock_exam"`), so it never disturbs the coach conversation. Create `src/civica/ui/pages/mock_exam.py` for Mock Exam mode: start button, 40 questions each as a `ui.radio`, submit, pass/fail plus per-theme scores. No countdown timer yet (Finish the UI step). This mode calls the deterministic mock-exam path, not the planner.
 - **Check In:** Stop and confirm with user that the implementation is satisfactory. Prompt the user to run one mock exam in the UI (note the generation time and cost of 40 questions).
 
 - **README:**
@@ -1444,14 +1672,14 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 17: Mistake-driven review retrieval
+## Step 19: Mistake-driven review retrieval
 
 **Goal:** When the planner re-teaches a theme the learner got wrong, pull the exact passages they missed rather than a generic theme sample.
 
 - **Test:** extend `tests/unit/graph/test_planner.py`
   - For a theme with an active `mistake_episode` that records `page_slug`/`section_id`, `retrieve_corpus` and `teach` query with that source context in the corpus prefix style.
   - With no active episode, or an episode without sources, the query falls back to the theme.
-- Update the planner's tool bindings: when the planner (via `suggest_review_theme` / `read_learner_state`) targets a theme with an active `mistake_episode`, reconstruct the retrieval query from the episode's sources (theme at minimum; `page_slug`/`section_id` when recorded). `ContentChunk.chunk_index`/`content_hash` (Step 5) give those citations stable identity across sessions. The source context flows from Step 9 (`Question.sources`) into Step 7's `MistakeEpisode.sources`, written by Step 15.
+- Update the planner's tool bindings: when the planner (via `suggest_review_theme` / `read_learner_state`) targets a theme with an active `mistake_episode`, reconstruct the retrieval query from the episode's sources (theme at minimum; `page_slug`/`section_id` when recorded). `ContentChunk.chunk_index`/`content_hash` (content retriever) give those citations stable identity across sessions. The source context flows from the assessment engine (`Question.sources`) into the memory layer's `MistakeEpisode.sources`, written by the answers + derived mastery step.
 - **Check In:** Stop and confirm with user that the implementation is satisfactory.
 
 - **Update this plan:**
@@ -1460,7 +1688,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 18: Persistent study plan
+## Step 20: Persistent study plan
 
 **Goal:** Give the planner a durable agenda it owns across sessions.
 
@@ -1473,11 +1701,11 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - `StudyPlan` round-trips through `model_dump(mode="json")` / `model_validate`, with `theme` fields dumping as slugs (the Theme-as-slug rule).
   - A `StudyPlan` written through `record_outcome` succeeds now that `STUDY_PLAN` is in `PLANNER_WRITE_ALLOWLIST`, while `topic_mastery` through the same path still raises `MemoryNotAllowed`. Widening the planner's scope by one kind must not widen it by two.
 - Add to `memory/records.py`: `MemoryKind.STUDY_PLAN = "study_plan"` and a frozen `StudyPlan` record: `focus_themes: list[Theme]`, `next_action: str` (bounded prose, `max_length=500`), `rationale: str` (bounded prose, `max_length=500`), `updated_at: datetime`. One per user, constant key `"current"` (same convention as `LearnerProfile`).
-- Add `STUDY_PLAN` to `PLANNER_WRITE_ALLOWLIST` (Step 10A) by hand. This is a deliberate widening: the plan is exactly the kind of narrative, revisable state an agent should own, and it carries no numeric score the agent could inflate in its own favor.
+- Add `STUDY_PLAN` to `PLANNER_WRITE_ALLOWLIST` (autonomous planner step) by hand. This is a deliberate widening: the plan is exactly the kind of narrative, revisable state an agent should own, and it carries no numeric score the agent could inflate in its own favor.
 - Planner tools: `read_study_plan() -> StudyPlan | None` (read at the start of every coach turn) and `revise_study_plan(...)` routed through `record_outcome`. The system prompt instructs the planner to read the plan first, act consistently with it, and revise it when the learner's state has moved.
 - **UI ("why this next"):** extend `tests/unit/ui/test_turn_view.py` first: the line comes from `StudyPlan.rationale` when a plan exists, and falls back to the turn's last tool call (highest `step_index`) when none does.
   - Show the line above each coach turn in `src/civica/ui/pages/coach.py` (e.g. "Reviewing *Laïcité*: you missed a question here last session"). Read it from state; no branching logic in the UI.
-  - Show the current study plan (focus themes, next action) in the inspector panel.
+  - Add the current study plan (focus themes, next action) to the developer panel's **Learner state** line.
 - **Check In:** Stop and confirm with the user that the study-plan record shape is right. Prompt the user to run two coaching sessions in the UI and confirm the second one follows the plan written in the first.
 
 - **README:**
@@ -1489,7 +1717,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 19: Corpus coverage tracker
+## Step 21: Corpus coverage tracker
 
 **Goal:** Provide a deterministic answer to "how much of this theme has the learner actually seen?".
 
@@ -1503,15 +1731,15 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Coverage is per user: one learner's history never appears in another's gaps.
 - Extend `src/civica/db/schema.sql` with an append-only `lesson_sources` table (idempotent): `id BIGSERIAL`, `user_id UUID REFERENCES users(user_id)`, `thread_id TEXT`, `turn_id UUID`, `page_slug TEXT`, `section_id TEXT`, `created_at TIMESTAMPTZ DEFAULT NOW()`. Written next to the trace writer, following the optional-connection convention.
 - Create `src/civica/reflection/coverage.py`:
-  - `get_coverage_gaps(user_id, theme) -> CoverageReport` - deterministic, no LLM. The universe of sections comes from `content_chunks`, minus the course-objective sections that assessment skips (Step 9C), so they never show as gaps. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`. **Taught** coverage comes from `lesson_sources`.
+  - `get_coverage_gaps(user_id, theme) -> CoverageReport` - deterministic, no LLM. The universe of sections comes from `content_chunks`, minus the course-objective sections that assessment skips (retrieval optimization step), so they never show as gaps. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`. **Taught** coverage comes from `lesson_sources`.
   - `CoverageReport` is a frozen pydantic model: `theme`, `covered: list[SourceRef]`, `gaps: list[SourceRef]`, `covered_fraction: float`.
 - Bind `get_coverage_gaps` as a planner tool so the planner can deliberately steer toward unseen material instead of re-teaching whatever retrieval happens to surface.
 - **UI (coverage readout):** create `tests/integration/ui/test_coverage.py` first: the readout renders one `covered_fraction` per theme for the logged-in user.
-  - Show per-theme coverage in `src/civica/ui/pages/inspector.py`, e.g. "you have not seen 40% of this theme yet."
+  - Add per-theme coverage to the developer panel's **Learner state** line, e.g. "40% of this theme not yet seen."
 - **Check In:** Stop and confirm with the user that the coverage definition is right. "Taught" counts a section as covered once a grounded lesson cites it, not when the learner shows they read it. Prompt the user to confirm in the UI that the readout moves after a lesson on an unseen passage.
 
 - **README:**
-  - Add `src/civica/reflection/` to the project structure diagram (first use; Step 21 extends it).
+  - Add `src/civica/reflection/` to the project structure diagram (first use; the item scheduling step extends it).
   - Add `lesson_sources` to the Postgres tables list.
 
 - **Update this plan:**
@@ -1520,9 +1748,9 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 20: Finish the UI
+## Step 22: Finish the UI
 
-**Goal:** Complete the user experience by adding to the UI: onboarding, mock exam timer, and learner-facing polish.
+**Goal:** Complete the user experience by adding to the UI: onboarding, mock exam timer, and learner-facing polish. Developer details stay behind `--dev` (developer mode step).
 
 - **Test:** create `tests/integration/ui/test_onboarding.py`
   - A signed-in user with no `LearnerProfile` (new, or registered before this step) is prompted for a study goal; submitting it writes a `LearnerProfile` that `read_learner_state` returns. Skipping it writes nothing and the prompt does not reappear on the next visit from that browser.
@@ -1533,8 +1761,6 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Reload mid-exam: opening `/` again shows the same questions with the answers already picked still selected, and the countdown continues from the checkpointed `started_at`; it does not restart at 45 minutes.
   - Submitting the exam clears the saved draft answers.
   - Logout during an exam asks for confirmation. Cancelling keeps the exam and its draft answers; confirming signs out and discards the draft answers.
-- **Test:** extend `tests/integration/ui/test_inspector.py`
-  - With the debug flag off, the inspector panel is hidden.
 - Extend the modules in `src/civica/ui/pages/`:
   - **Onboarding capture (populates `LearnerProfile`), in `home.py`:** whenever the signed-in user has no `LearnerProfile` (not only at first registration, so users who registered earlier are also asked), prompt for their study goal (free text) and write it via `memory.writer.put(user_id, PROFILE_KEY, LearnerProfile(goal=...))`, using the same `PROFILE_KEY` that `read_learner_state` reads. This is the only writer of `LearnerProfile` in the plan; the `goal` field is bounded free-form prose (`max_length=500`) consumed as personalization context by the `teach`/`evaluate` prompts, not as branching logic. If onboarding is skipped, no `LearnerProfile` is written and reads return `None`; a skip flag in `app.storage.user` stops the prompt from reappearing on every visit.
   - **Mock Exam timer, in `mock_exam.py`:** 45-minute countdown with auto-submit at zero.
@@ -1544,14 +1770,12 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - **Draft answers survive refresh, in `mock_exam.py`:** save each pick to `app.storage.user` under the exam's `thread_id` as it is made, restore the picks when the page is built, and clear them on submit. A refresh therefore loses nothing, so no refresh warning is needed.
   - **Logout during an exam, in `home.py`:** the **Log out** button opens a `ui.dialog`: "You have an exam in progress. Logging out will discard your unsubmitted answers." Logout already should clear all per-user session storage (previous step), including the draft answers. The questions and `started_at` stay in the checkpointer.
   - **No coaching during an exam, in `coach.py`:** disable the **Coach** toggle while the exam thread has questions and no result. The real exam is closed-book, so open coaching would make the mock score meaningless.
-  - **Inspector behind a flag, in `inspector.py`:** hide the inspector drawer unless `CIVICA_DEBUG` is set, so learners see the coach and developers still see the trace.
-  - Layout polish for the learner, in `coach.py`: the Coach / Mock Exam picker and readable citations.
+  - Layout polish for the learner, in `coach.py`: the Coach / Mock Exam picker, following `coach-ui.md`.
 
 - **Check In:** Stop and confirm with the user that the implementation is satisfactory. Manually exercise the full loop (register → onboarding → quiz a theme → mock exam) end-to-end before declaring MVP done.
 
 - **README:** 
-  - Add a screenshot placeholder to **Usage → Web app**, and extend its text to cover onboarding, **Mock Exam** (fixed 40-question format with a 45-minute timer), and the `CIVICA_DEBUG` flag for the inspector panel.
-  - Add `CIVICA_DEBUG` (optional) to the environment variables in **Setup**.
+  - Add a screenshot placeholder to **Usage → Web app**, and extend its text to cover onboarding, and **Mock Exam** (fixed 40-question format with a 45-minute timer).
   
 
 - **Update this plan:**
@@ -1560,7 +1784,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 21: Self-improvement via per-learner item scheduling
+## Step 23: Self-improvement via per-learner item scheduling
 
 **Goal:**
 - Schedule each persisted question *per learner*: rest items they have mastered, resurface items they missed.
@@ -1573,7 +1797,7 @@ An earlier draft of this step specified IRT-lite difficulty calibration: empiric
 - `too_easy` retires items the learner has *memorized*, which merely wastes the generation cost already paid.
 - `too_hard` retires items the learner *does not know yet*, which is exactly backwards for exam prep. Those are the questions to drill, and calibration would delete them.
 
-Per-user scheduling produces the felt behavior we actually wanted (the bank stops repeating what you know, and brings back what you missed), works correctly at n=1, and is simpler math. Difficulty calibration is deferred until there is a real multi-learner population, at which point it also needs the shared-namespace decision already flagged in Step 22. It is not abandoned, just correctly sequenced behind its data prerequisite.
+Per-user scheduling produces the felt behavior we actually wanted (the bank stops repeating what you know, and brings back what you missed), works correctly at n=1, and is simpler math. Difficulty calibration is deferred until there is a real multi-learner population, at which point it also needs the shared-namespace decision already flagged in the teaching strategy step. It is not abandoned, just correctly sequenced behind its data prerequisite.
 
 - **Test:** `tests/unit/reflection/test_scheduling.py` (unit, no DB/network: feed synthetic `quiz_answers` rows for known question ids)
   - An item answered correctly `MASTERY_STREAK` consecutive times for a user is not due; it drops out of that user's selection pool.
@@ -1584,19 +1808,21 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
 - Create `src/civica/reflection/scheduling.py`:
   - `due_questions(user_id, theme, limit) -> list[str]` - Leitner-style. Derive each item's box for this learner from their `quiz_answers` streak on that `question_id`, order by (missed most recently, then never seen, then longest-rested), and return the ids that are due. Never-seen items are always eligible, so a cold-start learner is never starved.
   - `is_mastered(user_id, question_id) -> bool` - `MASTERY_STREAK` (small constant, e.g. 3) consecutive correct answers.
-  - Derived from `quiz_answers` on read. No new mutable state to keep in sync, and no schema change beyond what Step 9 already added. This is a deliberate contrast with the calibration design, which needed a `difficulty` column written back onto `generated_questions`.
-  - `generate_quiz` (Step 9) calls `due_questions` first and only generates new items when the due set is short, closing the loop: mastered items rest, missed items return, and generation cost falls over time.
+  - Derived from `quiz_answers` on read. No new mutable state to keep in sync, and no schema change beyond what the assessment engine already added. This is a deliberate contrast with the calibration design, which needed a `difficulty` column written back onto `generated_questions`.
+  - `generate_quiz` (assessment engine) calls `due_questions` first and only generates new items when the due set is short, closing the loop: mastered items rest, missed items return, and generation cost falls over time.
+  - Mock exams never reuse quiz questions (mock exam path step). If the mock exam ever draws from the bank, it reads only `origin = 'mock_exam'` rows.
+  - Quizzes may bring back a mock exam question only if the learner answered it wrong (Product Owner decision, 2026-11-09). `due_questions` returns quiz questions plus mock exam questions this learner missed, and never a mock exam question they answered correctly or have not answered.
+  - **Test:** extend `tests/unit/reflection/test_scheduling.py`: a mock exam question the learner missed is due; one they answered correctly, or one only another learner missed, is not.
   - Reads run on the hot path (they are one indexed query), but any bulk recomputation runs as an offline `scripts/` entrypoint like ingestion.
 
 - **Check In and Flag Flip:** 
-  - Confirm with the user that `MASTERY_STREAK` and the due-ordering feel right on a small real sample before enabling bank-preferring selection in `generate_quiz`.
-  - This is an important gate. Do not flip the flag or start the strategy policy (next step) until the scheduling signal is trusted.
+  - Confirm with the user that `MASTERY_STREAK` and the due-ordering feel right on a small real sample before enabling bank-preferring selection in `generate_quiz`.  - This is an important gate. Do not flip the flag or start the strategy policy (next step) until the scheduling signal is trusted.
   - **Flip the flag (do this only after the check-in above passes):** `generate_quiz` reads a single feature flag, `PREFER_SCHEDULED_QUESTIONS` (default `False`), that gates whether it draws due persisted items before generating new ones. Until now it has been `False`, so scheduling is computed but never consumed. Set `PREFER_SCHEDULED_QUESTIONS = True` to turn the loop on. Do not flip the flag if the check-in reveals the signal is not yet trustworthy.
 
 **Reflection dashboard (chore, 0 points):**
 
 - Create `src/civica/scripts/reflection_report.py`: prints bank health (item counts by box, mastered fraction, generation-vs-reuse ratio), critic rejection rate grouped by `prompt_version`, recurring `retrieval_gaps`, and per-theme coverage. Add a mode that runs a scripted synthetic learner through the loops so the behavior can be exercised without months of real answers.
-- Rationale: the check-in above and Step 22's both say "until the signal is trusted," and without this script that judgment is unfalsifiable. Chore, so no points and no new tests of its own, but the suite must be green at the step boundary.
+- Rationale: the check-in above and the teaching strategy step's both say "until the signal is trusted," and without this script that judgment is unfalsifiable. Chore, so no points and no new tests of its own, but the suite must be green at the step boundary.
 
 - **README:**
   - Add the scheduling and `reflection_report` `scripts/` entrypoints to the commands section.
@@ -1606,23 +1832,23 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
 
-## Step 22: Self-improvement on teaching strategy
+## Step 24: Self-improvement on teaching strategy
 
-**Goal:** Adapt how the coach explains a theme based on measured mastery gains - a small bandit over teaching strategies whose reward is the learner's next-quiz improvement. Depends on Step 10 (the planner's `teach` tool consumes the chosen strategy) and on Step 21 being trusted (per its check-in).
+**Goal:** Adapt how the coach explains a theme based on measured mastery gains - a small bandit over teaching strategies whose reward is the learner's next-quiz improvement. Depends on the planner steps (the planner's `teach` tool consumes the chosen strategy) and on the item scheduling step being trusted (per its check-in).
 
 - **Test:** `tests/unit/reflection/test_strategy_policy.py` (unit: stub `memory.writer.get`/`put_raw` with in-memory fakes)
   - `select_strategy` returns a valid `TeachingStrategy` for a theme with no history (cold start uses a defined default/exploration rule, never an empty or invalid value).
   - After recording a positive mastery-gain reward for a strategy, `select_strategy` shifts probability toward it (assert the observable selection distribution changes, not the internal counters).
-  - `TeachingStrategyStat` is written by the deterministic policy through `memory.writer.put`, and is **not** reachable from the planner: a `record_outcome` call targeting `teaching_strategy_stat` raises `MemoryNotAllowed`. An agent that can write its own reward statistics has no reward signal. (Note: `MEMORY_WRITE_ALLOWLIST` is derived from `MemoryKind`, so a new enum member is in it by construction and "outside the general allowlist" is not a testable state. The meaningful assertion is against the hand-enumerated `PLANNER_WRITE_ALLOWLIST` from Step 10A.)
-- Add to `memory/records.py` (extends Step 7, does not modify its completed records):
+  - `TeachingStrategyStat` is written by the deterministic policy through `memory.writer.put`, and is **not** reachable from the planner: a `record_outcome` call targeting `teaching_strategy_stat` raises `MemoryNotAllowed`. An agent that can write its own reward statistics has no reward signal. (Note: `MEMORY_WRITE_ALLOWLIST` is derived from `MemoryKind`, so a new enum member is in it by construction and "outside the general allowlist" is not a testable state. The meaningful assertion is against the hand-enumerated `PLANNER_WRITE_ALLOWLIST` from the autonomous planner step.)
+- Add to `memory/records.py` (extends the memory layer step, does not modify its completed records):
   - `MemoryKind.TEACHING_STRATEGY_STAT = "teaching_strategy_stat"` and a frozen `TeachingStrategyStat` record (`theme`, `strategy: TeachingStrategy`, running reward stats). It joins `MEMORY_WRITE_ALLOWLIST` automatically (that constant is derived from `MemoryKind`) and is deliberately **left out** of `PLANNER_WRITE_ALLOWLIST`: a self-improving policy still writes only through the guarded boundary, and never through the LLM.
   - `TeachingStrategy(StrEnum)` (e.g. `ANALOGY_FIRST`, `DEFINITION_FIRST`, `CONTRAST_WITH_COMMON_MISTAKE`) in `domain/` so both the planner's `teach` tool and the policy reference one source of truth.
 - Create `src/civica/reflection/strategy_policy.py`:
   - `select_strategy(user_id, theme) -> TeachingStrategy` and `record_reward(user_id, theme, strategy, mastery_gain)` - a small multi-armed-bandit policy. Reward is the measured `topic_mastery` change on the next quiz for that theme (the before/after signal already lives in `quiz_answers` + `topic_mastery`). The planner's `teach` tool asks the policy which strategy to use and passes it into the explanation prompt; `memory_writer` records the reward after the follow-up quiz. The teaching policy now changes based on outcomes - the second self-improving feature.
-  - **Reward hygiene (required, not optional).** Compute the mastery-gain reward only from answers on items the learner has seen before, i.e. items with a scheduling history from Step 21. A brand-new generated question carries unknown difficulty, so its outcome reflects the item as much as the teaching. Mixing those in lets item noise swamp the strategy signal and the bandit converges on luck. Step 10A's comprehension check supplies the dense immediate reward; this rule decides which of those answers count.
+  - **Reward hygiene (required, not optional).** Compute the mastery-gain reward only from answers on items the learner has seen before, i.e. items with a scheduling history from the item scheduling step. A brand-new generated question carries unknown difficulty, so its outcome reflects the item as much as the teaching. Mixing those in lets item noise swamp the strategy signal and the bandit converges on luck. The autonomous planner's comprehension check supplies the dense immediate reward; this rule decides which of those answers count.
   - Strategy variants of the explanation prompts are injected as prompt sets. Add a `PromptSet` Protocol (`version: str`) in `llm/prompts.py` so the policy, `teach`, and the reflection report accept any prompt set through one interface. The existing frozen prompt-set dataclasses satisfy it structurally, with no inheritance; give each strategy variant its own version so rewards and rejections stay attributable.
   - The reward depends on `topic_mastery` being deterministically derived. If the planner could write its own mastery, this reward would be self-graded and the bandit would optimize against a number it controls. That is the concrete payoff of the two-allowlist rule.
-- **Global-learning note (deferred - requires a Product Owner decision):** promoting item difficulty and high-value strategy signals from per-user to a *shared* namespace would let the coach improve for every learner, not just the current one. It is also the prerequisite for the cross-learner difficulty calibration that Step 21 deferred: p-correct only means "difficulty" when many learners answer the same item. This conflicts with the "all persistent state is namespaced by `user_id`" rule, so it is intentionally out of scope until the owner sanctions a reserved global namespace (e.g. `user_id="__global__"`) with its own allowlist entry. Flagged here, not built.
+- **Global-learning note (deferred - requires a Product Owner decision):** promoting item difficulty and high-value strategy signals from per-user to a *shared* namespace would let the coach improve for every learner, not just the current one. It is also the prerequisite for the cross-learner difficulty calibration that the item scheduling step deferred: p-correct only means "difficulty" when many learners answer the same item. This conflicts with the "all persistent state is namespaced by `user_id`" rule, so it is intentionally out of scope until the owner sanctions a reserved global namespace (e.g. `user_id="__global__"`) with its own allowlist entry. Flagged here, not built.
 
 - **Check In:** Confirm the strategy set and the cold-start rule with the user before wiring the bandit into the `teach` tool.
 
@@ -1648,26 +1874,29 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
 7. **Step 7 - Memory layer:** needs Step 6's `user_id` and Step 1's pool; blocks the graph
    - **Step 7B - Quiz-answer log:** needs Step 6's `user_id` and Step 1's pool; independent of Step 7 (no LangGraph coupling), can be built in parallel
 8. **Step 8 - Explanation engine:** needs Step 5 (retrieval); independent of memory
-9. **Step 9 - Assessment engine (core + persisted question bank):** needs Step 5 (retrieval) and Step 7B (persist quiz log); independent of the graph. `generate_quiz`/`generate_mock_exam` plus the `generated_questions` table; the persisted bank is the one thing Step 21 requires from this step.
+9. **Step 9 - Assessment engine (core + persisted question bank):** needs Step 5 (retrieval) and Step 7B (persist quiz log); independent of the graph. `generate_quiz`/`generate_mock_exam` plus the `generated_questions` table; the persisted bank is the one thing Step 23 requires from this step.
    - **Step 9B - Grounding + correctness gate:** needs Step 9; a quality/safety layer (question critic), not self-improvement. Independently shippable and deferrable if the Step 9 quality check-in already looks strong.
 10. **Step 10 - Autonomous planner (10A and 10B):** needs Steps 7, 7B, 8, 9.
     - **Step 10A - Autonomous planner:** pure back end, unit-tested with a fake model. The mastery heuristic is demoted to a tool; the planner (LLM tool-calling loop) becomes the controller for every coach turn. Also lands the two-allowlist write boundary, the halt fallback, `planner_trace`, and `retrieval_gaps`.
     - **Step 10B - Refactor the planner loop into graph nodes:** needs Step 10A; moves the tool loop into LangGraph nodes (`start_turn`, `planner_model`, `planner_tools` as a prebuilt `ToolNode`, `fallback_lesson`) with every 10A guardrail kept. Unit-tested with a fake planner model injected through `PlannerDeps`.
 11. **Step 11 - Graph assembly + persistence:** needs Step 10B; compiles the full graph on `PostgresSaver` + `PostgresStore` with `route_input` and `memory_writer` as the mandatory last node.
-12. **Step 12 - Coach UI for lessons:** needs Steps 6B and 11; streamed coach turns, the step log, and the inspector in one coach conversation per user. Questions show read-only.
-13. **Step 13 - Coach UI for quizzes and practice checks:** needs Step 12; **Teach me** / **Quiz me** quick actions and practice **Check** on questions. Steps 14 to 19 each add their own UI piece.
-14. **Step 14 - Token usage per turn:** needs Step 12 (graph config and inspector); totals token usage per caller for each turn and shows it in the inspector. Nothing later depends on it.
-15. **Step 15 - Answers + derived mastery:** needs Step 13 (replaces its practice check); scores answers, writes mistake episodes, and derives `topic_mastery` deterministically.
-16. **Step 16 - Mock exam path:** needs Step 15; deterministic 40-question exam that bypasses the planner but not the logging.
-17. **Step 17 - Mistake-driven review retrieval:** needs Step 15 (mistake episodes with sources).
-18. **Step 18 - Persistent study plan:** needs Step 12. Additive planner tools; this is what makes the autonomy persist across sessions rather than within a turn.
-19. **Step 19 - Corpus coverage tracker:** needs Step 15 (`quiz_answers` from the graph); adds `lesson_sources` so "taught" coverage has real section data.
-    - Steps 17, 18 and 19 can be built in any order.
-20. **Step 20 - Finish the UI:** needs Steps 16, 18 and 19; adds onboarding, the mock exam timer, the debug flag for the inspector, and learner-facing polish to the coach UI from Steps 12 and 13
-21. **Step 21 - Self-improvement via per-learner scheduling:** **in MVP.** Needs Step 9 (persisted bank) and Step 7B (`quiz_answers`) only; no planner dependency, so it can be built in parallel with Steps 10 to 20 and turned on after Step 20 ships. Included in MVP because the project's stated purpose is an agent that improves over time, and per-learner scheduling is the cheapest loop that visibly does that with one real learner. Ships with the reflection-report chore that makes its check-in evidence-based.
-22. **Step 22 - Self-improvement on teaching strategy:** **post-MVP.** The second self-improvement step. Needs Step 10 (planner consumes the chosen strategy) and a trusted Step 21 scheduling signal, plus the reward-hygiene rule.
+12. **Step 12 - Coach UI for lessons:** needs Steps 6B and 11; server-owned coach turns, the welcome card, spinner verbs, and lessons with their sources in one coach conversation per user. Questions show read-only.
+    - **Step 12B - Follow-up context:** needs Step 12; carries the previous exchange into the next turn so learners can ask follow-ups.
+13. **Step 13 - Coach UI for quizzes and practice checks:** needs Step 12; **Teach me** / **Quiz me** quick actions and practice **Check** on questions. Steps 16 to 21 each add their own UI piece.
+14. **Step 14 - UI logging:** needs Step 13; every learner action is logged with a shared `turn_id` and no learner text.
+15. **Step 15 - Developer mode:** needs Step 13; `--dev` adds a panel beside each coach bubble showing how it was made. Later steps add their developer details to this panel.
+16. **Step 16 - Token usage per turn:** needs Steps 12 (graph config) and 15 (developer panel); totals token usage per caller for each turn and shows it in the developer panel. Nothing later depends on it.
+17. **Step 17 - Answers + derived mastery:** needs Step 13 (replaces its practice check); scores answers, writes mistake episodes, and derives `topic_mastery` deterministically.
+18. **Step 18 - Mock exam path:** needs Step 17; deterministic 40-question exam that bypasses the planner but not the logging.
+19. **Step 19 - Mistake-driven review retrieval:** needs Step 17 (mistake episodes with sources).
+20. **Step 20 - Persistent study plan:** needs Step 12. Additive planner tools; this is what makes the autonomy persist across sessions rather than within a turn.
+21. **Step 21 - Corpus coverage tracker:** needs Step 17 (`quiz_answers` from the graph); adds `lesson_sources` so "taught" coverage has real section data.
+    - Steps 19, 20 and 21 can be built in any order.
+22. **Step 22 - Finish the UI:** needs Steps 18, 20 and 21; adds onboarding, the mock exam timer, and learner-facing polish to the coach UI from Steps 12 and 13
+23. **Step 23 - Self-improvement via per-learner scheduling:** **in MVP.** Needs Step 9 (persisted bank) and Step 7B (`quiz_answers`) only; no planner dependency, so it can be built in parallel with Steps 10 to 22 and turned on after Step 22 ships. Included in MVP because the project's stated purpose is an agent that improves over time, and per-learner scheduling is the cheapest loop that visibly does that with one real learner. Ships with the reflection-report chore that makes its check-in evidence-based.
+24. **Step 24 - Self-improvement on teaching strategy:** **post-MVP.** The second self-improvement step. Needs Step 10 (planner consumes the chosen strategy) and a trusted Step 23 scheduling signal, plus the reward-hygiene rule.
 
-**MVP boundary:** Steps 1 through 21. Step 9B is optional within that boundary; Step 22 and cross-learner difficulty calibration are post-MVP.
+**MVP boundary:** Steps 1 through 23. Step 9B is optional within that boundary; Step 24 and cross-learner difficulty calibration are post-MVP.
 
 ---
 
