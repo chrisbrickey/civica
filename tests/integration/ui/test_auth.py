@@ -136,15 +136,25 @@ async def _log_out(user: User) -> None:
     await user.should_see(marker=_SIGN_IN_MARKER)
 
 
+# modules that log registration, sign-in, and logout
+_AUTH_LOGGERS = {"civica.ui.pages.account", "civica.ui.pages.home"}
+
+
 def _output_lines(caplog: pytest.LogCaptureFixture, start: int = 0) -> list[logging.LogRecord]:
     """Records at the app's configured level or above, from index start onward."""
     return [record for record in caplog.records[start:] if record.levelno >= logging.INFO]
 
 
-def _lines_with_user_id(
+def _all_auth_lines(caplog: pytest.LogCaptureFixture, start: int = 0) -> list[logging.LogRecord]:
+    """Auth event lines only. Other modules may log during the same action for their own reasons."""
+    return [line for line in _output_lines(caplog, start) if line.name in _AUTH_LOGGERS]
+
+
+def _auth_lines(
     caplog: pytest.LogCaptureFixture, user_id: UUID, start: int = 0
 ) -> list[logging.LogRecord]:
-    return [line for line in _output_lines(caplog, start) if str(user_id) in line.getMessage()]
+    """Auth event lines about this user."""
+    return [line for line in _all_auth_lines(caplog, start) if str(user_id) in line.getMessage()]
 
 
 def _raise_sample_error() -> None:
@@ -407,7 +417,7 @@ async def test_registration_writes_one_info_line_with_the_user_id(
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
     user_id = _stored_user_id(db_schema, _USERNAME)
-    assert [line.levelno for line in _lines_with_user_id(app_logs, user_id)] == [logging.INFO]
+    assert [line.levelno for line in _auth_lines(app_logs, user_id)] == [logging.INFO]
 
 
 async def test_sign_in_writes_one_info_line_with_the_user_id(
@@ -420,7 +430,7 @@ async def test_sign_in_writes_one_info_line_with_the_user_id(
     await _sign_in(ui_user, _USERNAME, _PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
-    assert [line.levelno for line in _lines_with_user_id(app_logs, user_id)] == [logging.INFO]
+    assert [line.levelno for line in _auth_lines(app_logs, user_id)] == [logging.INFO]
 
 
 async def test_log_out_writes_one_info_line_with_the_user_id(
@@ -435,7 +445,7 @@ async def test_log_out_writes_one_info_line_with_the_user_id(
 
     await _log_out(ui_user)
 
-    lines = _lines_with_user_id(app_logs, user_id, start)
+    lines = _auth_lines(app_logs, user_id, start)
     assert [line.levelno for line in lines] == [logging.INFO]
 
 
@@ -451,7 +461,7 @@ async def test_registration_sign_in_and_log_out_lines_are_each_their_own_kind(
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
     user_id = _stored_user_id(db_schema, _USERNAME)
-    lines = _lines_with_user_id(app_logs, user_id)
+    lines = _auth_lines(app_logs, user_id)
     # With the id removed, wording is all that is left, so this does not pin any of it.
     kinds = [line.getMessage().replace(str(user_id), "") for line in lines]
     assert len(kinds) == 3
@@ -480,7 +490,7 @@ async def test_failed_sign_in_writes_one_line_without_the_submitted_username(
     ui_user.find(marker=_SIGN_IN_MARKER).click()
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
 
-    assert len(_output_lines(app_logs, start)) == 1
+    assert len(_all_auth_lines(app_logs, start)) == 1
     assert submitted_username.casefold() not in app_logs.text.casefold()
 
 
@@ -493,7 +503,7 @@ async def test_empty_sign_in_form_writes_no_line(
     ui_user.find(marker=_SIGN_IN_MARKER).click()
     await ui_user.should_see(_MISSING_INPUT_TEXT)
 
-    assert _output_lines(app_logs, start) == []
+    assert _all_auth_lines(app_logs, start) == []
 
 
 @pytest.mark.parametrize(
@@ -522,7 +532,7 @@ async def test_rejected_registration_writes_one_line_with_the_reason_and_no_subm
     ui_user.find(marker=_CREATE_ACCOUNT_MARKER).click()
     await ui_user.should_see(expected_error)
 
-    lines = _output_lines(app_logs, start)
+    lines = _all_auth_lines(app_logs, start)
     assert [line.levelno for line in lines] == [logging.INFO]
     assert expected_error in lines[0].getMessage()
     for submitted in filter(None, (username, password, confirmation)):
