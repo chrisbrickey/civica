@@ -1,5 +1,7 @@
 """User account pages such as sign in and registration."""
 
+import logging
+
 from nicegui import ui
 
 from civica.domain.user import UserId
@@ -8,6 +10,8 @@ from civica.ui.deps import AppDeps
 from civica.users.rules import SECRET_RULES, USERNAME_RULES, InvalidSecret, InvalidUsername
 from civica.users.service import UsernameTaken, normalize_username, verify
 from civica.users.service import register as register_user
+
+logger = logging.getLogger(__name__)
 
 _MISSING_INPUT_MESSAGE = "Enter a username and a password."
 _SIGN_IN_FAILED_MESSAGE = "Wrong username or password."
@@ -28,9 +32,10 @@ def _check_credentials(deps: AppDeps, username: str, password: str) -> UserId:
     _require_input(username, password)
     try:
         user_id = verify(username, password, deps.conn)
-    except ValueError as err:
-        raise _FormRejected(_SIGN_IN_FAILED_MESSAGE) from err
+    except ValueError:
+        user_id = None
     if user_id is None:
+        logger.info("Sign-in failed: credentials rejected")
         raise _FormRejected(_SIGN_IN_FAILED_MESSAGE)
     return user_id
 
@@ -67,6 +72,7 @@ def register(deps: AppDeps) -> None:
             except _FormRejected as err:
                 error.set_text(str(err))
                 return
+            logger.info("User %s signed in", user_id)
             _complete_sign_in(user_id, username.value)
 
         username.on("keydown.enter", submit)
@@ -91,8 +97,10 @@ def register(deps: AppDeps) -> None:
                     deps, username.value, password.value, confirmation.value
                 )
             except _FormRejected as err:
+                logger.info("Registration rejected: %s", err)
                 error.set_text(str(err))
                 return
+            logger.info("User %s registered", user_id)
             _complete_sign_in(user_id, username.value)
 
         ui.button("Create account", on_click=submit).mark("create-account")

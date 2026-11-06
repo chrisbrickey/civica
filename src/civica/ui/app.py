@@ -1,5 +1,7 @@
 """NiceGUI web app entrypoint. Run with: uv run python -m civica.ui.app"""
 
+import logging
+
 from dotenv import load_dotenv
 from nicegui import ui
 
@@ -8,6 +10,11 @@ from civica.ui.pages import register_pages
 from civica.ui.settings import SESSION_MAX_AGE, session_secret
 
 if __name__ in {"__main__", "__mp_main__"}:  # __mp_main__ is needed for NiceGUI's auto-reload
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
     load_dotenv()
     register_pages(default_app_deps())
     ui.run(
