@@ -1201,24 +1201,40 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
     - Observe each planner step (e.g. reading learner state, retrieving passages, teaching) appearing in a step log as it happens.
     - See the lesson text appear word by word as it is generated.
     - Read the finished lesson with citations: the source page, the section, and the match score for each passage it drew on.
-  - Not enough material: if retrieval finds nothing for the request, the lesson says there is not enough material and shows no citations.
-  - See questions read-only: the one-question comprehension check that usually follows a lesson (and the questions from a "Quiz me" request) shows with its options, but no option can be checked yet (Step 13).
+  - See a quiz (read only in this step):
+    - If the user requests something like "Quiz Me", the coach displays one or more questions with their answer options. Answers cannot be selected yet (see Step 13).
+    - Following a lesson, the coach may display a question with its answer options as a comprehension check. NB: The planner skips such a comprehension check if the learner asked a direct question. It's also possible that generating the question can fail and will therefore not display.
+  - Not enough material:
+    - If retrieval finds nothing for a request, the coach says there is not enough material and shows no citations.
   - Recognize a fallback lesson:
     - If the planner exceeds its step limit or attempts a forbidden write, the user gets a fallback lesson instead of an error.
     - The fallback lesson comes from the graph's `fallback_lesson` node, so it was not chosen by the planner.
-    - The inspector flags that the lesson shown is a fallback. Learners stop seeing this flag once the inspector is hidden behind the debug flag (Step 20).
-  - Start a new turn: a new turn replaces the previous one on screen; the previous lesson is not shown.
-  - Refresh without losing the turn: the user reloads the browser and the page shows the same turn, read back from the persisted conversation.
-  - Come back later: the user sees the most recent turn after logging out and back in, after closing the tab and opening the app in a new tab, or after logging in from a different browser or computer (the conversation is saved per user, not per browser). Earlier turns are not shown: turn history is out of MVP scope.
-  - Cannot double submit: the prompt input is disabled while a turn is running, so a second click on Submit (or pressing Enter a second time) does not start an overlapping turn.
-  - One turn at a time per user: submitting from a second tab or browser while a turn runs shows "A turn is already running" and starts nothing, so two turns never write to the same conversation at once.
-  - Recover from a failed turn: if a turn errors (e.g. the Anthropic API or the database is unavailable), the user sees "Something went wrong, please try again." and the prompt input works again.
+    - The inspector flags that the lesson shown is a fallback. NB: Learners stop seeing this flag once the inspector is hidden behind the debug flag (Step 20).
+  - Start a new turn: 
+    - The learner asks for a different lesson and a new turn replaces the previous one on the screen. 
+    - The previous lesson is not shown.
+  - Return after dropping a session mid-turn:
+    - The learner reloads during a turn, and the page shows the running turn and then its result.
+    - The learner reloads after a turn finishes, and the page shows the same turn, read back from the persisted conversation.
+    - A new tab or another browser has the same result.
+    - The learner closes the current tab during a turn and the turn still finishes and is saved. 
+    - When the learner returns later (following logout/login), they see the most recent turn.
+  - One learner, one turn:
+    - After the learner types a prompt and clicks Submit, the input field and the Submit button are disabled while the turn is running. 
+    - While the turn is running, a second click on Submit (or pressing Enter a second time) does not start an overlapping turn. 
+    - The learner opens a second tab or browser during the turn and the current turn displays in a running state with the input disabled.
+    - If a tab submits just as a turn starts elsewhere, that tab shows "A turn is already running" and nothing new starts. Two turns never write to the same conversation at once.
+  - Recover from a failed turn:
+    - A turn errors (e.g. external service or database is unavailable). The user sees "Something went wrong. Please try again." and the prompt input becomes available again. 
+    - If the most recent turn never finished (it failed, or the server restarted), reopening the page shows "Your last request didn't finish. Please try again." and not the previous lesson.
   - View the inspector (developer view, open by default for now). A right-hand panel shows:
     - the tools the planner called, in order, with their arguments
     - why the turn ended (`halt_reason`) and the fallback flag
-    - the learner's current state: goal, mastery by theme, recent mistakes. Expect it to be mostly empty: the goal is set at onboarding (Step 20), mastery is written only once answers are scored (Step 15), and mistakes appear only when the planner records one during a turn.
+    - the `turn_id` and `thread_id`, and the error type if a turn fails while the page is open
+    - the learner's current state: goal, mastery by theme, recent mistakes. Expect this to be mostly empty because the goal is set at onboarding (Step 20), mastery is written only after answers are scored (Step 15), and mistakes appear only when the planner records one during a turn.
 
-**What the user cannot do yet** (added in subsequent steps):
+What the user cannot do **yet**:
+  - ask a follow-up about the previous turn (Step 12B)
   - check an answer, or use the **Teach me** / **Quiz me** quick actions (Step 13)
   - see token costs (Step 14)
   - answer questions for real, with scoring, logging, and mastery (Step 15)
@@ -1226,61 +1242,117 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - see a "why this next" line (Step 18) or coverage (Step 19)
   - set a study goal at onboarding, or hide the inspector (Step 20)
 
-**Implementation**
+**Ask for a lesson**
+The learner submits a prompt, watches the steps, and reads the finished turn. Text appears when the turn ends. This section proves the server-owned turn before anything builds on it.
+
 - **Test:** `tests/unit/ui/test_turn_view.py` (unit: build final planner states by hand; no graph, no DB)
   - A grounded lesson yields one citation per context chunk, in retrieval order, with `page_slug`, `section_id`, and similarity.
   - An insufficient-material lesson yields no citations.
   - Quiz questions map to read-only items that never expose the correct answer.
-  - A turn that ended in `max_steps` or `forbidden_write` is flagged as a fallback lesson.
-- **Test:** `tests/unit/ui/test_reply_stream.py` (unit: hand-built `(message_chunk, metadata)` pairs; no graph)
-  - Text chunks from the planner's final message and from the explanation model are yielded in order.
-  - Tool-call chunks, and chunks from question generation or the critic, are dropped.
-- **Test:** `tests/unit/ui/test_stream_bridge.py` (unit: plain sync generators; no graph)
-  - Items from a sync generator arrive in order through the async bridge, and the bridge ends when the generator ends.
-  - An exception raised inside the generator reaches the awaiting caller.
-  - Other coroutines keep running while the generator blocks, so one slow turn does not freeze the app.
-- **Test:** `tests/unit/llm/test_client.py`: each profile's model carries its caller tag (`planner`, `explanation`, `quiz`).
-- **Test:** create `tests/integration/ui/test_lessons.py`. Add a `signed_in_user` fixture to `tests/integration/ui/conftest.py` so each feature test file can start signed in without copying the helpers in `test_auth.py`. The real graph from `build_graph(...)` is added to the injected `AppDeps`, compiled with the existing fakes in `tests/support/planner.py` (fake planner and content models, fake retriever, fake trace writer and answer logger), `InMemoryStore`, and `InMemorySaver`. Only external services are faked, so wiring bugs such as a missing runtime `context` or unstreamed subgraph steps fail the test.
+  - A turn that ended in `max_steps` or `forbidden_write` is flagged as a fallback lesson, and its text appears once even though `reply` and `lesson.text` match.
+  - An empty thread yields no turn view.
+  - An unfinished turn (`snapshot.next` is not empty and no turn is active) yields "Your last request didn't finish. Please try again." and none of the stale turn content.
+  - Each planner tool maps to a plain step label, and an unknown tool shows its name.
+- **Test:** `tests/unit/ui/test_turns.py` (unit: fake graph and plain threads; no NiceGUI)
+  - Steps reach the turn snapshot in order, and the turn ends as finished.
+  - A second start for the same user raises `TurnAlreadyRunning`, and a different user is unaffected.
+  - A graph that raises marks the turn failed with the error type, logs the exception, and frees the user to start again.
+  - The caller is never blocked while a turn runs.
+- **Test:** `tests/unit/llm/test_client.py`: each profile's model has a request timeout.
+- **Test:** create `tests/integration/ui/test_lessons.py`. Add a `signed_in_user` fixture to `tests/integration/ui/conftest.py` so each feature test file can start signed in without copying the helpers in `test_auth.py`. The real graph from `build_graph(...)` is added to the injected `AppDeps`, compiled with the existing fakes in `tests/support/planner.py` (fake planner and content models, fake retriever, fake trace writer and answer logger), `InMemoryStore`, and `InMemorySaver` using the production serializer. Only external services are faked, so wiring bugs such as a missing runtime `context` or unstreamed subgraph steps fail the test.
   - Log in and submit a prompt: the fake reply and at least one citation render.
-  - The lesson text streams: the fake explanation model emits it in several chunks, and the final rendered lesson matches the checkpointed state.
   - The step log shows the planner's tool steps (from inside the planner subgraph), not only the outer graph's nodes.
   - A turn that produced questions shows them with their options, none preselected, and no **Check** control.
-  - Reload: opening `/` again shows the same lesson and questions (rendered from the checkpointer, since a NiceGUI page rebuilds on every visit).
+  - Reload: opening `/` again shows the same learner message, lesson, and questions (rendered from the checkpointer, since a NiceGUI page rebuilds on every visit).
+  - Reload during a turn: the new page shows the running turn with the prompt input disabled, then shows the finished result.
+  - A closed page does not stop the turn: the result is shown on the next visit.
   - A second turn replaces the first: the previous lesson is no longer shown.
   - The prompt input is disabled while a turn runs, so a second submit cannot start an overlapping turn.
+  - A blank prompt starts nothing.
   - A second simulated browser for the same user, submitting while a turn runs, shows "A turn is already running" and the graph is invoked once.
-  - A graph that raises partway through the stream shows the friendly error, logs the exception, and leaves the prompt input enabled.
-- **Test:** `tests/browser/test_coach_smoke.py` is a real-browser smoke test. 
+  - A graph that raises partway through the stream shows "Something went wrong. Please try again.", logs the exception, and leaves the prompt input enabled. Reloading afterwards shows "Your last request didn't finish. Please try again."
+- Extend `src/civica/llm/client.py`: set a request `timeout` on `AnthropicChat`, starting at 120 seconds, so a hung call cannot leave the prompt input disabled indefinitely. Revisit the value at the check-in.
+- Extend `src/civica/memory/checkpointer.py`: expose the serializer so test savers use the production allow-list of state types. A state type missing from the list then fails in tests, not at runtime.
+- Create `src/civica/ui/turns.py`: the server owns each running turn and pages only display it. No NiceGUI import.
+  - Why: a page handler that owned the turn could not be rejoined after a reload, and other tabs would show nothing. The graph, checkpointer, and store use sync psycopg, and NiceGUI runs every user on one event loop, so the turn must run off that loop anyway. Moving the stack to LangGraph's async saver and store is deferred; a worker thread keeps the back end unchanged.
+  - `TurnRunner(graph)`: `start(user_id, graph_input) -> ActiveTurn` raises `TurnAlreadyRunning` if that user has a live turn. `active(user_id) -> ActiveTurn | None` finds the live turn. Each turn runs in its own worker thread.
+  - `ActiveTurn`: thread-safe progress. `snapshot()` returns a frozen view of the steps, status (running, finished, failed), and error type.
+  - Run `graph.stream(input, config={"configurable": {"thread_id": ...}}, context=PlannerContext(user_id=...), stream_mode=["updates"], subgraphs=True)`. This is the payoff of the graph-native loop from Step 10B.
+    - `updates`: add each step from `planner_model` updates, whose `tool_calls` list grows through the turn. This shows a step before it runs. `planner_tools` updates carry no tool name, and `memory_writer` updates are `None`.
+    - `subgraphs=True` is required: the planner is a subgraph, and without it the stream emits only one update for the whole planner instead of one per step.
+    - `user_id` goes only in `context`, never in the input or config (Step 10B).
+  - **One turn per user:** the runner tracks live turns per user. This is per process, which is enough while the app runs as one process; a multi-process deployment would need a database lock instead.
+  - **Failed turn:** catch the exception in the worker, log it with `logger.exception`, and mark the turn failed. The user is always freed, so an error never leaves the input locked.
+  - **Logging:** log turn start and end with `user_id`, `turn_id`, `halt_reason`, and duration, using the web app's existing logging setup. Read `turn_id` from the `start_turn` update, so a failed turn logs it too.
+- Create `src/civica/ui/turn_view.py`: frozen dataclasses `TurnView`, `CitationView`, `QuizItemView` built from the graph's state (`learner_message`, `reply`, `lesson`, `quiz_questions`, `tool_calls`, `halt_reason`), plus the plain step labels ("Reading your progress", "Finding passages", "Writing your lesson", "Writing a question"). No NiceGUI import, so the shaping logic is unit-testable.
+- Extend `src/civica/ui/deps.py`: add required `graph` and `turn_runner` to `AppDeps`. `default_app_deps()` builds both once per process, so the chat models and pool are not rebuilt per page visit. Tests pass their own through `register_pages(deps)`; no new seams.
+  - `ui_user` in `tests/integration/ui/conftest.py` must now supply a fake graph.
+  - `tests/integration/ui/test_entrypoint.py` now builds the real graph, so it needs the database and possibly a dummy API key.
+  - In `src/civica/ui/app.py`, call `session_secret()` before building deps, so a missing secret still fails fast.
+- Create `src/civica/ui/pages/coach.py` for the coach. `src/civica/ui/pages/home.py` keeps the route and the sign-in check, and calls it.
+  - **One conversation:** every coach turn uses `thread_id = f"{user_id}:coach"` so `PostgresSaver` restores it. The mock exam gets its own thread in Step 16.
+  - **Layout:** a `ui.header` with the username and log out; the turn in the page body; the prompt pinned in a `ui.footer`. Auto-scroll as text arrives.
+  - **Prompt input:** a text input with a send button (Enter also sends) and the hint "Ask for a lesson or a quiz". Blank prompts are ignored, length is capped with `maxlength`, and the input clears after sending. Disabled while a turn runs. Each turn stands alone until Step 12B, so the hint steers learners to new requests.
+  - **Live turn:** each page runs one `ui.timer(0.1)` that reads `turn_runner.active(user_id)` and draws its snapshot. A lesson turn takes about 15s, so show progress as it runs.
+    - Append steps to a step log (`ui.expansion`).
+    - Show a spinner until the first step arrives.
+    - The same timer picks up a turn started from another tab or after a reload.
+    - When the turn finishes, redraw from `graph.get_state(config).values` rather than rebuilding it from the streamed updates.
+  - **Turn already running:** catch `TurnAlreadyRunning`, show "A turn is already running", and start nothing. That page then follows the running turn.
+  - **Failed turn:** show "Something went wrong. Please try again." and re-enable the input.
+  - **Unfinished turn:** when the page opens on a turn that never finished, show "Your last request didn't finish. Please try again." and no stale content.
+  - **Turn rendering:** in generation order, so nothing moves when the turn ends: the learner's message (`ui.chat_message(sent=True)`), the lesson text with its citations, any questions read-only (options listed, no control to choose one), then the planner `reply`. The live view uses the same order.
+    - Survive reloads: a NiceGUI page function runs on every visit, so build the page from `graph.get_state(config)`, not only right after streaming.
+    - Make the page function async and read through `await run.io_bound(...)`, showing "Something went wrong. Please try again." if the read fails. A sync read on the event loop could freeze every user for the pool timeout if the database is down.
+- **Check In:** Stop and confirm with user that the implemented code is satisfactory. Prompt the user to run `uv run python -m civica.ui.app`, log in, ask for a lesson, and confirm the steps, citations, and read-only comprehension question are sensible.
+  - A second turn must not show the previous turn's lesson.
+  - Reload during a turn, and open a second tab during a turn: both must show the running turn.
+  - Close the tab during a turn and reopen it: the saved result must appear.
+
+**Word-by-word text**
+The lesson and reply appear as they are generated. This is an important UX requirement because total response time is likely to exceed 15 seconds. That breaks engagement, making it likely for the learner to switch contexts. Instead, we will stream the generated responses so that learner stays engaged and begins absorbing the content as soon as possible.
+
+- **Test:** `tests/unit/ui/test_reply_stream.py` (unit: hand-built `(message_chunk, metadata)` pairs; no graph)
+  - Text chunks from the planner and from the explanation model are yielded in order, labeled as reply or lesson.
+  - Tool-call chunks, and chunks from question generation or the critic, are dropped.
+  - Untagged `HumanMessage`, `RemoveMessage`, and `ToolMessage` items are dropped. The `messages` stream carries all three, and the `ToolMessage` from `teach` holds the full lesson.
+- **Test:** extend `tests/unit/ui/test_turns.py`
+  - Lesson and reply text reach the turn snapshot in order.
+  - Reply text streamed before a tool call is cleared when the `planner_model` update reports that call.
+- **Test:** extend `tests/unit/llm/test_client.py`: each profile's model carries its caller tag (`planner`, `explanation`, `quiz`).
+- **Test:** extend `tests/integration/ui/test_lessons.py`
+  - The lesson text streams: the fake explanation model emits it in several chunks, and the final rendered lesson matches the checkpointed state.
+- Extend `src/civica/llm/client.py`: tag each profile's model with its caller name (`ChatAnthropic` accepts `tags`). The reply stream filters on these tags, and Step 14 reuses them to split token usage by caller.
+- Extend `FakeChatModelBase` in `tests/support/llm.py` with `_stream`, so fakes emit text in several chunks and token streaming is exercised in tests.
+- Create `src/civica/ui/reply_stream.py`: `reply_parts(chunks) -> Iterator[ReplyPart]` filters the `messages` stream down to learner-facing text, by caller tag, labeling each part as lesson or reply. It keeps only tagged AI chunks and drops tool-call chunks. No NiceGUI import.
+- Extend `src/civica/ui/turns.py`:
+  - Add `messages` to `stream_mode`, so it becomes `["updates", "messages"]`, and add lesson text and reply text to the snapshot.
+  - `messages`: pass the chunks through `reply_parts` into separate lesson and reply buffers. LangGraph captures tokens from chat models called inside tools, so no engine changes are needed.
+  - When a `planner_model` update reports tool calls, clear the reply buffer, since that text was narration and not the final message.
+- Extend `src/civica/ui/pages/coach.py`:
+  - Show lesson and reply text in `ui.markdown` inside a `ui.chat_message`, so they appear word by word. The timer also throttles rendering, since `ui.markdown` re-renders its whole content on every change.
+  - The live view uses the same order as the finished turn, and the spinner now also ends at the first text.
+- **Check In:** Stop and confirm with user that the implemented code is satisfactory. Prompt the user to watch a lesson stream in the running app.
+  - Review word-by-word streaming with the user: is it worth keeping, or is a plain ~15s wait with the step log preferable? If streaming is dropped, remove `messages` from `stream_mode`, `reply_stream.py`, and its tests. Keep the caller tags (Step 14 needs them) and `TurnRunner` (the step log still needs it).
+
+**Inspector and smoke test**
+This surfaces developer view with metadata from each turn in a side panel. It also adds a comprehensive test of the whole app in a real browser.
+
+- **Test:** extend `tests/integration/graph/test_graph.py`: the final state includes the turn's `turn_id`, matching its `planner_trace` rows.
+- **Test:** extend `tests/integration/ui/test_lessons.py`: the inspector shows the turn's tool calls in order, `halt_reason`, `turn_id`, and the fallback flag on a fallback turn.
+- **Test:** `tests/integration/ui/test_coach_smoke_external.py` is a real-browser smoke test. It sits under `tests/integration/` so that it can use `db_schema` from the integration conftest.
   - NiceGUI's `User` fixture (existing tests) skips the page's JavaScript, the live websocket between page and server, and the browser's cookie handling, which this step starts to rely on for streaming.
   - Use NiceGUI's `Screen` fixture (Selenium driving Chrome against a running server) to implement the smoke test. Add dev dependency `selenium`, and load both fixtures by switching `addopts` to `-p nicegui.testing.plugin`.
   - Keep it to 1 to 3 tests: sign in, submit a prompt, see the streamed reply render; reload and see the same turn.
-  - Add a `browser` marker and exclude it from the default run (`-m 'not external and not browser'`). Document the requirements (Chrome and its driver) at the top of the file.
-  - Confirm how the running server receives test deps (the per-test DB schema and the fake graph) before writing the tests; the `User` fixture's in-process wiring may not carry over.
-- Extend `src/civica/llm/client.py`: tag each profile's model with its caller name (`ChatAnthropic` accepts `tags`). The reply stream filters on these tags, and Step 14 reuses them to split token usage by caller.
-- Extend `FakeChatModelBase` in `tests/support/llm.py` with `_stream`, so fakes emit text in several chunks and token streaming is exercised in tests.
-- Create `src/civica/ui/reply_stream.py`: `reply_text(chunks) -> Iterator[str]` filters the `messages` stream down to learner-facing text (the planner's final message and the explanation model, by caller tag), dropping tool-call chunks. No NiceGUI import.
-- Create `src/civica/ui/stream_bridge.py`: `iterate_in_thread(make_iter) -> AsyncIterator[T]` runs a sync iterator in a worker thread and hands each item back to the event loop through an `asyncio.Queue`. Plain asyncio, no NiceGUI import.
-  - Why: the graph, checkpointer, and store use sync psycopg. NiceGUI runs every user on one event loop, so calling `graph.stream()` directly would freeze the app for everyone during a ~15s turn. Moving the stack to LangGraph's async saver and store is deferred; this bridge keeps the back end unchanged.
-- Create `src/civica/ui/turn_view.py`: frozen dataclasses `TurnView`, `CitationView`, `QuizItemView` built from the planner's final state (`reply`, `lesson`, `quiz_questions`, `tool_calls`, `halt_reason`). No NiceGUI import, so the shaping logic is unit-testable.
-- Extend `src/civica/ui/deps.py`: add `graph` to `AppDeps`. `default_app_deps()` builds it once per process with `build_graph()`, so the chat models and pool are not rebuilt per page visit. Tests pass their own graph through `register_pages(deps)`; no new seams.
-  - Also add `turn_locks: dict[UserId, asyncio.Lock]` (empty by default) so each test gets fresh locks. The locks are per process, which is enough while the app runs as one process; a multi-process deployment would need a database lock instead.
-- Create `src/civica/ui/pages/coach.py` for the coach and `src/civica/ui/pages/inspector.py` for the inspector panel. `src/civica/ui/pages/home.py` keeps the route and the sign-in check, and calls both.
-  - **One conversation:** every coach turn uses `thread_id = f"{user_id}:coach"` so `PostgresSaver` restores it. The mock exam gets its own thread in Step 16.
-  - **Prompt input:** a text input with a send button (Enter also sends). Disabled while a turn runs.
-  - **Streamed turn:** run `graph.stream(input, config={"configurable": {"thread_id": ...}}, context=PlannerContext(user_id=...), stream_mode=["updates", "messages"], subgraphs=True)` through `iterate_in_thread`. A lesson turn takes about 15s, so show progress two ways as it runs. This is the payoff of the graph-native loop from Step 10B.
-      - `updates`: append each step to a step log (`ui.expansion`) as it runs.
-      - `messages`: pass the token chunks through `reply_text` and append them to a `ui.markdown` inside a `ui.chat_message`, so the lesson and reply appear word by word. LangGraph captures tokens from chat models called inside tools, so no engine changes are needed.
-    - `subgraphs=True` is required: the planner is a subgraph, and without it the stream emits only one update for the whole planner instead of one per step.
-    - Once the stream ends, replace the streamed text with the full turn rendering below.
-    - `user_id` goes only in `context`, never in the input or config (Step 10B).
-    - After the stream ends, read the turn's result with `graph.get_state(config).values` rather than rebuilding it from the streamed updates.
-  - **One turn per user:** take the user's lock from `deps.turn_locks` before streaming. If it is already held, show "A turn is already running" and return without invoking the graph.
-  - **Failed turn:** wrap the streamed turn in `try`/`except`/`finally`. On an exception, log it with `logger.exception` and show "Something went wrong, please try again." The `finally` releases the lock and re-enables the turn controls, so an error never leaves the input locked. The stream bridge already re-raises worker-thread errors in the caller.
-  - **Turn rendering:** the planner `reply`, the lesson text with its citations, and any questions read-only (options listed, no control to choose one).
-    - Survive reloads: a NiceGUI page function runs on every visit, so build the page from `graph.get_state(config).values` (a cheap checkpointer read), not only right after streaming.
-  - **Inspector panel** in a `ui.right_drawer` (open by default while developing), kept apart from the learner's view: tool calls in order with their arguments, `halt_reason`, and the fallback-lesson flag, all read from the graph's final state. Also the learner state (goal, mastery, mistakes) from the existing `read_learner_state` against the graph's store. No new DB readers.
-- **Check In:** Stop and confirm with user that the UI is satisfactory. Prompt the user to run `uv run python -m civica.ui.app`, log in, ask for a lesson, and confirm the streamed steps, citations, read-only comprehension question, and inspector trace are sensible. A second turn must not show the previous turn's lesson.
-  - Review word-by-word streaming with the user: is it worth keeping, or is a plain ~15s wait with the step log preferable? If streaming is dropped, remove `messages` from `stream_mode`, `reply_stream.py`, and its tests. Keep the caller tags (Step 14 needs them) and the stream bridge (the step log still needs it).
+  - Mark it `@pytest.mark.external`, which keeps it out of the default run because it needs a real Chrome. Document the requirement (Chrome) at the top of the file.
+  - The driver is not a project dependency, because its version must match the installed Chrome. Selenium Manager (part of `selenium`) fetches the matching driver on the first run, which needs network access. Set `SE_CACHE_PATH` to `.selenium-cache/` in the test file, before the driver starts, so the driver stays inside the project. Confirm on the first run that it lands there.
+  - Add `.selenium-cache/` and `screenshots/` (written by `Screen`) to `.gitignore`.
+  - The `Screen` server runs in a thread of the test process, so tests call `register_pages(deps)` directly and set `storage_secret` through `screen.ui_run_kwargs`. Confirm this works with the per-test connection before writing the tests.
+- Extend `src/civica/graph/graph.py`: add `turn_id` to `GraphState`, so the inspector can link a turn to its `planner_trace` rows.
+- Extend `src/civica/ui/turn_view.py`: add `turn_id` to `TurnView`.
+- Create `src/civica/ui/pages/inspector.py`, called from `src/civica/ui/pages/home.py`, and add an inspector toggle to the header.
+  - **Inspector panel** in a `ui.right_drawer` (open by default while developing), kept apart from the learner's view: tool calls in order with their arguments, `halt_reason`, the fallback-lesson flag, `turn_id`, and `thread_id`, all read from the graph's final state, plus the error type of a live failed turn. Also the learner state (goal, mastery, mistakes) from the existing `read_learner_state` against the graph's store. No new DB readers. The drawer stays at page top level, as NiceGUI requires, and its content refreshes inside it.
+- **Check In:** Stop and confirm with user that the implemented code is satisfactory. Prompt the user to read the inspector on a few turns and confirm the trace is sensible, match a `turn_id` to its `planner_trace` rows, and run `uv run pytest -m external`.
 
 - **README:**
   - Replace `TBD` under **Usage** with:
@@ -1297,6 +1369,38 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
     > 3. Chat with the coach  
     > Ask for a lesson or a quiz in your own words. 
     > The inspector panel exposes the planner steps, tools called, and reason for end of turn.
+
+- **Update this plan:**
+  - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
+  - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+
+---
+
+## Step 12B: Follow-up context
+
+**Goal:** The coach remembers the previous exchange, so a learner can follow up on the last turn. At this point, a logged-in user can type "explain that more simply" or "give me another example" and get an answer about the previous lesson. The screen still shows only the latest turn.
+
+**What the user cannot do yet:** have a typed answer scored. A typed reply to a check question gets a conversational response only. Scored answers arrive in Step 15.
+
+**Implementation**
+
+Why this needs new state: the graph input overwrites `learner_message` before the planner runs, and `start_turn` clears `messages`, so nothing from the previous turn reaches the model. The previous exchange must be saved when a turn completes.
+
+- **Test:** extend `tests/unit/graph/test_planner_graph.py`
+  - The second turn's planner prompt contains the first turn's learner message and reply.
+  - The first turn on a thread has no previous exchange in its prompt.
+  - A long lesson is cut to the fixed limit.
+  - A failed turn leaves the last good exchange in place.
+- **Test:** extend `tests/integration/graph/test_graph.py`: the previous exchange survives the real checkpointer, and any new state type is registered in `_STATE_TYPES`.
+- **Test:** extend `tests/integration/graph/test_planner_external.py`: one real follow-up stays on the previous topic.
+- Extend `src/civica/graph/graph.py`: add a `previous_exchange` state field, written when a turn completes and passed into the planner. Keep it bounded: the learner message, the reply, and the lesson text cut to a fixed limit.
+- Extend `src/civica/graph/nodes.py`: `planner_model` adds the previous exchange to the model call as context. Like the system prompt, it is not stored in `messages`.
+- Extend `src/civica/graph/prompts.py`: tell the planner how to use the previous exchange, and bump `PLANNER_PROMPTS.version` to `planner-v005`. Facts must still come from tools.
+- Extend `src/civica/ui/pages/coach.py`: change the input hint to invite follow-ups.
+- **Check In:** Stop and confirm with the user. Prompt the user to try several follow-ups in the running app and judge whether the answers are useful enough to justify the added tokens per turn.
+
+- **README:**
+  - Add to the **Usage → Web UI** text: "The coach remembers your last exchange, so you can ask follow-up questions."
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -1328,7 +1432,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - The quick-action buttons are disabled while a turn runs.
 - Extend `src/civica/ui/turn_view.py`: `check_choice(question, choice)` for the practice answer check.
 - Extend `src/civica/ui/pages/coach.py`:
-  - **Quick actions:** **Teach me** and **Quiz me** buttons that submit those messages through the same path as typed input. Disabled while a turn runs.
+  - **Quick actions:** **Teach me** and **Quiz me** buttons that submit those messages through the same path as typed input (`TurnRunner.start`). Disabled while a turn runs.
   - **Questions:** each question as a `ui.radio` (no option preselected) with a **Check** button that reveals correct/incorrect and the question's sources.
   - The check is practice only, labeled "not scored or saved yet". It writes nothing to `quiz_answers` and never moves mastery; Step 15 replaces it with a real `answer` input through the graph.
 - **Check In:** Stop and confirm with user that the UI is satisfactory. Prompt the user to press **Quiz me** in the running app and confirm the planner returns a quiz (it follows explicit requests now that there are no modes), that **Check** works on quiz and comprehension questions, and that a following lesson replaces the quiz.
@@ -1354,8 +1458,8 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 - Extend `src/civica/llm/client.py`:
   - Reuse the caller tags added in Step 12 so that usage can be split by caller even though every profile uses the same model.
   - Add a small usage callback handler that follows LangChain's `UsageMetadataCallbackHandler` pattern but is keyed by caller tag (instead of model name), so totals separate the planner from the explanation and question generation.
-- Extend `src/civica/ui/pages/coach.py` and `src/civica/ui/pages/inspector.py`:
-  - In `coach.py`, pass a fresh handler in the graph config (`config={"callbacks": [handler], ...}`) for each turn. LangChain propagates config callbacks to every model call made inside the graph's nodes and tools, so no engine signature changes and no caller has to return its usage.
+- Extend `src/civica/ui/turns.py` and `src/civica/ui/pages/inspector.py`:
+  - In `turns.py`, pass a fresh handler in the graph config (`config={"callbacks": [handler], ...}`) for each turn. LangChain propagates config callbacks to every model call made inside the graph's nodes and tools, so no engine signature changes and no caller has to return its usage.
   - In `inspector.py`, show the per-caller and total tokens for the turn.
 - **Check In:** 
     - Stop and confirm with the user that the token totals look right on a few real lesson and quiz turns. 
@@ -1400,7 +1504,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
   - Route: `answer` -> `score_answer` -> `explain_answer` (wrong answers only) -> `update_mastery` -> `memory_writer`.
 - Extend `src/civica/retrieval/content.py`: `search` takes an optional `sources: Collection[SourceRef] | None` filter that limits results to those `(page_slug, section_id)` pairs.
 - **UI:** extend `tests/integration/ui/test_quiz.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in Step 12) and renders the scored result, with the explanation and its citations under a wrong answer; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
-  - In `src/civica/ui/pages/coach.py`, replace the practice-only **Check** (Step 13) with a real submit that sends an `answer` input. Remove the "not scored or saved yet" label.
+  - In `src/civica/ui/pages/coach.py`, replace the practice-only **Check** (Step 13) with a real submit that sends an `answer` input through `TurnRunner.start`. Remove the "not scored or saved yet" label.
   - Lock each question once answered: render it from the checkpointed `answered` results with the radio and submit disabled (`.disable()`).
   - Show the updated mastery for the answered theme in the inspector panel.
 - **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right. Prompt the user to answer a few questions in the UI and watch mastery move.
@@ -1654,7 +1758,8 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
     - **Step 10A - Autonomous planner:** pure back end, unit-tested with a fake model. The mastery heuristic is demoted to a tool; the planner (LLM tool-calling loop) becomes the controller for every coach turn. Also lands the two-allowlist write boundary, the halt fallback, `planner_trace`, and `retrieval_gaps`.
     - **Step 10B - Refactor the planner loop into graph nodes:** needs Step 10A; moves the tool loop into LangGraph nodes (`start_turn`, `planner_model`, `planner_tools` as a prebuilt `ToolNode`, `fallback_lesson`) with every 10A guardrail kept. Unit-tested with a fake planner model injected through `PlannerDeps`.
 11. **Step 11 - Graph assembly + persistence:** needs Step 10B; compiles the full graph on `PostgresSaver` + `PostgresStore` with `route_input` and `memory_writer` as the mandatory last node.
-12. **Step 12 - Coach UI for lessons:** needs Steps 6B and 11; streamed coach turns, the step log, and the inspector in one coach conversation per user. Questions show read-only.
+12. **Step 12 - Coach UI for lessons:** needs Steps 6B and 11; server-owned streamed coach turns, the step log, and the inspector in one coach conversation per user. Questions show read-only.
+    - **Step 12B - Follow-up context:** needs Step 12; carries the previous exchange into the next turn so learners can ask follow-ups.
 13. **Step 13 - Coach UI for quizzes and practice checks:** needs Step 12; **Teach me** / **Quiz me** quick actions and practice **Check** on questions. Steps 14 to 19 each add their own UI piece.
 14. **Step 14 - Token usage per turn:** needs Step 12 (graph config and inspector); totals token usage per caller for each turn and shows it in the inspector. Nothing later depends on it.
 15. **Step 15 - Answers + derived mastery:** needs Step 13 (replaces its practice check); scores answers, writes mistake episodes, and derives `topic_mastery` deterministically.
