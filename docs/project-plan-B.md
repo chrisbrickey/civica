@@ -676,6 +676,7 @@ _This step was added and implemented after some of the subsequent steps, but thi
     - Renamed `tests/integration/ui/test_app.py` to `test_auth.py` because many new web app tests will be added as functionality is added and I don't want them all thrown together in a giant integration test file.
     - Extracted a shared `TEST_BCRYPT_ROUNDS` to `tests/support/users.py` to avoid this being defined in multiple places.
     - Extracted UI functionality into separate modules to clarify the entrypoint and so that subsequent functionality would not crowd a single file: `src/ui/app.py`.
+    - Added logging to web app flows.
 
 ---
 
