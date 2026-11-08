@@ -1,10 +1,11 @@
 # Civica
 
-Civica is a learning coach whose initial focus is helping the user study for the [civics exam required for French naturalization](https://www.immigration.interieur.gouv.fr/documentation/guides-textes-et-brochures/lexamen-civique-pour-demande-de-naturalisation-ou-de-reintegration-dans-nationalite-francaise.html).
-Civica includes a bespoke ingestion pipeline to ground guidance in the study materials published by the French government instead of relying on freeform LLM knowledge.
+Civica is an agentic learning coach that helps a user study for the [civics exam required for French naturalization](https://www.immigration.interieur.gouv.fr/documentation/guides-textes-et-brochures/lexamen-civique-pour-demande-de-naturalisation-ou-de-reintegration-dans-nationalite-francaise.html).
+Civica includes a bespoke ingestion pipeline and guardrails to ground lessons in the official study materials published by le Ministère de l'Intérieur.
+It does not rely on freeform LLM knowledge.
 
-My primary reason for building Civica is to work on **memory-aware agents** that adapt to human users and improve over time,
-as opposed to optimization of chunk embedding and retrieval. See [Luminary RAG app](https://github.com/chrisbrickey/luminary) for optimization techniques including a custom evaluation harness.
+My primary reason for building Civica is to work on **memory-aware agents** and **self-improvement loops** that adapt to individual users and improve over time,
+as opposed to optimization of chunk embedding and retrieval. See [Luminary RAG app](https://github.com/chrisbrickey/luminary) for such optimization techniques including a custom evaluation harness.
 
 ## MVP Features
 
