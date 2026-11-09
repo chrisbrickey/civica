@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 from civica.db.session import run_on_connection
 from civica.domain.user import UserId
-from civica.users.rules import validate_secret, validate_username
+from civica.users.rules import MAX_SECRET_BYTES, validate_secret, validate_username
 
 # bcrypt cost factor: Library default is 12. Raise over time as hardware improves.
 # Each hash consumes roughly ~0.24s as of 2026.
@@ -103,7 +103,11 @@ def _verify_on_connection(
     if row is None:
         return None
 
-    if bcrypt.checkpw(secret.encode("utf-8"), row.secret_hash.encode("utf-8")):
+    secret_bytes = secret.encode("utf-8")
+    if len(secret_bytes) > MAX_SECRET_BYTES:  # bcrypt rejects over-length input
+        return None
+
+    if bcrypt.checkpw(secret_bytes, row.secret_hash.encode("utf-8")):
         return UserId(row.user_id)
 
     return None
@@ -117,7 +121,8 @@ def verify(
     """Verify a username and secret, returning the UserId on success.
 
     Normalizes the username.
-    Returns None when the username is unknown or the secret does not match.
+    Returns None when the username is unknown or the secret does not match
+    (including over-length secrets).
     """
     return run_on_connection(
         lambda connection: _verify_on_connection(username, secret, connection), conn

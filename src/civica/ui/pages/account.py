@@ -30,10 +30,7 @@ def _require_input(username: str, password: str) -> None:
 
 def _check_credentials(deps: AppDeps, username: str, password: str) -> UserId:
     _require_input(username, password)
-    try:
-        user_id = verify(username, password, deps.conn)
-    except ValueError:
-        user_id = None
+    user_id = verify(username, password, deps.conn)
     if user_id is None:
         logger.info("Sign-in failed: credentials rejected")
         raise _FormRejected(_SIGN_IN_FAILED_MESSAGE)
