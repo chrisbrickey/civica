@@ -195,6 +195,17 @@ class TestVerifyFailureCases:
 
         assert result is None
 
+    def test_over_length_secret_returns_none(
+        self,
+        do_register: Callable[[str, str], UserId],
+        do_verify: Callable[[str, str], UserId | None],
+    ) -> None:
+        do_register(_USERNAME, _SECRET)
+
+        result = do_verify(_USERNAME, _OVER_LENGTH_SECRET)
+
+        assert result is None
+
 
 class TestOverLengthSecret:
     """Rejects a secret past bcrypt's 72-byte limit before writing."""
