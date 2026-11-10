@@ -1,8 +1,4 @@
-"""Chat-model factory: a flow's model configuration paired with the client built from it.
-
-Mirrors embeddings/embedder.py: one file per pathway picks the provider and default model.
-Clients are built lazily, so importing this module never requires ANTHROPIC_API_KEY.
-"""
+"""Chat-model factory: a flow's model configuration paired with the client built from it."""
 
 from dataclasses import dataclass
 from typing import Protocol
