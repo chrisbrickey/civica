@@ -8,8 +8,9 @@ __pycache__/
 # environment variables
 .env
 
-# session management
+# UI
 .nicegui/
+.selenium-cache/
 
 # ide
 .idea/

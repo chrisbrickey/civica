@@ -45,6 +45,18 @@ See `docs/mvp-overview.md` for initial scope. `Project Plan B` diverges from `Pr
   - At every step that adds UI tests, run `uv run pytest tests/integration/ui --durations=10`: no UI test takes over 1 second. Note the UI suite's total time in the step's completion notes so growth is visible.
   - If the UI suite still grows slow, consider `pytest-xdist`. The per-test schemas already keep tests independent.
 
+## Logging convention
+
+Logging is added in each step that adds a learner action, not in a separate step. A developer should be able to follow every learner action in the server logs and match a turn to its `planner_trace` rows.
+
+- **Setup:** `src/civica/ui/app.py` owns the logging setup. Every other module uses `logger = logging.getLogger(__name__)`.
+- **Format:** one line per event: a short event name, then `key=value` fields, so lines are easy to search. For example `turn_end user_id=... turn_id=... status=finished halt_reason=... duration=12.3s`. Common keys: `user_id=`, `turn_id=`, `via=`, `status=`, `halt_reason=`, `error_type=`, `duration=`, `question_id=`, `correct=`.
+- **Turn lines:** every line about a coach turn carries its `turn_id`, which matches its `planner_trace` rows. A line logged before the `turn_id` is known shows `turn_id=unknown`.
+- **No learner text:** log lines never carry the learner's message, lesson text, passages, quiz options, usernames, or passwords. Tool arguments often repeat the learner's words, so they belong in the developer panel (developer mode step), never in the logs. IDs, counts, statuses, and error types are fine.
+- **Failures:** log an unexpected exception once, with `logger.exception`, where it is caught.
+- **Tests:** each step that adds a log line tests it, reading only the logger of the module that writes it (for example `civica.ui.pages.coach`). The no-learner-text test (UI logging foundations step) is extended whenever a step logs a new kind of event.
+- **Out of scope:** Do not log a line per graph node or tool call. Why? Tool calls are already persisted in `planner_trace` and that should be the single source of truth. Logging a line for every graph node would create a lot of noise in the logs.
+
 ## Schema convention
 
 The database schema is captured in a single file: `src/civica/db/schema.sql`. 
@@ -1199,7 +1211,7 @@ The MVP overview already lists "log retrieved memories per turn" as the MVP debu
 
 ---
 
-## Step 12: Coach UI for lessons
+## ✅ Step 12: Coach UI for lessons
 The learner submits a prompt, watches the spinner, and reads the finished turn. Text appears when the turn ends. This section proves the server-owned turn before anything builds on it.
 
 **Goal:** The learner chats with the coach in the web app and watches lessons arrive. There is one coach conversation per user. The planner reads intent from the learner's message. At this point, a logged-in user can:
@@ -1365,53 +1377,44 @@ Stop and confirm with user that the implemented code is satisfactory. Prompt the
 **Check In:**
 Stop and confirm with user that the implemented code is satisfactory. Prompt the user to run `uv run pytest -m external`.
 
-- **README:**
-  - Replace `TBD` under **Usage** with:
-    > ### Web UI
-    > 1. Launch the web app locally
-    > ```
-    > uv run python -m civica.ui.app
-    > ```
-    > 
-    > 2. Sign in
-    > Create an account on the registration page, then sign in with your username and password. Sessions can last for 14 days before you must sign in again. 
-    > Your study history and coaching memory persist across sessions. Logging out or session expiration end only the browser session.
-    >     
-    > 3. Chat with the coach  
-    > Ask for a lesson or a quiz in your own words. The **?** button in the header shows how to use Civica.
-
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Sources are grouped by page. The corpus contains sheets as separate pages titled "<title> (1/2)", "<title> (2/2)". `group_by_page` merges those parts under one title in the UI while showing the different chunks as distince sub-sources.
+    - Spinner verbs are one generic word each (Thinking…, Pondering…, Reflecting…, Composing…, Drafting…, Preparing…), not playful phrases like "Consulting the sources…". A phrase could suggest the app server is communicating with real external services when it is only using vectors of the official study material.
+    - Moved the README update to a subsequent step where quizzes work properly in the UI.
+    - Tests: 
+      - Added additional tests and some tests were augmented to remove unnecessary wait time.
+      - `test_entrypoint.py` builds the real graph against the test database and passes without `ANTHROPIC_API_KEY`, so no dummy key was needed.
+      - NiceGUI's failure screenshots are turned off in the smoke test so `screenshots/` is not in `.gitignore`.
 
 ---
 
-## Step 12B: Follow-up context
+## Step 12B: UI logging foundations
 
-**Goal:** 
-- The coach remembers the previous exchange, so a learner can follow up on the last turn. 
-- At this point, a logged-in user can type "explain that more simply" or "give me another example" and get an answer about the previous lesson. 
-- The screen still shows only the latest turn.
+**Goal:** A developer can follow every learner action built so far in the server logs, from sign-in to the turn ending, and match a turn to its `planner_trace` rows. All log lines follow the logging convention. Logs never carry learner text. At this point the web app logs:
+  - account events: registration, registration rejected, sign-in, sign-in rejected, and log out (already logged since the session management step; reformatted here)
+  - the coach page opening and what it found, and a failure to read the saved conversation (already logged since the Coach UI for lessons step; reformatted here)
+  - each typed turn request (`via=typed`)
+  - a request rejected because a turn is already running
+  - each turn starting, failing, and ending, all carrying the same `turn_id`
 
-**Why this needs new state:**
-The graph input overwrites `learner_message` before the planner runs, and `start_turn` clears `messages`, so nothing from the previous turn reaches the model. 
-The previous exchange must be saved when a turn completes.
-
-- **Test:** extend `tests/unit/graph/test_planner_graph.py`
-  - The second turn's planner prompt contains the first turn's learner message and reply.
-  - The first turn on a thread has no previous exchange in its prompt.
-  - A long lesson is cut to the fixed limit.
-  - A failed turn leaves the last good exchange in place.
-- **Test:** extend `tests/integration/graph/test_graph.py`: the previous exchange survives the real checkpointer, and any new state type is registered in `_STATE_TYPES`.
-- **Test:** extend `tests/integration/graph/test_planner_external.py`: one real follow-up stays on the previous topic.
-- Extend `src/civica/graph/graph.py`: add a `previous_exchange` state field, written when a turn completes and passed into the planner. Keep it bounded: the learner message, the reply, and the lesson text cut to a fixed limit.
-- Extend `src/civica/graph/nodes.py`: `planner_model` adds the previous exchange to the model call as context. Like the system prompt, it is not stored in `messages`.
-- Extend `src/civica/graph/prompts.py`: tell the planner how to use the previous exchange, and bump `PLANNER_PROMPTS.version` to the next version and re-pin its hash. Facts must still come from tools.
-- Extend `src/civica/ui/pages/coach.py`: change the input hint to invite follow-ups.
-- **Check In:** Stop and confirm with the user. Prompt the user to try several follow-ups in the running app and judge whether the answers are useful enough to justify the added tokens per turn.
-
-- **README:**
-  - Add to the **Usage → Web UI** text: "The coach remembers your last exchange, so you can ask follow-up questions."
+**Implementation**
+- **Test:** extend `tests/unit/ui/test_turns.py`. Tests read only the `civica.ui.turns` logger.
+  - The start, failure, and end lines for a turn all carry the same `turn_id`.
+  - A turn that fails before `start_turn` runs still logs its failure, with `turn_id=unknown`.
+  - The end line carries `status=`, `halt_reason=`, `duration=`, and, for a failed turn, `error_type=`.
+- **Test:** extend `tests/integration/ui/test_lessons.py`. Tests read only the `civica.ui.pages.coach` logger.
+  - A typed prompt logs one request line with `via=typed`.
+  - A submit rejected because a turn is already running logs one line.
+  - The page-open line uses the `key=value` format.
+- **Test:** extend `tests/integration/ui/test_auth.py`: account lines use the `key=value` format and never contain the username or password.
+- **Test:** extend `tests/integration/graph/test_graph.py` or `tests/integration/ui/test_lessons.py`: the `turn_id` in the turn's log lines matches its `planner_trace` rows.
+- **Test:** a turn sent with a distinctive learner message writes no log line, from any logger, that contains the message, the lesson text, or a passage. Later steps extend this test (logging convention).
+- Extend `src/civica/ui/turns.py`: log the turn start when the `start_turn` update arrives, not when the worker thread starts, so every turn line carries the `turn_id`. Reformat the start, failure, and end lines per the logging convention.
+- Extend `src/civica/ui/pages/coach.py`: log each typed turn request and each rejected request. Reformat the page-open and read-failure lines.
+- Extend `src/civica/ui/pages/account.py` and `src/civica/ui/pages/home.py`: reformat the account lines.
+- **Check In:** Stop and confirm with the user that the implementation is satisfactory. Prompt the user to run the app, sign in, send a typed lesson request, submit from a second tab during a turn, and reload during a turn, then read the terminal logs and match one `turn_id` to its `planner_trace` rows.
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -1441,15 +1444,30 @@ The previous exchange must be saved when a turn completes.
   - Reload after a quiz: the same questions show, with earlier checks cleared.
   - A lesson turn after a quiz turn no longer shows the quiz questions.
   - The quick-action buttons are disabled while a turn runs.
+  - Logging (logging convention), reading only the `civica.ui.pages.coach` logger: **Teach me** and **Quiz me** each log one request line, with `via=teach_me` and `via=quiz_me`. A practice **Check** logs one line with `question_id=` and `correct=`, and never the chosen option's text.
+- **Test:** extend the no-learner-text test (UI logging foundations step) to a quiz turn and a practice check.
 - Extend `src/civica/ui/turn_view.py`: `check_choice(question, choice)` for the practice answer check.
 - Extend `src/civica/ui/pages/coach.py`:
   - **Quick actions:** **Teach me** and **Quiz me** buttons that submit those messages through the same path as typed input (`TurnRunner.start`). Disabled while a turn runs.
   - **Questions:** inside the quiz card, each question's lettered options become a `ui.radio` (no option preselected) with a **Check** button that reveals correct/incorrect and the question's sources, shown the same way as lesson sources (see `coach-ui.md`).
   - The check is practice only, labeled "not scored or saved yet". It writes nothing to `quiz_answers` and never moves mastery; the answers + derived mastery step replaces it with a real `answer` input through the graph.
+  - **Logging:** each turn request names how it was sent (`via=typed`, `via=teach_me`, `via=quiz_me`), and each practice check logs one line. Checks are saved nowhere else, so this line is their only record until the answers + derived mastery step.
 - **Check In:** Stop and confirm with user that the UI is satisfactory. Prompt the user to press **Quiz me** in the running app and confirm the planner returns a quiz (it follows explicit requests now that there are no modes), that **Check** works on quiz and comprehension questions, and that a following lesson replaces the quiz.
 
 - **README:**
-  - Add to the **Usage → Web UI** text: "**Teach me** and **Quiz me** are shortcuts for those requests. Quiz answers are practice only until answer scoring ships."
+  - Replace `TBD` under **Usage** with:
+    > ### Web UI
+    > 1. Launch the web app locally
+    > ```
+    > uv run python -m civica.ui.app
+    > ```
+    > 
+    > 2. Sign in
+    > Create an account on the registration page, then sign in with your username and password. Sessions can last for 14 days before you must sign in again. 
+    > Your study history and coaching memory persist across sessions. Logging out or session expiration end only the browser session.
+    >     
+    > 3. Chat with the coach  
+    > Ask for a lesson or a quiz in your own words. **Teach me** and **Quiz me** buttons are shortcuts for those requests. The **?** button in the header explains how to use Civica.
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -1457,33 +1475,33 @@ The previous exchange must be saved when a turn completes.
 
 ---
 
-## Step 14: UI logging
+## Step 14: Follow-up context
 
-**Goal:** A developer can follow every learner action in the server logs, from the page opening to the turn ending, and match a turn to its `planner_trace` rows. Logs never carry learner text. At this point the web app logs:
-  - account events (session management and minimal UI): registration, registration rejected, sign-in, sign-in rejected, and log out
-  - the coach page opening and what it found (Coach UI for lessons)
-  - each request for a turn and how it was sent: typed, **Teach me**, or **Quiz me**
-  - a request rejected because a turn is already running
-  - each turn starting, failing, and ending, all carrying the same `turn_id`
-  - a failure to read the saved conversation
-  - each practice **Check** and whether it was right (Coach UI for quizzes). Checks are saved nowhere else, so this line is their only record until the answers + derived mastery step.
+**Goal:** 
+- The coach remembers the previous exchange, so a learner can follow up on the last turn. 
+- At this point, a logged-in user can type "explain that more simply" or "give me another example" and get an answer about the previous lesson, or "explain question 2" after a quiz and get an answer about that question. 
+- The screen still shows only the latest turn.
 
-**Implementation**
-- **Test:** extend `tests/unit/ui/test_turns.py`. Tests read only the `civica.ui.turns` logger.
-  - The start, failure, and end lines for a turn all carry the same `turn_id`.
-  - A turn that fails before `start_turn` runs still logs its failure, with the `turn_id` shown as unknown.
-  - The end line carries the status, `halt_reason`, duration, and, for a failed turn, the error type.
-- **Test:** extend `tests/integration/ui/test_lessons.py` and `tests/integration/ui/test_quiz.py`. Tests read only the `civica.ui.pages.coach` logger.
-  - A typed prompt, **Teach me**, and **Quiz me** each log one request line naming how the turn was sent.
-  - A submit rejected because a turn is already running logs one line.
-  - A practice **Check** logs one line with the question id and whether the choice was right.
-- **Test:** extend `tests/integration/graph/test_graph.py` or `tests/integration/ui/test_lessons.py`: the `turn_id` in the turn's log lines matches its `planner_trace` rows.
-- **Test:** a turn sent with a distinctive learner message writes no log line, from any logger, that contains the message, the lesson text, or a passage.
-- Extend `src/civica/ui/turns.py`: log the turn start when the `start_turn` update arrives, so every turn line carries the `turn_id`. Write the fields as `key=value` (`user_id=`, `turn_id=`, `status=`, `halt_reason=`, `error_type=`, `duration=`), so lines are easy to search.
-- Extend `src/civica/ui/pages/coach.py`: log each turn request with how it was sent, each rejected request, and each practice check, with the same `key=value` fields.
-- **Check In:** Stop and confirm with the user that the implementation is satisfactory. Prompt the user to run the app, then send a typed lesson request, press **Quiz me**, check an answer, submit from a second tab during a turn, and reload during a turn, then read the terminal logs and match one `turn_id` to its `planner_trace` rows.
+**Why this needs new state:**
+The graph input overwrites `learner_message` before the planner runs, and `start_turn` clears `messages`, so nothing from the previous turn reaches the model. 
+The previous exchange must be saved when a turn completes.
 
-Out of scope: a log line per graph node or tool call. Tool arguments often repeat the learner's words, so they belong in the developer panel (developer mode step), not the logs. Opening and closing the intro dialog is not logged.
+- **Test:** extend `tests/unit/graph/test_planner_graph.py`
+  - The second turn's planner prompt contains the first turn's learner message and reply.
+  - After a turn with quiz questions, the next turn's prompt lists the question stems, numbered as the learner sees them, with no options or correct answers.
+  - The first turn on a thread has no previous exchange in its prompt.
+  - A long lesson is cut to the fixed limit.
+  - A failed turn leaves the last good exchange in place.
+- **Test:** extend `tests/integration/graph/test_graph.py`: the previous exchange survives the real checkpointer, and any new state type is registered in `_STATE_TYPES`.
+- **Test:** extend `tests/integration/graph/test_planner_external.py`: one real follow-up stays on the previous topic, and "explain question 2" after a quiz is about that question.
+- Extend `src/civica/graph/graph.py`: add a `previous_exchange` state field, written when a turn completes and passed into the planner. Keep it bounded: the learner message, the reply, the lesson text cut to a fixed limit, and the quiz question stems numbered in display order. Options and correct answers stay out, so the planner cannot reveal or score an answer.
+- Extend `src/civica/graph/nodes.py`: `planner_model` adds the previous exchange to the model call as context. Like the system prompt, it is not stored in `messages`.
+- Extend `src/civica/graph/prompts.py`: tell the planner how to use the previous exchange, and bump `PLANNER_PROMPTS.version` to the next version and re-pin its hash. Facts must still come from tools.
+- Extend `src/civica/ui/pages/coach.py`: change the input hint to invite follow-ups.
+- **Check In:** Stop and confirm with the user. Prompt the user to try several follow-ups in the running app, including one about a quiz question, and judge whether the answers are useful enough to justify the added tokens per turn.
+
+- **README:**
+  - Add to the **Usage → Web UI** text: "The coach remembers your last exchange, so you can ask follow-up questions."
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -1534,6 +1552,7 @@ The formula, for each response drawn:
   - In developer mode, draw each green bubble and quiz card in a row with its panel to the right, so the panel scrolls with its response. On narrow screens the panel stacks under its response.
   - Panels read as log lines (monospace, small), not as headings.
   - Read learner state through the existing `read_learner_state` against the graph's store, off the event loop with `run.io_bound`. No new DB readers.
+  - Tool calls and their arguments appear only in the panel, never in the logs (logging convention).
 - **Check In:** Stop and confirm with the user that the implementation is satisfactory. Prompt the user to launch with `--dev`, run a lesson turn, a quiz turn, and a reply-only turn, and judge whether any panel line is too busy to keep. Then launch without `--dev` and confirm no panel shows.
 
 - **README:**
@@ -1624,6 +1643,7 @@ The formula, for each response drawn:
 - **UI:** extend `tests/integration/ui/test_quiz.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in the Coach UI for lessons step) and renders the scored result, with the explanation and its citations under a wrong answer; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
   - In `src/civica/ui/pages/coach.py`, replace the practice-only **Check** (Coach UI for quizzes) with a real submit that sends an `answer` input through `TurnRunner.start`. Remove the "not scored or saved yet" label.
   - Lock each question once answered: render it from the checkpointed `answered` results with the radio and submit disabled (`.disable()`).
+  - **Logging:** replace the practice-check line with an answer request line (`via=answer`, `question_id=`). Test it in `test_quiz.py`, reading only the `civica.ui.pages.coach` logger, and extend the no-learner-text test to an answer turn with a wrong-answer explanation.
   - The developer panel's **Learner state** line shows the updated mastery for the answered theme.
 - **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right. Prompt the user to answer a few questions in the UI and watch mastery move. Show the critic's added tokens and wait time per quiz turn, and confirm the user accepts them.
 
@@ -1661,6 +1681,7 @@ The formula, for each response drawn:
   - Routes: `mock_start` -> `mock_exam_generate` -> `memory_writer`; `mock_submit` -> `mock_exam_score` -> `update_mastery` -> `memory_writer`.
 - **UI:** create `tests/integration/ui/test_mock_exam.py` first: selecting **Mock Exam** and starting renders the questions (graph compiled with fakes, as in the Coach UI for lessons step); switching back to **Coach** shows the coach conversation unchanged; submitting renders pass/fail and the per-theme breakdown; reloading after submitting shows the same result; a generation failure renders the "try again" message.
   - Create `src/civica/ui/modes.py` with `AppMode(StrEnum)` (`COACH`, `MOCK_EXAM`) and add a Coach / Mock Exam `ui.toggle` to `src/civica/ui/pages/coach.py`. The mock exam uses its own thread (`f"{user_id}:mock_exam"`), so it never disturbs the coach conversation. Create `src/civica/ui/pages/mock_exam.py` for Mock Exam mode: start button, 40 questions each as a `ui.radio`, submit, pass/fail plus per-theme scores. No countdown timer yet (Finish the UI step). This mode calls the deterministic mock-exam path, not the planner.
+  - **Logging:** log exam start, generation failure, and submit (`user_id=`, `status=`, and on submit the score and pass/fail, never the answers). Test it in `test_mock_exam.py`, reading only the `civica.ui.pages.mock_exam` logger.
 - **Check In:** Stop and confirm with user that the implementation is satisfactory. Prompt the user to run one mock exam in the UI (note the generation time and cost of 40 questions).
 
 - **README:**
@@ -1881,9 +1902,9 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
     - **Step 10B - Refactor the planner loop into graph nodes:** needs Step 10A; moves the tool loop into LangGraph nodes (`start_turn`, `planner_model`, `planner_tools` as a prebuilt `ToolNode`, `fallback_lesson`) with every 10A guardrail kept. Unit-tested with a fake planner model injected through `PlannerDeps`.
 11. **Step 11 - Graph assembly + persistence:** needs Step 10B; compiles the full graph on `PostgresSaver` + `PostgresStore` with `route_input` and `memory_writer` as the mandatory last node.
 12. **Step 12 - Coach UI for lessons:** needs Steps 6B and 11; server-owned coach turns, the welcome card, spinner verbs, and lessons with their sources in one coach conversation per user. Questions show read-only.
-    - **Step 12B - Follow-up context:** needs Step 12; carries the previous exchange into the next turn so learners can ask follow-ups.
-13. **Step 13 - Coach UI for quizzes and practice checks:** needs Step 12; **Teach me** / **Quiz me** quick actions and practice **Check** on questions. Steps 16 to 21 each add their own UI piece.
-14. **Step 14 - UI logging:** needs Step 13; every learner action is logged with a shared `turn_id` and no learner text.
+    - **Step 12B - UI logging foundations:** needs Step 12; puts existing log lines in the logging convention's format, ties every turn line to its `turn_id`, and logs typed and rejected turn requests. Later UI steps add their own log lines.
+13. **Step 13 - Coach UI for quizzes and practice checks:** needs Step 12B (logging format); **Teach me** / **Quiz me** quick actions and practice **Check** on questions. Steps 16 to 21 each add their own UI piece.
+14. **Step 14 - Follow-up context:** needs Step 12; carries the previous exchange (including quiz question stems) into the next turn so learners can ask follow-ups.
 15. **Step 15 - Developer mode:** needs Step 13; `--dev` adds a panel beside each coach bubble showing how it was made. Later steps add their developer details to this panel.
 16. **Step 16 - Token usage per turn:** needs Steps 12 (graph config) and 15 (developer panel); totals token usage per caller for each turn and shows it in the developer panel. Nothing later depends on it.
 17. **Step 17 - Answers + derived mastery:** needs Step 13 (replaces its practice check); scores answers, writes mistake episodes, and derives `topic_mastery` deterministically.

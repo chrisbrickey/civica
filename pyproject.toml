@@ -24,7 +24,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
-addopts = "-m 'not external' -p nicegui.testing.user_plugin"
+addopts = "-m 'not external' -p nicegui.testing.plugin"
 asyncio_mode = "auto"
 main_file = ""
 markers = [
@@ -44,4 +44,5 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.1.post1",
     "pytest-cov>=7.1.0",
+    "selenium>=4.52.0",
 ]

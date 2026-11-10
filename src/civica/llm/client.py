@@ -13,6 +13,9 @@ from langchain_core.messages import BaseMessage
 
 GENERATION_MODEL = "claude-sonnet-5"
 
+# Per-request limit, so a hung call fails instead of locking the learner's prompt indefinitely.
+REQUEST_TIMEOUT_SECONDS = 120.0
+
 # Anthropic's signal that it stopped at the token cap rather than finishing the answer.
 _ANTHROPIC_TRUNCATION_STOP_REASON = "max_tokens"
 
@@ -31,14 +34,15 @@ class ChatProfile(Protocol):
 
 @dataclass(frozen=True)
 class AnthropicChat:
-    """A Claude model paired with the output token cap it is called with."""
+    """A Claude model paired with the output token cap and request timeout it is called with."""
 
     model: str
     max_tokens: int
+    timeout: float = REQUEST_TIMEOUT_SECONDS
 
     def build(self) -> BaseChatModel:
         """Construct the client. Does not set temperature: current Claude models reject it."""
-        return ChatAnthropic(model=self.model, max_tokens=self.max_tokens)  # type: ignore[call-arg]
+        return ChatAnthropic(model=self.model, max_tokens=self.max_tokens, timeout=self.timeout)  # type: ignore[call-arg]
 
     def was_truncated(self, response: BaseMessage) -> bool:
         """True when the provider cut the response off at the token cap instead of finishing."""

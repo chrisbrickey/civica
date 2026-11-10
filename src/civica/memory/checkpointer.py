@@ -38,12 +38,16 @@ _STATE_TYPES: Final = (
 )
 
 
+def state_serializer() -> JsonPlusSerializer:
+    """The serializer with the allow-list of state types. Test savers use it too."""
+    return JsonPlusSerializer(allowed_msgpack_modules=_STATE_TYPES)
+
+
 def get_saver() -> PostgresSaver:
     """Return the singleton PostgresSaver, creating and setting it up once."""
     global _saver
     if _saver is None:
-        serde = JsonPlusSerializer(allowed_msgpack_modules=_STATE_TYPES)
-        saver = PostgresSaver(cast(_DictPool, get_pool()), serde=serde)
+        saver = PostgresSaver(cast(_DictPool, get_pool()), serde=state_serializer())
         saver.setup()
         _saver = saver
     return _saver

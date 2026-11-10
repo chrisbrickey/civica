@@ -13,6 +13,8 @@ from civica.users.service import register as register_user
 
 logger = logging.getLogger(__name__)
 
+USERNAME_LABEL = "username"
+PASSWORD_LABEL = "password"
 _MISSING_INPUT_MESSAGE = "Enter a username and a password."
 _SIGN_IN_FAILED_MESSAGE = "Wrong username or password."
 _USERNAME_TAKEN_MESSAGE = "That username is taken."
@@ -59,8 +61,8 @@ def register(deps: AppDeps) -> None:
 
     @ui.page(LOGIN_PATH)
     def login_page() -> None:
-        username = ui.input("username").mark("username")
-        password = ui.input("password", password=True).mark("password")
+        username = ui.input(USERNAME_LABEL).mark("username")
+        password = ui.input(PASSWORD_LABEL, password=True).mark("password")
         error = ui.label().classes("text-negative")
 
         def submit() -> None:
@@ -81,9 +83,9 @@ def register(deps: AppDeps) -> None:
 
     @ui.page(REGISTER_PATH)
     def register_page() -> None:
-        username = ui.input("username").mark("username")
+        username = ui.input(USERNAME_LABEL).mark("username")
         ui.label(f"Use {USERNAME_RULES}.").classes("text-caption").mark("username-rules")
-        password = ui.input("password", password=True).mark("password")
+        password = ui.input(PASSWORD_LABEL, password=True).mark("password")
         confirmation = ui.input("confirm password", password=True).mark("confirm-password")
         ui.label(f"Use {SECRET_RULES}. Avoid common passwords and your username.").classes("text-caption").mark("password-rules")
         error = ui.label().classes("text-negative")
