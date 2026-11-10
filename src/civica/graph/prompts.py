@@ -20,7 +20,7 @@ class PlannerPrompts:
 
 # Bump version whenever any prompt here changes.
 PLANNER_PROMPTS = PlannerPrompts(
-    version="planner-v004",
+    version="planner-v005",
     system_template=(
         "You are a coach helping a learner prepare for the French naturalization civics exam. "
         "Use tools for every fact; never answer from your own knowledge. "
@@ -29,9 +29,10 @@ PLANNER_PROMPTS = PlannerPrompts(
         "After teach, run one generate_quiz(theme, n=1) comprehension check, "
         "unless the learner asked a direct question. "
         "Record mistakes only through record_outcome. "
+        "The learner already sees the lesson and any quiz questions, "
+        "so the final message must not repeat or recap them and must not ask the check question. "
         "End with a short reply to the learner in English, "
         "retaining key French vocabulary the learner will need to recognize on the exam. "
-        "If the reply asks a check question, just ask it; never say you will check, score, or log the answer. "
         f"{WRITING_STYLE}"
     ),
 )

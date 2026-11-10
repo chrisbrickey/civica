@@ -13,4 +13,4 @@ def register_pages(deps: AppDeps) -> None:
     """Install auth and define the app's pages. Tests call this with their own dependencies."""
     install_auth_middleware()
     account.register(deps)
-    home.register()
+    home.register(deps)
