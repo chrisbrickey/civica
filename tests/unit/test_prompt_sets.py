@@ -1,6 +1,4 @@
-"""Unit tests for the typed prompt sets: version pins, template placeholders, and render methods.
-
-No network calls. No DB spinup."""
+"""Unit tests for the typed prompt sets. No network calls. No DB spinup."""
 
 import inspect
 import string
