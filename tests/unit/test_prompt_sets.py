@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 # Editing a prompt means bumping its set's version and re-pinning the hash here, together.
 _PINS: list[tuple["DataclassInstance", str, str]] = [
-    (QUIZ_PROMPTS, "quiz-v004", "92d4cd828fe7ae437dc1eb5ee57abdd4e5549b269794e6ac0cb84495e3727702"),
+    (QUIZ_PROMPTS, "quiz-v005", "49cfcdaafb74e7254e87175ace9bf427c9745c64cb6269a93f17861615eb2dbe"),
     (PLANNER_PROMPTS, "planner-v005", "4681944111a47c940e3f218ffaf3df725cab5a95b7e72fb9957350dbd461fe79"),
     (EXPLANATION_PROMPTS, "explanation-v002", "de590047f994ac36b07f3fe51837addd190f5ae81d0b7a0cc2aa83fd8476a28e"),
 ]

@@ -315,7 +315,7 @@ _*Any tests that make a network call (e.g., to confirm service contracts) are ta
 Schema is located at `src/civica/db/schema.sql`.
 - `users`
 - `content_chunks`: embedded corpus
-- `generated_questions`: persisted question bank, keyed by content hash and stamped with `prompt_version`
+- `generated_questions`: persisted question bank
 - `rejected_questions`: append-only log of questions rejected by critic including metadata
 - `quiz_answers`: every scored answer
 - `planner_trace`: append-only log of each planner tool call and the halt reason per turn

@@ -24,7 +24,7 @@ class QuizPrompts:
 
 # Bump version whenever any prompt here changes. Stored with every question and rejection.
 QUIZ_PROMPTS = QuizPrompts(
-    version="quiz-v004",
+    version="quiz-v005",
     system=(
         "Tu es un concepteur de questions pour l'examen civique de naturalisation francaise. "
         "Utilise uniquement les passages officiels fournis, sans connaissances externes. "
@@ -34,10 +34,14 @@ QUIZ_PROMPTS = QuizPrompts(
         "Interroge sur les connaissances civiques, jamais sur les fiches elles-memes (titres, objectifs, contenu du cours). "
         "Une question de connaissance porte sur un fait du passage. "
         "Une question de mise en situation decrit un cas concret a resoudre avec le passage. "
+        "Ajoute pour chaque question une courte explication de une ou deux phrases, fondee uniquement sur "
+        "son groupe de passages, qui dit pourquoi la bonne option est correcte. "
         "Reponds uniquement par un tableau JSON, sans texte autour, de la forme "
-        '[{"group": 1, "text": "...", "options": ["...", "...", "...", "..."], "correct_index": 0}]. '
+        '[{"group": 1, "text": "...", "options": ["...", "...", "...", "..."], "correct_index": 0, '
+        '"explanation": "..."}]. '
         "group est le numero du groupe de passages sur lequel repose la question. "
-        "correct_index est l'indice (0 a 3) de la bonne option."
+        "correct_index est l'indice (0 a 3) de la bonne option. "
+        "explanation est l'explication courte de la bonne reponse."
     ),
     human_template=(
         "Theme : {theme}\n\n"

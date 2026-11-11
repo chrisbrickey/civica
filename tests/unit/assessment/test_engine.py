@@ -39,7 +39,9 @@ from tests.support.assessment import (
     FakeRejectionStore,
     FakeRetriever,
     Slot,
+    explanation_for,
     generated_item,
+    generated_item_explanation,
     generated_item_text,
     grouped_generation_reply,
     reject_all_critic,
@@ -96,8 +98,9 @@ _HISTOIRE_QUIZ_SIZE = _HISTOIRE_QUERY_COUNT + 1
 # Two sub-topic queries of this size already cover every Histoire exam question.
 _SECTIONS_PER_SUBTOPIC = _HISTOIRE_EXAM_COUNT // 2
 
-# The reply shape's JSON example must name the group key literally.
+# The reply shape's JSON example must name these keys literally.
 _GROUP_KEY = '"group"'
+_EXPLANATION_KEY = '"explanation"'
 
 # First exam theme: its last groups are scenario groups.
 _EXAM_FIRST_THEME = next(iter(EXAM_QUESTION_COUNTS))
@@ -131,6 +134,15 @@ _WRONG_SHAPE_PAYLOADS = {
     "group-bool": json.dumps(
         [{**generated_item("sample-text-1", 1), "group": True}]
         + [generated_item(f"sample-text-{g}", g) for g in range(2, 6)]
+    ),
+    "missing-explanation": json.dumps(
+        [
+            {k: v for k, v in generated_item(f"sample-text-{g}", g).items() if k != "explanation"}
+            for g in range(1, 6)
+        ]
+    ),
+    "empty-explanation": json.dumps(
+        [{**generated_item(f"sample-text-{g}", g), "explanation": ""} for g in range(1, 6)]
     ),
 }
 
@@ -698,6 +710,11 @@ class TestGenerationPromptRules:
 
         assert _GROUP_KEY in fakes.chat_client.system_text(0)
 
+    def test_system_message_reply_shape_names_the_explanation_key(self, fakes: _Fakes) -> None:
+        _quiz(fakes)
+
+        assert _EXPLANATION_KEY in fakes.chat_client.system_text(0)
+
 
 # ---------------------------------------------------------------------------
 # Tests: critic off by default
@@ -784,6 +801,16 @@ def _scripted(fakes: _Fakes, *replies: str) -> _Fakes:
 class TestItemsMatchedByGroupNumber:
     """Sources and kind follow the group each item names, not its position in the reply."""
 
+    def test_explanations_come_from_the_generation_call_itself(
+        self, fakes: _Fakes
+    ) -> None:
+        questions = _quiz(fakes).questions
+
+        assert [q.explanation for q in questions] == [
+            generated_item_explanation(0, i) for i in range(_QUIZ_SIZE)
+        ]
+        assert fakes.chat_client.invocation_count == 1
+
     def test_quiz_reply_out_of_order_yields_questions_in_group_order(self, fakes: _Fakes) -> None:
         fakes = _scripted(
             fakes, grouped_generation_reply(*((g, _group_text(g)) for g in (3, 1, 2)))
@@ -827,6 +854,17 @@ class TestItemsMatchedByGroupNumber:
         assert [q.text for q in questions] == [_group_text(g) for g in (1, 2, 3)]
         assert fakes.chat_client.invocation_count == 1
 
+    def test_each_question_keeps_the_explanation_written_for_its_group(self, fakes: _Fakes) -> None:
+        fakes = _scripted(
+            fakes, grouped_generation_reply(*((g, _group_text(g)) for g in (3, 1, 2)))
+        )
+
+        questions = _quiz(fakes).questions
+
+        assert [q.explanation for q in questions] == [
+            explanation_for(_group_text(g)) for g in (1, 2, 3)
+        ]
+
     def test_first_item_for_a_repeated_group_is_kept(self, fakes: _Fakes) -> None:
         fakes = _scripted(
             fakes,
@@ -857,6 +895,15 @@ class TestMissingGroupsRetried:
         assert [q.text for q in questions] == [_group_text(1), _retry_text(2), _group_text(3)]
         assert [q.sources for q in questions] == [(ref,) for ref in ranked[:_QUIZ_SIZE]]
         assert fakes.chat_client.invocation_count == _CALLS_WITH_RETRY
+
+    def test_missing_group_takes_its_explanation_from_the_retry(self, fakes: _Fakes) -> None:
+        fakes = _scripted(fakes, self._SKIPS_GROUP_TWO, self._RETRY_FILLS_IT)
+
+        questions = _quiz(fakes).questions
+
+        assert [q.explanation for q in questions] == [
+            explanation_for(text) for text in (_group_text(1), _retry_text(2), _group_text(3))
+        ]
 
     def test_retry_prompt_holds_only_the_missing_groups_passages(self, fakes: _Fakes) -> None:
         fakes = _scripted(fakes, self._SKIPS_GROUP_TWO, self._RETRY_FILLS_IT)

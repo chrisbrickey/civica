@@ -35,7 +35,7 @@ from civica.graph.prompts import PLANNER_PROMPTS
 from civica.graph.trace import RetrievalGap, TraceStep
 from civica.memory.records import LearnerProfile, MistakeEpisode, SessionSummary, TopicMastery
 from civica.memory.writer import get, list_records, put
-from tests.support.assessment import FakeRetriever, reject_all_critic
+from tests.support.assessment import FakeRetriever, explanation_for, reject_all_critic
 from tests.support.memory import (
     FULL_MASTERY,
     WEIGHTED_CHOICE,
@@ -540,6 +540,17 @@ class TestGenerateQuiz:
         output = model.tool_output("call-quiz")
         assert output
         assert ANSWER_FIELD.search(output) is None, output
+
+    def test_tool_output_hides_the_explanations(
+        self, planner_fakes: PlannerFakes, model: FakePlannerModel
+    ) -> None:
+        """An explanation says why an option is right, so it would reveal the answer."""
+        state = _run(planner_fakes, model)
+
+        output = model.tool_output("call-quiz")
+        for question in state[QUIZ_QUESTIONS]:
+            assert question.text in output
+            assert explanation_for(question.text) not in output
 
 
 class TestQuizSizeBound:

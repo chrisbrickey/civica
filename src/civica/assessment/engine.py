@@ -80,6 +80,7 @@ class _GeneratedItem(BaseModel):  # type: ignore[explicit-any]
     text: str = Field(min_length=1)
     options: tuple[str, str, str, str]
     correct_index: int = Field(ge=0, le=3)
+    explanation: str = Field(min_length=1)
 
 
 _ITEMS_ADAPTER = TypeAdapter(list[_GeneratedItem])
@@ -204,6 +205,7 @@ def _generate_batch(
                 text=matched[number].text,
                 options=matched[number].options,
                 correct_index=matched[number].correct_index,
+                explanation=matched[number].explanation,
                 sources=_group_sources(group),
             )
             for number, (group, kind) in enumerate(zip(groups, kinds, strict=True), start=1)
