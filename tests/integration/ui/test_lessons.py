@@ -2,7 +2,7 @@
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from string import ascii_uppercase
 
 import pytest
@@ -48,6 +48,7 @@ from tests.support.coach import (
     type_prompt,
     wait_for_turn_end,
 )
+from tests.support.logs import LogLine, events, lines_from, only
 from tests.support.planner import (
     DEFAULT_THEME,
     PLANNER_FAILURE_TEXT,
@@ -72,6 +73,19 @@ _ALREADY_RUNNING_TEXT = "A turn is already running"
 _FALLBACK_NOTE = "This is a fallback lesson."
 _TRACEBACK_HEADER = "Traceback (most recent call last)"
 _COACH_LOGGER = "civica.ui.pages.coach"
+_TURNS_LOGGER = "civica.ui.turns"
+
+# Log line events and their fixed field values.
+_PAGE_OPEN = "coach_page_open"
+_TURN_REQUEST = "turn_request"
+_TURN_REJECTED = "turn_rejected"
+_TURN_START = "turn_start"
+_TURN_END = "turn_end"
+_VIA_TYPED = "typed"
+_ALREADY_RUNNING_REASON = "already_running"
+
+# Distinctive, so a scan of the logs cannot match anything else by accident.
+_SCANNED_LEARNER_MESSAGE = "scanned-sample-learner-message"
 
 _QUESTION_TEXT = question_texts(QUIZ_AFTER_LESSON_CALL, 1)[0]
 _QUIZ_TITLE = "Check your comprehension"
@@ -111,6 +125,25 @@ async def _see(user: User, *contents: str) -> None:
 async def _see_lesson(user: User, turn_runner: TurnRunner, learner_id: UserId) -> None:
     wait_for_turn_end(turn_runner, learner_id)
     await _see(user, LESSON_TEXT)
+
+
+@pytest.fixture()
+def app_logs(caplog: pytest.LogCaptureFixture) -> Generator[pytest.LogCaptureFixture, None, None]:
+    """Everything every logger writes at the app's configured level (INFO) and above."""
+    with caplog.at_level(logging.INFO):
+        yield caplog
+
+
+def _coach_lines(caplog: pytest.LogCaptureFixture) -> list[LogLine]:
+    return lines_from(caplog.records, _COACH_LOGGER)
+
+
+def _turn_lines(caplog: pytest.LogCaptureFixture) -> list[LogLine]:
+    return lines_from(caplog.records, _TURNS_LOGGER)
+
+
+def _page_open_line(user_id: UserId, found: str) -> str:
+    return f"{_PAGE_OPEN} user_id={user_id} found={found}"
 
 
 # ---------------------------------------------------------------------------
@@ -517,25 +550,29 @@ async def test_blank_prompt_starts_nothing(
     planner_model: ControlledPlannerModel,
     turn_runner: TurnRunner,
     learner_id: UserId,
+    app_logs: pytest.LogCaptureFixture,
     blank: str,
 ) -> None:
     # Held at the first call, so a turn that did start would still be live below.
     planner_model.hold_at_call = 0
+    app_logs.clear()
 
     submit(signed_in_user, blank)
 
     assert turn_runner.active(learner_id) is None
     assert planner_model.invocation_count == 0
     assert prompt_input(signed_in_user).enabled
+    assert _coach_lines(app_logs) == []
 
 
-async def test_second_browser_submitting_during_a_turn_is_told_and_starts_nothing(
+async def test_second_browser_submitting_during_a_turn_is_told_logs_it_and_starts_nothing(
     signed_in_user: User,
     second_browser: User,
     planner_model: ControlledPlannerModel,
     content_model: FakeChatModel,
     turn_runner: TurnRunner,
     learner_id: UserId,
+    app_logs: pytest.LogCaptureFixture,
 ) -> None:
     script_lesson(planner_model, content_model)
     planner_model.hold_at_call = FINAL_CALL
@@ -552,6 +589,8 @@ async def test_second_browser_submitting_during_a_turn_is_told_and_starts_nothin
     planner_model.release()
     await _see_lesson(second_browser, turn_runner, learner_id)
     assert set(planner_model.human_texts()) == {PROMPT}
+    rejected = only(_coach_lines(app_logs), _TURN_REJECTED)
+    assert rejected == {"user_id": str(learner_id), "reason": _ALREADY_RUNNING_REASON}
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +658,7 @@ async def test_opening_the_page_with_no_turn_logs_that(
 ) -> None:
     lines = await _open_and_read_log(signed_in_user, caplog)
 
-    assert lines == [f"Coach page opened for user {learner_id}: no turn yet"]
+    assert lines == [_page_open_line(learner_id, "no_turn")]
 
 
 async def test_opening_the_page_on_a_finished_turn_logs_that(
@@ -636,7 +675,7 @@ async def test_opening_the_page_on_a_finished_turn_logs_that(
 
     lines = await _open_and_read_log(signed_in_user, caplog)
 
-    assert lines == [f"Coach page opened for user {learner_id}: saved turn"]
+    assert lines == [_page_open_line(learner_id, "saved_turn")]
 
 
 async def test_opening_the_page_during_a_turn_logs_that(
@@ -654,7 +693,7 @@ async def test_opening_the_page_during_a_turn_logs_that(
     lines = await _open_and_read_log(signed_in_user, caplog)
     planner_model.release()
 
-    assert lines == [f"Coach page opened for user {learner_id}: running turn"]
+    assert lines == [_page_open_line(learner_id, "running_turn")]
 
 
 async def test_opening_the_page_on_an_unfinished_turn_logs_that(
@@ -670,4 +709,70 @@ async def test_opening_the_page_on_an_unfinished_turn_logs_that(
 
     lines = await _open_and_read_log(signed_in_user, caplog)
 
-    assert lines == [f"Coach page opened for user {learner_id}: unfinished turn"]
+    assert lines == [_page_open_line(learner_id, "unfinished_turn")]
+
+
+# ---------------------------------------------------------------------------
+# Turn logging
+# ---------------------------------------------------------------------------
+
+
+async def test_typed_prompt_logs_one_request_line(
+    signed_in_user: User,
+    planner_model: ControlledPlannerModel,
+    content_model: FakeChatModel,
+    turn_runner: TurnRunner,
+    learner_id: UserId,
+    app_logs: pytest.LogCaptureFixture,
+) -> None:
+    script_lesson(planner_model, content_model)
+
+    submit(signed_in_user)
+    await _see_lesson(signed_in_user, turn_runner, learner_id)
+
+    request = only(_coach_lines(app_logs), _TURN_REQUEST)
+    assert request == {"user_id": str(learner_id), "via": _VIA_TYPED}
+
+
+async def test_turn_lines_carry_the_turn_id_of_its_trace_rows(
+    signed_in_user: User,
+    planner_model: ControlledPlannerModel,
+    content_model: FakeChatModel,
+    planner_fakes: PlannerFakes,
+    turn_runner: TurnRunner,
+    learner_id: UserId,
+    app_logs: pytest.LogCaptureFixture,
+) -> None:
+    script_lesson(planner_model, content_model)
+
+    submit(signed_in_user)
+    await _see_lesson(signed_in_user, turn_runner, learner_id)
+
+    trace_turn_ids = {str(step.turn_id) for step in planner_fakes.trace.steps}
+    assert len(trace_turn_ids) == 1
+    lines = _turn_lines(app_logs)
+    assert {_TURN_START, _TURN_END} <= set(events(lines))
+    assert {fields["turn_id"] for _event, fields in lines} == trace_turn_ids
+
+
+async def test_a_turn_logs_no_learner_message_lesson_text_or_passage(
+    signed_in_user: User,
+    planner_model: ControlledPlannerModel,
+    content_model: FakeChatModel,
+    planner_fakes: PlannerFakes,
+    turn_runner: TurnRunner,
+    learner_id: UserId,
+    app_logs: pytest.LogCaptureFixture,
+) -> None:
+    # Later steps extend this test whenever they log a new kind of event (logging convention).
+    script_lesson(planner_model, content_model)
+
+    submit(signed_in_user, _SCANNED_LEARNER_MESSAGE)
+    await _see_lesson(signed_in_user, turn_runner, learner_id)
+    await signed_in_user.open("/")
+    await _see(signed_in_user, LESSON_TEXT)
+
+    assert _turn_lines(app_logs), "the turn wrote no log lines, so the scan proves nothing"
+    passages = [passage.chunk.text for passage in planner_fakes.retriever.chunks(DEFAULT_THEME)]
+    for learner_text in (_SCANNED_LEARNER_MESSAGE, LESSON_TEXT, *passages):
+        assert learner_text not in app_logs.text

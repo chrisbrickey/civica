@@ -23,7 +23,7 @@ def register(deps: AppDeps) -> None:
             return
 
         def log_out() -> None:
-            logger.info("User %s signed out", user.user_id)
+            logger.info("sign_out user_id=%s", user.user_id)
             sign_out()
             ui.navigate.to(LOGIN_PATH)
 

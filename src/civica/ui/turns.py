@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 CoachGraph = CompiledStateGraph[GraphState, PlannerContext, GraphInput, GraphState]
 
+_UNKNOWN: Final = "unknown"
+_NO_HALT_REASON: Final = "none"
 _STREAM_MODES: Final[list[StreamMode]] = ["updates"]
 
 
@@ -110,7 +112,6 @@ class TurnRunner:
 
     def _run(self, user_id: UserId, graph_input: GraphInput, turn: ActiveTurn) -> None:
         started = time.monotonic()
-        logger.info("Turn started for user %s", user_id)
         status, error_type = TurnStatus.FINISHED, None
         try:
             for _namespace, _mode, update in self._graph.stream(
@@ -120,16 +121,32 @@ class TurnRunner:
                 assert isinstance(update, dict)
                 for node, values in update.items():
                     turn.apply(node, values)
+                    if node == START_TURN:
+                        logger.info("turn_start user_id=%s turn_id=%s", user_id, turn.snapshot().turn_id)
         except Exception as error:
-            logger.exception("Turn failed for user %s", user_id)
+            logger.exception(
+                "turn_failed user_id=%s turn_id=%s error_type=%s",
+                user_id, turn.snapshot().turn_id or _UNKNOWN, type(error).__name__,
+            )
             status, error_type = TurnStatus.FAILED, type(error).__name__
         finally:
-            # Under the runner lock, so the user is freed in the same step the final status is set.
-            with self._lock:
-                turn.end(status, error_type)
-                del self._live[user_id]
+            try:
+                # Logged before turn.end, so a waiter woken by ActiveTurn.wait always sees this line.
+                self._log_end(user_id, turn, status, error_type, time.monotonic() - started)
+            finally:
+                # Under the runner lock, so the user is freed in the same step the final status is set.
+                with self._lock:
+                    turn.end(status, error_type)
+                    del self._live[user_id]
+
+    @staticmethod
+    def _log_end(
+        user_id: UserId, turn: ActiveTurn, status: TurnStatus, error_type: str | None, seconds: float
+    ) -> None:
         snapshot = turn.snapshot()
-        logger.info(
-            "Turn %s for user %s: turn_id=%s halt_reason=%s duration=%.1fs",
-            status, user_id, snapshot.turn_id, snapshot.halt_reason, time.monotonic() - started,
+        line = "turn_end user_id=%s turn_id=%s status=%s halt_reason=%s duration=%.1fs" % (
+            user_id, snapshot.turn_id or _UNKNOWN, status.value, snapshot.halt_reason or _NO_HALT_REASON, seconds,
         )
+        if error_type is not None:
+            line += f" error_type={error_type}"
+        logger.info(line)
