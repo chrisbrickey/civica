@@ -1,6 +1,7 @@
 """User account pages such as sign in and registration."""
 
 import logging
+from enum import StrEnum
 
 from nicegui import ui
 
@@ -21,34 +22,48 @@ _USERNAME_TAKEN_MESSAGE = "That username is taken."
 _PASSWORD_MISMATCH_MESSAGE = "Passwords do not match."
 
 
+class _Reason(StrEnum):
+    BAD_CREDENTIALS = "bad_credentials"
+    MISSING_INPUT = "missing_input"
+    PASSWORD_MISMATCH = "password_mismatch"
+    USERNAME_TAKEN = "username_taken"
+    INVALID_USERNAME = "invalid_username"
+    INVALID_PASSWORD = "invalid_password"
+
+
 class _FormRejected(Exception):
-    """The form submission failed with a message safe to show the user."""
+    """The form submission failed with a message safe to show the user and a reason code for the logs."""
+
+    def __init__(self, message: str, reason: _Reason) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _require_input(username: str, password: str) -> None:
     if not username.strip() or not password:
-        raise _FormRejected(_MISSING_INPUT_MESSAGE)
+        raise _FormRejected(_MISSING_INPUT_MESSAGE, _Reason.MISSING_INPUT)
 
 
 def _check_credentials(deps: AppDeps, username: str, password: str) -> UserId:
     _require_input(username, password)
     user_id = verify(username, password, deps.conn)
     if user_id is None:
-        logger.info("Sign-in failed: credentials rejected")
-        raise _FormRejected(_SIGN_IN_FAILED_MESSAGE)
+        raise _FormRejected(_SIGN_IN_FAILED_MESSAGE, _Reason.BAD_CREDENTIALS)
     return user_id
 
 
 def _create_account(deps: AppDeps, username: str, password: str, confirmation: str) -> UserId:
     _require_input(username, password)
     if password != confirmation:
-        raise _FormRejected(_PASSWORD_MISMATCH_MESSAGE)
+        raise _FormRejected(_PASSWORD_MISMATCH_MESSAGE, _Reason.PASSWORD_MISMATCH)
     try:
         return register_user(username, password, deps.conn, rounds=deps.bcrypt_rounds)
     except UsernameTaken as err:
-        raise _FormRejected(_USERNAME_TAKEN_MESSAGE) from err
-    except (InvalidUsername, InvalidSecret) as err:
-        raise _FormRejected(str(err)) from err
+        raise _FormRejected(_USERNAME_TAKEN_MESSAGE, _Reason.USERNAME_TAKEN) from err
+    except InvalidUsername as err:
+        raise _FormRejected(str(err), _Reason.INVALID_USERNAME) from err
+    except InvalidSecret as err:
+        raise _FormRejected(str(err), _Reason.INVALID_PASSWORD) from err
 
 
 def _complete_sign_in(user_id: UserId, username: str) -> None:
@@ -69,9 +84,11 @@ def register(deps: AppDeps) -> None:
             try:
                 user_id = _check_credentials(deps, username.value, password.value)
             except _FormRejected as err:
+                if err.reason is _Reason.BAD_CREDENTIALS:
+                    logger.info("sign_in_rejected reason=%s", err.reason)
                 error.set_text(str(err))
                 return
-            logger.info("User %s signed in", user_id)
+            logger.info("sign_in user_id=%s", user_id)
             _complete_sign_in(user_id, username.value)
 
         username.on("keydown.enter", submit)
@@ -96,10 +113,10 @@ def register(deps: AppDeps) -> None:
                     deps, username.value, password.value, confirmation.value
                 )
             except _FormRejected as err:
-                logger.info("Registration rejected: %s", err)
+                logger.info("register_rejected reason=%s", err.reason)
                 error.set_text(str(err))
                 return
-            logger.info("User %s registered", user_id)
+            logger.info("register user_id=%s", user_id)
             _complete_sign_in(user_id, username.value)
 
         ui.button("Create account", on_click=submit).mark("create-account")

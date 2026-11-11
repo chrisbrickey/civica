@@ -18,6 +18,7 @@ from nicegui.testing import User
 
 from civica.domain.user import UserId
 from civica.users.service import register
+from tests.support.logs import LINE_FORMAT, LogLine, parse_line
 from tests.support.ui import (
     LOGOUT_MARKER,
     PASSWORD,
@@ -77,6 +78,19 @@ _FAILING_PAGE_PATH = "/sample-failing-page"
 _FAIL_MARKER = "sample-fail"
 _PAGE_ERROR_TEXT = "sample page failure"
 _TRACEBACK_HEADER = "Traceback (most recent call last)"
+
+# Account log events and rejection reasons.
+_REGISTER = "register"
+_REGISTER_REJECTED = "register_rejected"
+_SIGN_IN = "sign_in"
+_SIGN_IN_REJECTED = "sign_in_rejected"
+_SIGN_OUT = "sign_out"
+_BAD_CREDENTIALS = "bad_credentials"
+_MISSING_INPUT = "missing_input"
+_PASSWORD_MISMATCH = "password_mismatch"
+_USERNAME_TAKEN = "username_taken"
+_INVALID_USERNAME_REASON = "invalid_username"
+_INVALID_PASSWORD_REASON = "invalid_password"
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +162,18 @@ def _auth_lines(
 ) -> list[logging.LogRecord]:
     """Auth event lines about this user."""
     return [line for line in _all_auth_lines(caplog, start) if str(user_id) in line.getMessage()]
+
+
+def _user_line(event: str, user_id: UUID) -> LogLine:
+    return event, {"user_id": str(user_id)}
+
+
+def _rejected_line(event: str, reason: str) -> LogLine:
+    return event, {"reason": reason}
+
+
+def _parsed(lines: list[logging.LogRecord]) -> list[LogLine]:
+    return [parse_line(line.getMessage()) for line in lines]
 
 
 def _raise_sample_error() -> None:
@@ -410,7 +436,9 @@ async def test_registration_writes_one_info_line_with_the_user_id(
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
     user_id = _stored_user_id(db_schema, USERNAME)
-    assert [line.levelno for line in _auth_lines(app_logs, user_id)] == [logging.INFO]
+    lines = _auth_lines(app_logs, user_id)
+    assert [line.levelno for line in lines] == [logging.INFO]
+    assert _parsed(lines) == [_user_line(_REGISTER, user_id)]
 
 
 async def test_sign_in_writes_one_info_line_with_the_user_id(
@@ -423,7 +451,9 @@ async def test_sign_in_writes_one_info_line_with_the_user_id(
     await sign_in(ui_user, USERNAME, PASSWORD)
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
-    assert [line.levelno for line in _auth_lines(app_logs, user_id)] == [logging.INFO]
+    lines = _auth_lines(app_logs, user_id)
+    assert [line.levelno for line in lines] == [logging.INFO]
+    assert _parsed(lines) == [_user_line(_SIGN_IN, user_id)]
 
 
 async def test_log_out_writes_one_info_line_with_the_user_id(
@@ -440,9 +470,10 @@ async def test_log_out_writes_one_info_line_with_the_user_id(
 
     lines = _auth_lines(app_logs, user_id, start)
     assert [line.levelno for line in lines] == [logging.INFO]
+    assert _parsed(lines) == [_user_line(_SIGN_OUT, user_id)]
 
 
-async def test_registration_sign_in_and_log_out_lines_are_each_their_own_kind(
+async def test_registration_log_out_and_sign_in_lines_are_each_their_own_event(
     ui_user: User,
     db_schema: psycopg.Connection[psycopg.rows.TupleRow],
     app_logs: pytest.LogCaptureFixture,
@@ -454,11 +485,11 @@ async def test_registration_sign_in_and_log_out_lines_are_each_their_own_kind(
     await ui_user.should_see(_SIGNED_IN_TEXT)
 
     user_id = _stored_user_id(db_schema, USERNAME)
-    lines = _auth_lines(app_logs, user_id)
-    # With the id removed, wording is all that is left, so this does not pin any of it.
-    kinds = [line.getMessage().replace(str(user_id), "") for line in lines]
-    assert len(kinds) == 3
-    assert len(set(kinds)) == 3
+    assert _parsed(_auth_lines(app_logs, user_id)) == [
+        _user_line(_REGISTER, user_id),
+        _user_line(_SIGN_OUT, user_id),
+        _user_line(_SIGN_IN, user_id),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -483,7 +514,7 @@ async def test_failed_sign_in_writes_one_line_without_the_submitted_username(
     ui_user.find(marker=SIGN_IN_MARKER).click()
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
 
-    assert len(_all_auth_lines(app_logs, start)) == 1
+    assert _parsed(_all_auth_lines(app_logs, start)) == [_rejected_line(_SIGN_IN_REJECTED, _BAD_CREDENTIALS)]
     assert submitted_username.casefold() not in app_logs.text.casefold()
 
 
@@ -500,13 +531,13 @@ async def test_empty_sign_in_form_writes_no_line(
 
 
 @pytest.mark.parametrize(
-    ("username", "password", "confirmation", "expected_error"),
+    ("username", "password", "confirmation", "expected_error", "reason"),
     [
-        pytest.param(_SCANNED_USERNAME, _SCANNED_PASSWORD, None, _USERNAME_TAKEN_TEXT, id="taken-username"),
-        pytest.param(_SCANNED_INVALID_USERNAME, _SCANNED_PASSWORD, None, _USERNAME_RULES_ERROR_TEXT, id="invalid-username"),
-        pytest.param(_SCANNED_UNKNOWN_USERNAME, _SCANNED_OVER_LENGTH_PASSWORD, None, _PASSWORD_RULES_ERROR_TEXT, id="invalid-password"),
-        pytest.param(_SCANNED_UNKNOWN_USERNAME, _SCANNED_PASSWORD, _SCANNED_WRONG_PASSWORD, _PASSWORD_MISMATCH_TEXT, id="mismatched-confirmation"),
-        pytest.param("", "", None, _MISSING_INPUT_TEXT, id="empty-form"),
+        pytest.param(_SCANNED_USERNAME, _SCANNED_PASSWORD, None, _USERNAME_TAKEN_TEXT, _USERNAME_TAKEN, id="taken-username"),
+        pytest.param(_SCANNED_INVALID_USERNAME, _SCANNED_PASSWORD, None, _USERNAME_RULES_ERROR_TEXT, _INVALID_USERNAME_REASON, id="invalid-username"),
+        pytest.param(_SCANNED_UNKNOWN_USERNAME, _SCANNED_OVER_LENGTH_PASSWORD, None, _PASSWORD_RULES_ERROR_TEXT, _INVALID_PASSWORD_REASON, id="invalid-password"),
+        pytest.param(_SCANNED_UNKNOWN_USERNAME, _SCANNED_PASSWORD, _SCANNED_WRONG_PASSWORD, _PASSWORD_MISMATCH_TEXT, _PASSWORD_MISMATCH, id="mismatched-confirmation"),
+        pytest.param("", "", None, _MISSING_INPUT_TEXT, _MISSING_INPUT, id="empty-form"),
     ],
 )
 async def test_rejected_registration_writes_one_line_with_the_reason_and_no_submitted_values(
@@ -517,6 +548,7 @@ async def test_rejected_registration_writes_one_line_with_the_reason_and_no_subm
     password: str,
     confirmation: str | None,
     expected_error: str,
+    reason: str,
 ) -> None:
     register(_SCANNED_USERNAME, PASSWORD, conn=db_schema, rounds=TEST_BCRYPT_ROUNDS)
     await _fill_account_form(ui_user, username, password, confirmation)
@@ -527,28 +559,34 @@ async def test_rejected_registration_writes_one_line_with_the_reason_and_no_subm
 
     lines = _all_auth_lines(app_logs, start)
     assert [line.levelno for line in lines] == [logging.INFO]
-    assert expected_error in lines[0].getMessage()
+    assert _parsed(lines) == [_rejected_line(_REGISTER_REJECTED, reason)]
     for submitted in filter(None, (username, password, confirmation)):
         assert submitted.casefold() not in app_logs.text.casefold()
 
 
-async def test_logs_never_contain_submitted_passwords(
+async def test_account_lines_use_key_value_fields_and_logs_never_contain_usernames_or_passwords(
     ui_user: User, app_logs: pytest.LogCaptureFixture
 ) -> None:
-    await _create_account(ui_user, USERNAME, _SCANNED_PASSWORD)
-    await ui_user.should_see(_SIGNED_IN_TEXT)
+    signed_in_text = f"Signed in as {_SCANNED_USERNAME}"
+    await _create_account(ui_user, _SCANNED_USERNAME, _SCANNED_PASSWORD)
+    await ui_user.should_see(signed_in_text)
     await _log_out(ui_user)
-    await sign_in(ui_user, USERNAME, _SCANNED_PASSWORD)
-    await ui_user.should_see(_SIGNED_IN_TEXT)
+    await _create_account(ui_user, _SCANNED_USERNAME, _SCANNED_WRONG_PASSWORD)
+    await ui_user.should_see(_USERNAME_TAKEN_TEXT)
+    await sign_in(ui_user, _SCANNED_USERNAME, _SCANNED_PASSWORD)
+    await ui_user.should_see(signed_in_text)
     await _log_out(ui_user)
-    await sign_in(ui_user, USERNAME, _SCANNED_WRONG_PASSWORD)
+    await sign_in(ui_user, _SCANNED_USERNAME, _SCANNED_WRONG_PASSWORD)
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
-    await sign_in(ui_user, USERNAME, _SCANNED_OVER_LENGTH_PASSWORD)
+    await sign_in(ui_user, _SCANNED_USERNAME, _SCANNED_OVER_LENGTH_PASSWORD)
     await ui_user.should_see(_SIGN_IN_FAILED_TEXT)
 
-    assert app_logs.records
-    for password in (_SCANNED_PASSWORD, _SCANNED_WRONG_PASSWORD, _SCANNED_OVER_LENGTH_PASSWORD):
-        assert password not in app_logs.text
+    messages = [line.getMessage() for line in _all_auth_lines(app_logs)]
+    assert len(messages) == 7
+    for message in messages:
+        assert LINE_FORMAT.match(message), f"not an event line with key=value fields: {message!r}"
+    for submitted in (_SCANNED_USERNAME, _SCANNED_PASSWORD, _SCANNED_WRONG_PASSWORD, _SCANNED_OVER_LENGTH_PASSWORD):
+        assert submitted.casefold() not in app_logs.text.casefold()
 
 
 # ---------------------------------------------------------------------------

@@ -1390,7 +1390,7 @@ Stop and confirm with user that the implemented code is satisfactory. Prompt the
 
 ---
 
-## Step 12B: UI logging foundations
+## ✅ Step 12B: UI logging foundations
 
 **Goal:** A developer can follow every learner action built so far in the server logs, from sign-in to the turn ending, and match a turn to its `planner_trace` rows. All log lines follow the logging convention. Logs never carry learner text. At this point the web app logs:
   - account events: registration, registration rejected, sign-in, sign-in rejected, and log out (already logged since the session management step; reformatted here)

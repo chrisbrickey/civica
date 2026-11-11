@@ -29,6 +29,7 @@ SPINNER_VERBS: Final = (
 
 PROMPT_HINT: Final = "Ask for a lesson or a quiz"
 _MAX_PROMPT_LENGTH: Final = 1000
+_VIA_TYPED: Final = "typed"
 _FAILED_TEXT: Final = "Something went wrong. Please try again."
 _ALREADY_RUNNING_TEXT: Final = "A turn is already running"
 _FALLBACK_NOTE: Final = "This is a fallback lesson."
@@ -190,10 +191,10 @@ class _CoachPage:
         live = self._deps.turn_runner.active(self._user_id)
         if live is not None:
             self._follow(live)
-            found = "running turn"
+            found = "running_turn"
         else:
             found = await self._show_saved_turn()
-        logger.info("Coach page opened for user %s: %s", self._user_id, found)
+        logger.info("coach_page_open user_id=%s found=%s", self._user_id, found)
         ui.timer(_POLL_SECONDS, self._tick)
 
     def _show(self, draw: Callable[[], None]) -> None:
@@ -214,9 +215,11 @@ class _CoachPage:
         if not text or self._followed is not None:
             return
         graph_input: GraphInput = {"kind": InputKind.MESSAGE, "learner_message": text}
+        logger.info("turn_request user_id=%s via=%s", self._user_id, _VIA_TYPED)
         try:
             turn = self._deps.turn_runner.start(self._user_id, graph_input)
         except TurnAlreadyRunning:
+            logger.info("turn_rejected user_id=%s reason=already_running", self._user_id)
             ui.notify(_ALREADY_RUNNING_TEXT)
             return
         self._prompt.set_value("")
@@ -248,14 +251,14 @@ class _CoachPage:
             snapshot = await run.io_bound(self._deps.graph.get_state, coach_config(self._user_id))
             view = build_turn_view(snapshot) if snapshot is not None else None
         except Exception:
-            logger.exception("Could not read the coach turn for user %s", self._user_id)
+            logger.exception("coach_read_failed user_id=%s", self._user_id)
             self._show(_draw_read_failed)
-            return "read failed"
+            return "read_failed"
         if view is None:
             self._show(draw_intro_card)
-            return "no turn yet"
+            return "no_turn"
         self._show(lambda: _draw_view(view))
-        return "unfinished turn" if view.notice is not None else "saved turn"
+        return "unfinished_turn" if view.notice is not None else "saved_turn"
 
 
 async def render(deps: AppDeps, user_id: UserId) -> None:

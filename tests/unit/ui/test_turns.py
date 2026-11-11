@@ -1,6 +1,7 @@
 """Unit tests for civica.ui.turns, on a fake graph and plain threads. No NiceGUI, no database."""
 
 import logging
+import re
 import threading
 from collections.abc import Generator, Iterator, Sequence
 from typing import Final
@@ -11,6 +12,7 @@ from civica.graph.graph import MEMORY_WRITER, PLANNER, InputKind
 from civica.graph.nodes import PLANNER_MODEL, PLANNER_TOOLS, START_TURN, PlannerContext
 from civica.graph.planner import HaltReason, ToolCall
 from civica.ui.turns import ActiveTurn, TurnAlreadyRunning, TurnRunner, TurnStatus
+from tests.support.logs import UNKNOWN_TURN_ID, LogLine, events, lines_from, only, parse_line
 from tests.support.users import OTHER_USER_ID, USER_ID
 
 # ---------------------------------------------------------------------------
@@ -22,6 +24,15 @@ _SUBGRAPH: Final = ("planner:sample-task-001",)
 _TURN_ID: Final = "sample-turn-id-001"
 _FAILURE_TEXT: Final = "sample-graph-failure"
 _TURNS_LOGGER: Final = "civica.ui.turns"
+
+# Log line events and the fields each carries.
+_TURN_START: Final = "turn_start"
+_TURN_FAILED: Final = "turn_failed"
+_TURN_END: Final = "turn_end"
+_NONE: Final = "none"
+_TURN_KEYS: Final = {"user_id", "turn_id"}
+_END_KEYS: Final = _TURN_KEYS | {"status", "halt_reason", "duration"}
+_DURATION_FORMAT: Final = re.compile(r"^\d+\.\ds$")
 
 _READ_CALL: Final = ToolCall(name="read_learner_state", args={})
 _TEACH_CALL: Final = ToolCall(name="teach", args={"focus": "sample-focus"})
@@ -148,6 +159,17 @@ def _failing_graph(make_graph: _GraphFactory) -> _FakeGraph:
     return make_graph(_START, _model_update(_READ_CALL), failure=ValueError(_FAILURE_TEXT))
 
 
+@pytest.fixture()
+def turn_logs(caplog: pytest.LogCaptureFixture) -> Generator[pytest.LogCaptureFixture, None, None]:
+    """Everything the turns logger writes at INFO and above during the test."""
+    with caplog.at_level(logging.INFO, logger=_TURNS_LOGGER):
+        yield caplog
+
+
+def _turn_lines(caplog: pytest.LogCaptureFixture) -> list[LogLine]:
+    return lines_from(caplog.records, _TURNS_LOGGER)
+
+
 # ---------------------------------------------------------------------------
 # Progress
 # ---------------------------------------------------------------------------
@@ -243,20 +265,22 @@ def test_graph_that_raises_marks_the_turn_failed_with_the_error_type(make_graph:
     assert snapshot.error_type == ValueError.__name__
 
 
-def test_graph_that_raises_logs_the_exception(
-    make_graph: _GraphFactory, caplog: pytest.LogCaptureFixture
+def test_graph_that_raises_logs_the_exception_once_as_a_turn_failed_line(
+    make_graph: _GraphFactory, turn_logs: pytest.LogCaptureFixture
 ) -> None:
-    with caplog.at_level(logging.ERROR, logger=_TURNS_LOGGER):
-        _run_to_end(TurnRunner(_failing_graph(make_graph)))
+    _run_to_end(TurnRunner(_failing_graph(make_graph)))
 
     errors = [
         record
-        for record in caplog.records
+        for record in turn_logs.records
         if record.name == _TURNS_LOGGER and record.levelno == logging.ERROR
     ]
     assert len(errors) == 1
     assert errors[0].exc_info is not None
-    assert _FAILURE_TEXT in caplog.text
+    assert _FAILURE_TEXT in turn_logs.text
+    event, fields = parse_line(errors[0].getMessage())
+    assert event == _TURN_FAILED
+    assert fields == {"user_id": str(USER_ID), "turn_id": _TURN_ID, "error_type": ValueError.__name__}
 
 
 def test_graph_that_raises_frees_the_user_to_start_again(make_graph: _GraphFactory) -> None:
@@ -305,3 +329,102 @@ def test_wait_returns_false_at_its_timeout_while_the_turn_runs(make_graph: _Grap
 
     assert not turn.wait(_SHORT_TIMEOUT_SECONDS)
     assert turn.snapshot().status is TurnStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# Turn log lines
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("script", "failure", "expected_events"),
+    [
+        pytest.param(_FULL_TURN, None, [_TURN_START, _TURN_END], id="finished"),
+        pytest.param(
+            (_START, _model_update(_READ_CALL)),
+            ValueError(_FAILURE_TEXT),
+            [_TURN_START, _TURN_FAILED, _TURN_END],
+            id="failed",
+        ),
+    ],
+)
+def test_every_line_of_a_turn_carries_its_user_and_turn_id(
+    make_graph: _GraphFactory,
+    turn_logs: pytest.LogCaptureFixture,
+    script: tuple[_StreamEvent, ...],
+    failure: Exception | None,
+    expected_events: list[str],
+) -> None:
+    _run_to_end(TurnRunner(make_graph(*script, failure=failure)))
+
+    lines = _turn_lines(turn_logs)
+    assert events(lines) == expected_events
+    assert only(lines, _TURN_START) == {"user_id": str(USER_ID), "turn_id": _TURN_ID}
+    for _event, fields in lines:
+        assert fields["user_id"] == str(USER_ID)
+        assert fields["turn_id"] == _TURN_ID
+
+
+def test_turn_that_fails_before_start_turn_logs_its_failure_and_end_with_an_unknown_turn_id(
+    make_graph: _GraphFactory, turn_logs: pytest.LogCaptureFixture
+) -> None:
+    _run_to_end(TurnRunner(make_graph(failure=ValueError(_FAILURE_TEXT))))
+
+    lines = _turn_lines(turn_logs)
+    assert events(lines) == [_TURN_FAILED, _TURN_END]
+    assert only(lines, _TURN_FAILED)["turn_id"] == UNKNOWN_TURN_ID
+    assert only(lines, _TURN_END)["turn_id"] == UNKNOWN_TURN_ID
+
+
+def test_turn_start_is_logged_when_start_turn_arrives_not_when_the_turn_begins(
+    make_graph: _GraphFactory, turn_logs: pytest.LogCaptureFixture
+) -> None:
+    graph = make_graph(_PAUSE, *_FULL_TURN)
+    turn = _start_and_pause(TurnRunner(graph), graph)
+
+    assert _TURN_START not in events(_turn_lines(turn_logs))
+
+    graph.resume.set()
+    assert turn.wait(_WAIT_TIMEOUT_SECONDS), "the turn never ended"
+    assert only(_turn_lines(turn_logs), _TURN_START)["turn_id"] == _TURN_ID
+
+
+@pytest.mark.parametrize(
+    ("script", "failure", "expected"),
+    [
+        pytest.param(
+            _FULL_TURN,
+            None,
+            {"status": TurnStatus.FINISHED.value, "halt_reason": HaltReason.FINAL_MESSAGE.value},
+            id="finished",
+        ),
+        pytest.param(
+            (_START, _model_update(_READ_CALL)),
+            ValueError(_FAILURE_TEXT),
+            {"status": TurnStatus.FAILED.value, "halt_reason": _NONE, "error_type": ValueError.__name__},
+            id="failed",
+        ),
+    ],
+)
+def test_end_line_carries_status_halt_reason_duration_and_error_type_only_when_failed(
+    make_graph: _GraphFactory,
+    turn_logs: pytest.LogCaptureFixture,
+    script: tuple[_StreamEvent, ...],
+    failure: Exception | None,
+    expected: dict[str, str],
+) -> None:
+    _run_to_end(TurnRunner(make_graph(*script, failure=failure)))
+
+    end = only(_turn_lines(turn_logs), _TURN_END)
+    assert set(end) == _END_KEYS | set(expected)
+    assert _DURATION_FORMAT.match(end["duration"]), f"duration is not in seconds: {end['duration']!r}"
+    assert {key: end[key] for key in expected} == expected
+
+
+def test_end_line_is_logged_by_the_time_a_waiter_sees_the_turn_end(
+    make_graph: _GraphFactory, turn_logs: pytest.LogCaptureFixture
+) -> None:
+    # Pages and tests read the log right after wait returns, so the end line must already be there.
+    _run_to_end(TurnRunner(make_graph(*_FULL_TURN)))
+
+    assert _TURN_END in events(_turn_lines(turn_logs))
