@@ -200,7 +200,21 @@ _Notes: DATABASE_URL and TEST_DATABASE_URL variables are already populated and c
 
 
 ## Usage
-TBD
+
+### Web UI
+
+**1. Launch the web app locally**
+```
+  uv run python -m civica.ui.app
+```
+
+**2. Sign in**
+
+Create an account and sign in. Sessions can last for up to 14 days. Your study history and coaching memory persist across sessions.
+
+**3. Chat with the coach**
+
+Ask for a lesson or a quiz in your own words. **Teach me** and **Quiz me** buttons are shortcuts for those requests. The **?** button in the header explains how to use Civica.
 
 
 ## Development

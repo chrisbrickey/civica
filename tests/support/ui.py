@@ -22,6 +22,12 @@ QUIZ_MARKER = "coach-quiz"
 QUIZ_HOOK_MARKER = "coach-quiz-hook"
 SPINNER_VERB_MARKER = "spinner-verb"
 
+TEACH_ME_MARKER = "teach-me"
+QUIZ_ME_MARKER = "quiz-me"
+# One Check button per question, and the element(s) showing a question's check result.
+QUIZ_CHECK_MARKER = "quiz-check"
+QUIZ_RESULT_MARKER = "quiz-result"
+
 INTRO_CARD_MARKER = "intro-card"
 INTRO_OPEN_MARKER = "intro-open"
 INTRO_DIALOG_MARKER = "intro-dialog"

@@ -1,5 +1,6 @@
 """Fixtures for the web app tests, which run the real graph with only external services faked."""
 
+import logging
 from collections.abc import AsyncGenerator, Generator
 
 import httpx
@@ -100,3 +101,10 @@ async def second_browser(signed_in_user: User, learner_id: UserId) -> AsyncGener
         user = User(client)
         await open_signed_in(user, learner_id)
         yield user
+
+
+@pytest.fixture()
+def app_logs(caplog: pytest.LogCaptureFixture) -> Generator[pytest.LogCaptureFixture, None, None]:
+    """Everything every logger writes at the app's configured level (INFO) and above."""
+    with caplog.at_level(logging.INFO):
+        yield caplog

@@ -1491,11 +1491,17 @@ Stop and confirm with user that the implemented code is satisfactory. Prompt the
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
-    - Metadata accompanying quizes via `check_choice`: The original plan was to push retrieved chunks through to the response given back to the user AFTER selecting a quiz option. Instead, I decided to push through pre-formed explanations for the incorrect answers. This added a new section to the step called: Add explanations to Questions.
-    - A right choice shows "That's correct!" (or a variation). 
-    - A wrong choice shows the correct option and its explanation. The learner should not have to read sources to learn why they were wrong. And we shouldn't need to make a second model call for the explanation.
-    - After a check, that question's options and **Check** lock, since retrying is pointless once the answer is shown. A reload clears the lock.
-    - Update `coach-ui.md`: the quiz card is no longer read only.
+    - Metadata accompanying quizes via `check_choice`: The original plan was to push retrieved chunks through to the response given back to the user AFTER selecting a quiz option. Instead, I decided to push through pre-formed explanations for the incorrect answers. This added a new section to the step called: Add explanations to Questions. 
+    - Quiz card: 
+      - A right choice shows "That's correct!" (or a variation). 
+      - A wrong choice shows the correct option and its explanation. The learner should not have to read sources to learn why they were wrong. And we shouldn't need to make a second model call for the explanation. 
+      - After a check, that question's options and the 'Check' button lock. A reload clears the lock.
+      - Sources are not displayed for quiz questions.
+    - Quick actions: 
+      - These were moved to header between **?** and **Log out** (instead of above the prompt input). On narrow screens they show only an icon, with a tooltip naming them.
+      - The welcome card and **?** dialog point unsure learners to **Teach me** and **Quiz me**.
+    - Removed listing of 5 themes from the welcome card because these will be obvious from the mastery dashboard when that is added in subsequent steps.
+    - The planner prompt defaults to 3 quiz questions (e.g. when user clicks 'Quiz Me' button or when user asks for quiz and does not specify number of questions). The value is overriden by specific requests, such as that for the comprehension check after a lesson stays (N=1). 
 
 ---
 
@@ -1638,7 +1644,7 @@ The formula, for each response drawn:
 
 ## Step 17: Answers + derived mastery
 
-**Goal:** Let the learner answer a quiz question in a later turn, log it, record mistakes, and recompute mastery deterministically. The planner has no scoring tool (autonomous planner step), so the model never supplies or scores an answer. A wrong answer also gets a short explanation grounded in the question's own sources, so quizzes deliver the grounded explanations the MVP overview promises.
+**Goal:** Let the learner answer a quiz question in a later turn, log it, record mistakes, and recompute mastery deterministically. The planner has no scoring tool (autonomous planner step), so the model never supplies or scores an answer. A wrong answer also gets a short explanation grounded in the question's own sources, so quizzes deliver the grounded explanations the MVP overview promises. A mastery dashboard shows the learner all five themes and their mastery of each.
 
 - **Test:** extend `tests/integration/graph/test_graph.py`
   - The quiz questions created in one turn are kept in checkpointed state, and an `answer` input on the next turn scores them.
@@ -1669,11 +1675,19 @@ The formula, for each response drawn:
   - Lock each question once answered: render it from the checkpointed `answered` results with the radio and submit disabled (`.disable()`).
   - **Logging:** replace the practice-check line with an answer request line (`via=answer`, `question_id=`). Test it in `test_quiz.py`, reading only the `civica.ui.pages.coach` logger, and extend the no-learner-text test to an answer turn with a wrong-answer explanation.
   - The developer panel's **Learner state** line shows the updated mastery for the answered theme.
-- **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right. Prompt the user to answer a few questions in the UI and watch mastery move. Show the critic's added tokens and wait time per quiz turn, and confirm the user accepts them.
+- **UI (mastery dashboard):** create `tests/integration/ui/test_mastery_dashboard.py` first:
+  - The dashboard lists all five themes by French display name, read from the theme registry, for every signed-in learner, including one with no answers yet.
+  - A theme with saved mastery shows it as a percentage; a theme with none shows "Not started".
+  - After an answer turn, reopening the dashboard shows the answered theme's new mastery.
+  - The dashboard only reads: opening it writes nothing to the store or `quiz_answers`.
+  - Add the dashboard to `src/civica/ui/pages/` (placement following `coach-ui.md`). Read mastery through the same per-theme `TopicMastery` lookup that `read_learner_state` uses, so the planner and the learner see the same numbers.
+  - Update `coach-ui.md` with the dashboard's placement and content. The welcome card no longer lists the themes (Coach UI for quizzes step), so this is where the learner sees them.
+- **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right. Prompt the user to answer a few questions in the UI and watch mastery move on the mastery dashboard, and confirm its placement. Show the critic's added tokens and wait time per quiz turn, and confirm the user accepts them.
 
 - **README:**
   - Add the `answer` row to the routing diagram (see the graph assembly step), and a line that answers are scored without the LLM, a wrong answer gets one grounded explanation call, and `update_mastery` is the only node that writes `topic_mastery`.
   - Remove "Quiz answers are practice only until answer scoring ships" from the web app usage text.
+  - Add a line to **Usage → Web UI** saying where to open the mastery dashboard and that it shows mastery for each of the five themes.
   - Add this note to the "Learner graph" section:
     > Decision against using LangGraph's `interrupt` convention: In civica, user responses to questions result in a new turn tagged `answer`, rather than resuming a LangGraph `interrupt`. This is an intentional decision to ensure that learners are free to skip a question and move on. A new turn handles such a learner redirect like any other turn and always finishes at `memory_writer` with persistence and logging. LangGraph's `interrupt`, which encapsulates both a question and an answer in a single turn, pauses waiting for a learner's response. If the learner chose to redirect after being asked a question and we were using LangGraphs's `interrupt`, that would leave a turn unfinished (no persistence). 
     > If learners 'skip around' and try to refer to a previous question that is no longer in the current quiz, the app replies with "that question has expired". Nothing is logged and mastery doesn't change.
@@ -1931,7 +1945,7 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
 14. **Step 14 - Follow-up context:** needs Step 12; carries the previous exchange (including quiz question stems) into the next turn so learners can ask follow-ups.
 15. **Step 15 - Developer mode:** needs Step 13; `--dev` adds a panel beside each coach bubble showing how it was made. Later steps add their developer details to this panel.
 16. **Step 16 - Token usage per turn:** needs Steps 12 (graph config) and 15 (developer panel); totals token usage per caller for each turn and shows it in the developer panel. Nothing later depends on it.
-17. **Step 17 - Answers + derived mastery:** needs Step 13 (replaces its practice check); scores answers, writes mistake episodes, and derives `topic_mastery` deterministically.
+17. **Step 17 - Answers + derived mastery:** needs Step 13 (replaces its practice check); scores answers, writes mistake episodes, derives `topic_mastery` deterministically, and shows it per theme in a learner-facing mastery dashboard.
 18. **Step 18 - Mock exam path:** needs Step 17; deterministic 40-question exam that bypasses the planner but not the logging.
 19. **Step 19 - Mistake-driven review retrieval:** needs Step 17 (mistake episodes with sources).
 20. **Step 20 - Persistent study plan:** needs Step 12. Additive planner tools; this is what makes the autonomy persist across sessions rather than within a turn.

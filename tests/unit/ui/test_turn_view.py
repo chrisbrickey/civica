@@ -17,14 +17,23 @@ from civica.ingestion.chunker import CHUNK_SIZE
 from civica.retrieval.content import ContentChunk
 from civica.scripts.ingest_corpus import collect_pending_chunks
 from civica.ui.turn_view import (
+    CheckResult,
     QuizItemView,
     SourcePage,
     SourceView,
     TurnView,
     build_turn_view,
+    check_choice,
     group_by_page,
 )
-from tests.support.assessment import SAMPLE_OPTIONS, make_content_chunk, make_question
+from tests.support.assessment import (
+    SAMPLE_CORRECT_INDEX,
+    SAMPLE_EXPLANATION,
+    SAMPLE_OPTIONS,
+    make_content_chunk,
+    make_question,
+    wrong_index,
+)
 from tests.support.planner import (
     DEFAULT_THEME,
 )
@@ -40,6 +49,7 @@ _INSUFFICIENT_TEXT = "sample-insufficient-material-text"
 _FALLBACK_TEXT = "sample-fallback-lesson-text"
 _FIRST_QUESTION = "sample-question-text-001"
 _SECOND_QUESTION = "sample-question-text-002"
+_OTHER_EXPLANATION = "sample-explanation-002"
 
 _UNFINISHED_TEXT = "Your last request didn't finish. Please try again."
 
@@ -152,22 +162,55 @@ def test_insufficient_material_lesson_shows_its_text_with_no_sources() -> None:
     assert view.sources == ()
 
 
-def test_quiz_questions_map_to_items_in_order_with_their_options() -> None:
-    questions = [make_question(text=_FIRST_QUESTION), make_question(text=_SECOND_QUESTION)]
+def test_quiz_questions_map_to_items_in_order_with_their_answers_and_explanations() -> None:
+    # The page never draws the answer or explanation before a check; NiceGUI keeps them on the server.
+    questions = [
+        make_question(text=_FIRST_QUESTION, correct_index=0),
+        make_question(text=_SECOND_QUESTION, correct_index=SAMPLE_CORRECT_INDEX, explanation=_OTHER_EXPLANATION),
+    ]
 
     view = _view(quiz_questions=questions)
 
-    assert view.quiz_items == (
-        QuizItemView(text=_FIRST_QUESTION, options=SAMPLE_OPTIONS),
-        QuizItemView(text=_SECOND_QUESTION, options=SAMPLE_OPTIONS),
+    assert view.quiz_items == tuple(
+        QuizItemView(
+            question_id=question.question_id,
+            text=question.text,
+            options=SAMPLE_OPTIONS,
+            correct_index=question.correct_index,
+            explanation=question.explanation,
+        )
+        for question in questions
     )
 
 
-def test_quiz_item_never_reveals_the_correct_answer() -> None:
-    first_option_correct = make_question(correct_index=0)
-    last_option_correct = make_question(correct_index=len(SAMPLE_OPTIONS) - 1)
+# ---------------------------------------------------------------------------
+# Practice checks
+# ---------------------------------------------------------------------------
 
-    assert _quiz_item(first_option_correct) == _quiz_item(last_option_correct)
+
+def test_checking_the_correct_option_reports_correct() -> None:
+    question = make_question(correct_index=SAMPLE_CORRECT_INDEX)
+
+    assert check_choice(_quiz_item(question), SAMPLE_CORRECT_INDEX).correct
+
+
+def test_checking_a_wrong_option_reports_the_correct_option_and_the_explanation() -> None:
+    question = make_question(correct_index=SAMPLE_CORRECT_INDEX)
+
+    result = check_choice(_quiz_item(question), wrong_index(question))
+
+    assert result == CheckResult(
+        correct=False, correct_option=SAMPLE_OPTIONS[SAMPLE_CORRECT_INDEX], explanation=SAMPLE_EXPLANATION
+    )
+
+
+@pytest.mark.parametrize("correct_index", range(len(SAMPLE_OPTIONS)))
+def test_only_the_correct_option_checks_as_correct(correct_index: int) -> None:
+    item = _quiz_item(make_question(correct_index=correct_index))
+
+    assert [check_choice(item, choice).correct for choice in range(len(SAMPLE_OPTIONS))] == [
+        choice == correct_index for choice in range(len(SAMPLE_OPTIONS))
+    ]
 
 
 @pytest.mark.parametrize("halt_reason", [HaltReason.MAX_STEPS, HaltReason.FORBIDDEN_WRITE])
