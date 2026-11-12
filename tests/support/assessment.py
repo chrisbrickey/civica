@@ -26,6 +26,7 @@ SAMPLE_OPTIONS = ("option-a", "option-b", "option-c", "option-d")
 SAMPLE_SOURCE = SourceRef(page_slug="sample-page", section_id="section-001")
 OPTION_COUNT = len(SAMPLE_OPTIONS)
 SAMPLE_CORRECT_INDEX = 1
+SAMPLE_EXPLANATION = "sample-explanation"
 DEFAULT_SECTION_COUNT = 3
 
 # Course-objective intro sections; the only two section_id variants in the corpus.
@@ -45,6 +46,7 @@ def make_question(
     kind: QuestionKind = QuestionKind.KNOWLEDGE,
     correct_index: int = 0,
     sources: tuple[SourceRef, ...] = (SAMPLE_SOURCE,),
+    explanation: str = SAMPLE_EXPLANATION,
 ) -> Question:
     return Question(
         theme=theme,
@@ -53,7 +55,13 @@ def make_question(
         options=SAMPLE_OPTIONS,
         correct_index=correct_index,
         sources=sources,
+        explanation=explanation,
     )
+
+
+def explanation_for(text: str) -> str:
+    """The explanation the fake model writes for the question with this text."""
+    return f"{text}-explanation"
 
 
 def generated_item(text: str, group: int) -> dict[str, object]:
@@ -62,6 +70,7 @@ def generated_item(text: str, group: int) -> dict[str, object]:
         "text": text,
         "options": list(SAMPLE_OPTIONS),
         "correct_index": SAMPLE_CORRECT_INDEX,
+        "explanation": explanation_for(text),
         "group": group,
     }
 
@@ -76,10 +85,15 @@ def generated_item_text(call_index: int, item_index: int) -> str:
     return f"sample-generated-question-{call_index:02d}-{item_index:02d}"
 
 
+def generated_item_explanation(call_index: int, item_index: int) -> str:
+    """Explanation of the default item FakeChatModel emits at (call, item)."""
+    return explanation_for(generated_item_text(call_index, item_index))
+
+
 class FakeChatModel(FakeChatModelBase):
     """Fake chat model: replies with well-formed items naming groups 1, 2, ... in order.
 
-    Item texts embed the call index, so each call yields distinct but reproducible questions.
+    Item texts and explanations embed the call index, so each call yields distinct but reproducible questions.
     `items_by_call` overrides the item count per call; `replies` scripts exact replies by call
     index (later calls fall back to the default); `canned_text` replaces every reply.
     """

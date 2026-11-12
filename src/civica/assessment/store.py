@@ -14,9 +14,9 @@ from civica.domain.themes import Theme
 
 _UPSERT_SQL = """
 INSERT INTO generated_questions (
-    question_id, theme, kind, text, options, correct_index, sources, prompt_version
+    question_id, theme, kind, text, options, correct_index, sources, prompt_version, explanation
 )
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (question_id) DO UPDATE SET
     theme = EXCLUDED.theme,
     kind = EXCLUDED.kind,
@@ -24,7 +24,8 @@ ON CONFLICT (question_id) DO UPDATE SET
     options = EXCLUDED.options,
     correct_index = EXCLUDED.correct_index,
     sources = EXCLUDED.sources,
-    prompt_version = EXCLUDED.prompt_version
+    prompt_version = EXCLUDED.prompt_version,
+    explanation = EXCLUDED.explanation
 """
 
 
@@ -49,6 +50,7 @@ def _save_on_connection(
             q.correct_index,
             Jsonb([source.model_dump() for source in q.sources]),
             prompt_version,
+            q.explanation,
         )
         for q in questions
     ]

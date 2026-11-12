@@ -21,13 +21,14 @@ _PROMPT_VERSION = "sample-prompt-v1"
 _NEXT_PROMPT_VERSION = "sample-prompt-v2"
 _THEME = VIVRE_DANS_LA_SOCIETE_FRANCAISE
 _CORRECT_INDEX = 3
+_EXPLANATION = "sample-stored-explanation"
 _SOURCES = (
     SourceRef(page_slug="sample-page-001", section_id="section-001"),
     SourceRef(page_slug="sample-page-002", section_id="section-002"),
 )
 
 _ROWS_SQL = """
-SELECT question_id, theme, kind, text, options, correct_index, sources, prompt_version
+SELECT question_id, theme, kind, text, options, correct_index, sources, explanation, prompt_version
 FROM generated_questions
 ORDER BY question_id
 """
@@ -52,6 +53,7 @@ def questions() -> tuple[Question, ...]:
             kind=QuestionKind.SCENARIO,
             correct_index=_CORRECT_INDEX,
             sources=_SOURCES,
+            explanation=_EXPLANATION,
         ),
         make_question(text="sample-stored-question-002", theme=_THEME),
     )
@@ -137,6 +139,7 @@ class TestFieldFidelity:
                 "options": list(SAMPLE_OPTIONS),
                 "correct_index": _CORRECT_INDEX,
                 "sources": [source.model_dump() for source in _SOURCES],
+                "explanation": _EXPLANATION,
                 "prompt_version": _PROMPT_VERSION,
             }
         ]

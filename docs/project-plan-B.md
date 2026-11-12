@@ -1435,7 +1435,26 @@ Stop and confirm with user that the implemented code is satisfactory. Prompt the
   - Move on: a lesson after a quiz replaces the quiz questions on screen (`start_turn` clears them at the start of every turn).
   - Refresh or come back later: the page shows the same questions. Practice checks are not saved, so questions the user had checked show as unanswered again.
 
-**Implementation**
+**Add explanations to Questions**
+- **Why:** a wrong practice check shows the correct answer and why it is correct, written when the question is generated so a check needs no extra model call.
+- **Tests:** 
+  - extend `tests/unit/domain/test_question.py`: a `Question` carries an `explanation`, and one built without it (saved before this step) still loads with an empty explanation.
+  - extend `tests/unit/assessment/test_engine.py`: each generated question keeps the explanation the model wrote for its group, including after a retry for skipped groups. A reply item with no explanation is rejected like any other malformed item.
+  - extend `tests/integration/assessment/test_store.py`: a saved question's explanation is stored in `generated_questions`.
+  - extend `tests/integration/graph/test_graph.py`: a question's explanation survives the real checkpointer.
+  - extend `tests/unit/graph/test_planner.py`: the quiz text the planner sees has no explanations, so it cannot reveal answers.
+- **Implementation:**
+  - Update `tests/support/assessment.py`: `make_question` and `FakeChatModel` items carry a sample explanation.
+  - Extend `src/civica/assessment/prompts.py`: ask for a short `explanation` per question, grounded only in its passage group, saying why the correct option is right. Bump `QUIZ_PROMPTS.version` to `quiz-v005` and re-pin its hash.
+  - Extend `src/civica/assessment/engine.py`: `_GeneratedItem` requires a non-empty `explanation`, and `_generate_batch` copies it onto the `Question`.
+  - Extend `src/civica/domain/question.py`: add `explanation: str = ""`. The default lets turns checkpointed before this step still load. `question_id` still hashes only the text.
+  - Extend `src/civica/db/schema.sql`: `ALTER TABLE generated_questions ADD COLUMN IF NOT EXISTS explanation TEXT NOT NULL DEFAULT ''`. Extend `src/civica/assessment/store.py` to save it.
+  - Lesson comprehension checks and mock exams use the same generator, so they get explanations too. Each question costs a sentence or two more output; confirm `QUIZ_PROFILE`'s token cap still fits a full mock exam theme.
+- **Documentation:**
+  - Update `README.md`: note under **Postgres tables** that `generated_questions` stores each question's explanation.
+- **Check In:** Stop and confirm with user that the implemenation is satisfactory.
+
+**Implement Quiz in UI**
 - **Test:** extend `tests/unit/ui/test_turn_view.py`: `check_choice` reports right and wrong choices and returns the question's sources.
 - **Test:** create `tests/integration/ui/test_quiz.py` (same wiring as the Coach UI for lessons step)
   - **Quiz me** sends the message, and the turn renders the questions with none preselected.
@@ -1472,6 +1491,11 @@ Stop and confirm with user that the implemented code is satisfactory. Prompt the
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Metadata accompanying quizes via `check_choice`: The original plan was to push retrieved chunks through to the response given back to the user AFTER selecting a quiz option. Instead, I decided to push through pre-formed explanations for the incorrect answers. This added a new section to the step called: Add explanations to Questions.
+    - A right choice shows "That's correct!" (or a variation). 
+    - A wrong choice shows the correct option and its explanation. The learner should not have to read sources to learn why they were wrong. And we shouldn't need to make a second model call for the explanation.
+    - After a check, that question's options and **Check** lock, since retrying is pointless once the answer is shown. A reload clears the lock.
+    - Update `coach-ui.md`: the quiz card is no longer read only.
 
 ---
 

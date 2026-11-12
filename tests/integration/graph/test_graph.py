@@ -34,7 +34,7 @@ from civica.memory.records import MemoryKind, SessionSummary, TopicMastery
 from civica.memory.store import get_store
 from civica.memory.writer import get, list_records
 from civica.users.service import register
-from tests.support.assessment import FakeChatModel, grouped_generation_reply
+from tests.support.assessment import FakeChatModel, explanation_for, grouped_generation_reply
 from tests.support.memory import FULL_MASTERY
 from tests.support.planner import FakePlannerModel, final_message, tool_call
 from tests.support.users import TEST_BCRYPT_ROUNDS
@@ -233,6 +233,7 @@ class TestCoachTurn:
         (question,) = values["quiz_questions"]
         assert isinstance(question, Question)
         assert question.text == _QUESTION_TEXT
+        assert question.explanation == explanation_for(_QUESTION_TEXT)
         assert all(isinstance(call, ToolCall) for call in values["tool_calls"])
         assert [r.message for r in caplog.records if r.name.startswith(_SERIALIZER_LOGGER)] == []
 

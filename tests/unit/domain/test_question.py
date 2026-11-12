@@ -23,6 +23,8 @@ _VALID_INDEX = 2
 _OUT_OF_RANGE_INDEX = 4
 _NEGATIVE_INDEX = -1
 _SOURCES = (SourceRef(page_slug="sample-page", section_id="section-001"),)
+_EXPLANATION = "sample-explanation"
+_OTHER_EXPLANATION = "other-sample-explanation"
 
 
 def _make_question(
@@ -30,6 +32,7 @@ def _make_question(
     text: str = _TEXT,
     options: tuple[str, ...] = _FOUR_OPTIONS,
     correct_index: int = _VALID_INDEX,
+    explanation: str = _EXPLANATION,
 ) -> Question:
     return Question(
         theme=_THEME,
@@ -38,6 +41,7 @@ def _make_question(
         options=options,  # type: ignore[arg-type]
         correct_index=correct_index,
         sources=_SOURCES,
+        explanation=explanation,
     )
 
 
@@ -58,10 +62,20 @@ class TestValidQuestion:
         assert question.options == _FOUR_OPTIONS
         assert question.correct_index == _VALID_INDEX
         assert question.sources == _SOURCES
+        assert question.explanation == _EXPLANATION
 
     def test_kind_values_are_the_persisted_strings(self) -> None:
         assert QuestionKind.KNOWLEDGE == "knowledge"
         assert QuestionKind.SCENARIO == "scenario"
+
+
+class TestExplanation:
+    """A question says why its correct option is right; older saved questions have none."""
+
+    def test_question_saved_without_explanation_loads_with_empty_one(self) -> None:
+        saved = _make_question().model_dump(exclude={"explanation"})
+
+        assert Question.model_validate(saved).explanation == ""
 
 
 class TestOptionCount:
@@ -101,3 +115,8 @@ class TestQuestionId:
 
     def test_differs_for_different_text(self) -> None:
         assert _make_question().question_id != _make_question(text=_OTHER_TEXT).question_id
+
+    def test_ignores_the_explanation(self) -> None:
+        other = _make_question(explanation=_OTHER_EXPLANATION)
+
+        assert _make_question().question_id == other.question_id

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS generated_questions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS generated_questions_theme_idx ON generated_questions(theme);
+ALTER TABLE generated_questions ADD COLUMN IF NOT EXISTS explanation TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS rejected_questions (
   id BIGSERIAL PRIMARY KEY,

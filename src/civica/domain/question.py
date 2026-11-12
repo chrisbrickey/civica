@@ -28,6 +28,8 @@ class Question(BaseModel):  # type: ignore[explicit-any]
     options: tuple[str, str, str, str]
     correct_index: int = Field(ge=0, le=3)
     sources: tuple[SourceRef, ...]
+    # Default keeps turns checkpointed before explanations existed loadable.
+    explanation: str = ""
 
     @property
     def question_id(self) -> str:
