@@ -4,17 +4,14 @@ from typing import Final
 
 from nicegui import ui
 
-from civica.domain.themes import THEMES_BY_SLUG
-
 INTRO_TITLE: Final = "Bienvenue sur Civica · Welcome to Civica"
 _ABOUT: Final = (
     "Civica is an agentic coach for the French naturalization civics exam. "
     "Its lessons are grounded in the official study material published by le Ministère de l’Intérieur."
 )
-_THEMES_HEADING: Final = "The five official themes of the exam (as of 2026)"
 _ASK_HEADING: Final = "How to use Civica"
 _ASK: Final = "You can ask about specific subjects or you can ask for general coaching. The coach tracks your progress and mastery to ensure that you are learning all five themes."
-_SCOPE: Final = "Civica only covers the civics exam. It is not intended for general chat."
+_UNSURE: Final = "Not sure what to ask? Press **Teach me** or **Quiz me** at the top."
 _EXAMPLES_HEADING: Final = "Try one of these"
 _EXAMPLES: Final = (
     "Start coaching me for this exam",
@@ -32,11 +29,9 @@ def _bullets(items: list[str] | tuple[str, ...]) -> str:
 
 def draw_intro() -> None:
     """Draw the intro text; the card and the dialog share it."""
-    themes = [theme.display_name_fr for theme in THEMES_BY_SLUG.values()]
     ui.label(INTRO_TITLE).classes("text-h6")
     ui.markdown(_ABOUT)
-    ui.markdown(f"**{_THEMES_HEADING}**\n\n{_bullets(themes)}")
-    ui.markdown(f"**{_ASK_HEADING}**\n\n{_ASK}\n\n*{_SCOPE}*")
+    ui.markdown(f"**{_ASK_HEADING}**\n\n{_ASK}\n\n{_UNSURE}")
     ui.markdown(f"**{_EXAMPLES_HEADING}**\n\n{_bullets(_EXAMPLES)}")
 
 

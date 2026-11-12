@@ -1,13 +1,11 @@
 """Integration tests for asking the coach for a lesson."""
 
 import logging
-import re
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 from string import ascii_uppercase
 
 import pytest
 from nicegui import ui
-from nicegui.elements.mixins.text_element import TextElement
 from nicegui.testing import User
 
 from civica.domain.user import UserId
@@ -16,6 +14,7 @@ from civica.ui.turns import TurnRunner
 from tests.support.assessment import SAMPLE_OPTIONS, FakeChatModel
 from tests.support.coach import (
     CALLS_PER_LESSON,
+    COACH_LOGGER,
     FAILED_TEXT,
     FALLBACK_TEXT,
     FINAL_CALL,
@@ -31,18 +30,23 @@ from tests.support.coach import (
     TURN_RETRIES,
     UNFINISHED_TEXT,
     click_submit,
+    coach_lines,
+    labelled,
     held_turn_is_shown,
     press_enter,
     prompt_input,
     prompt_is_locked,
     prompt_is_open,
     question_texts,
+    quiz_radios,
+    quiz_text,
     script_failure,
     script_fallback,
     script_lesson,
     script_lesson_with_quiz,
     script_quiz_only,
     script_two_lessons,
+    see,
     submit,
     the,
     type_prompt,
@@ -72,7 +76,6 @@ _UNTITLED_SOURCE = "Official source"
 _ALREADY_RUNNING_TEXT = "A turn is already running"
 _FALLBACK_NOTE = "This is a fallback lesson."
 _TRACEBACK_HEADER = "Traceback (most recent call last)"
-_COACH_LOGGER = "civica.ui.pages.coach"
 _TURNS_LOGGER = "civica.ui.turns"
 
 # Log line events and their fixed field values.
@@ -89,7 +92,6 @@ _SCANNED_LEARNER_MESSAGE = "scanned-sample-learner-message"
 
 _QUESTION_TEXT = question_texts(QUIZ_AFTER_LESSON_CALL, 1)[0]
 _QUIZ_TITLE = "Check your comprehension"
-_ANSWER_CONTROLS: tuple[type[ui.element], ...] = (ui.button, ui.radio, ui.checkbox, ui.toggle)
 
 
 # ---------------------------------------------------------------------------
@@ -104,38 +106,9 @@ def _label_text(user: User, marker: str) -> str:
     )
 
 
-def _quiz_text(user: User) -> str:
-    """Every piece of text inside the quiz card, in page order."""
-    return "\n".join(
-        element.text for element in the(user, QUIZ_MARKER).descendants() if isinstance(element, TextElement)
-    )
-
-
-def _labelled(marker: str, text: str) -> re.Pattern[str]:
-    """A marker such as "1" or "A" directly before the text, as "1. text", "A) text", or on its own line."""
-    return re.compile(rf"(?<!\w){re.escape(marker)}[.)]?\s+{re.escape(text)}")
-
-
-async def _see(user: User, *contents: str) -> None:
-    """Wait until each text is on the page or in a notification, allowing for a turn in flight."""
-    for content in contents:
-        await user.should_see(content, retries=TURN_RETRIES)
-
-
 async def _see_lesson(user: User, turn_runner: TurnRunner, learner_id: UserId) -> None:
     wait_for_turn_end(turn_runner, learner_id)
-    await _see(user, LESSON_TEXT)
-
-
-@pytest.fixture()
-def app_logs(caplog: pytest.LogCaptureFixture) -> Generator[pytest.LogCaptureFixture, None, None]:
-    """Everything every logger writes at the app's configured level (INFO) and above."""
-    with caplog.at_level(logging.INFO):
-        yield caplog
-
-
-def _coach_lines(caplog: pytest.LogCaptureFixture) -> list[LogLine]:
-    return lines_from(caplog.records, _COACH_LOGGER)
+    await see(user, LESSON_TEXT)
 
 
 def _turn_lines(caplog: pytest.LogCaptureFixture) -> list[LogLine]:
@@ -166,7 +139,7 @@ async def test_submitting_a_prompt_renders_the_lesson_once_without_repeating_it_
     send(signed_in_user)
     await _see_lesson(signed_in_user, turn_runner, learner_id)
 
-    await _see(signed_in_user, PROMPT)
+    await see(signed_in_user, PROMPT)
     await signed_in_user.should_not_see(content=REPLY)
     assert len(signed_in_user.find(content=LESSON_TEXT).elements) == 1
 
@@ -249,22 +222,21 @@ async def test_sources_from_one_page_show_that_page_title_once(
     assert _label_text(signed_in_user, LESSON_MARKER).splitlines().count(_UNTITLED_SOURCE) == 1
 
 
-async def test_sources_footer_counts_pages_not_sections(
+async def test_sources_footer_heading_shows_no_count(
     signed_in_user: User,
     planner_model: ControlledPlannerModel,
     content_model: FakeChatModel,
-    planner_fakes: PlannerFakes,
     turn_runner: TurnRunner,
     learner_id: UserId,
 ) -> None:
-    # The fake passages carry no title, so they all come from one untitled page.
     script_lesson(planner_model, content_model)
 
     submit(signed_in_user)
     await _see_lesson(signed_in_user, turn_runner, learner_id)
 
-    assert len(planner_fakes.retriever.chunks(DEFAULT_THEME)) > 1
-    await _see(signed_in_user, f"{_SOURCES_TITLE} (1)")
+    lesson = the(signed_in_user, LESSON_MARKER)
+    headings = [element.text for element in lesson.descendants() if isinstance(element, ui.expansion)]
+    assert _SOURCES_TITLE in headings
 
 
 async def test_sources_survive_a_reload(
@@ -281,7 +253,7 @@ async def test_sources_survive_a_reload(
 
     await signed_in_user.open("/")
 
-    await _see(signed_in_user, _SOURCES_TITLE)
+    await see(signed_in_user, _SOURCES_TITLE)
     for passage in planner_fakes.retriever.chunks(DEFAULT_THEME):
         assert passage.chunk.text in _label_text(signed_in_user, LESSON_MARKER)
 
@@ -318,7 +290,7 @@ async def test_fallback_lesson_shows_the_fallback_note(
     submit(signed_in_user)
     wait_for_turn_end(turn_runner, learner_id)
 
-    await _see(signed_in_user, FALLBACK_TEXT, _FALLBACK_NOTE)
+    await see(signed_in_user, FALLBACK_TEXT, _FALLBACK_NOTE)
     assert len(signed_in_user.find(content=FALLBACK_TEXT).elements) == 1
 
 
@@ -327,7 +299,7 @@ async def test_fallback_lesson_shows_the_fallback_note(
 # ---------------------------------------------------------------------------
 
 
-async def test_questions_show_their_options_none_selected_and_no_way_to_answer(
+async def test_questions_show_their_options_with_none_selected(
     signed_in_user: User,
     planner_model: ControlledPlannerModel,
     content_model: FakeChatModel,
@@ -338,10 +310,13 @@ async def test_questions_show_their_options_none_selected_and_no_way_to_answer(
 
     submit(signed_in_user)
     wait_for_turn_end(turn_runner, learner_id)
+    await see(signed_in_user, _QUESTION_TEXT)
 
-    await _see(signed_in_user, _QUESTION_TEXT, *SAMPLE_OPTIONS)
-    quiz = the(signed_in_user, QUIZ_MARKER)
-    assert not [element for element in quiz.descendants() if isinstance(element, _ANSWER_CONTROLS)]
+    for option in SAMPLE_OPTIONS:
+        assert option in quiz_text(signed_in_user)
+    radios = quiz_radios(signed_in_user)
+    assert len(radios) == 1
+    assert radios[0].value is None
 
 
 async def test_all_questions_sit_in_one_quiz_card_titled_with_no_question_count(
@@ -356,16 +331,16 @@ async def test_all_questions_sit_in_one_quiz_card_titled_with_no_question_count(
 
     submit(signed_in_user)
     wait_for_turn_end(turn_runner, learner_id)
-    await _see(signed_in_user, *questions)
+    await see(signed_in_user, *questions)
 
     quiz = the(signed_in_user, QUIZ_MARKER)
     assert isinstance(quiz, ui.card)
     chat = the(signed_in_user, CHAT_MARKER)
     assert [element for element in chat.descendants() if isinstance(element, ui.card)] == [quiz]
-    quiz_text = _quiz_text(signed_in_user)
-    assert [line for line in quiz_text.splitlines() if _QUIZ_TITLE in line] == [_QUIZ_TITLE]
+    card_text = quiz_text(signed_in_user)
+    assert [line for line in card_text.splitlines() if _QUIZ_TITLE in line] == [_QUIZ_TITLE]
     for question in questions:
-        assert question in quiz_text
+        assert question in card_text
 
 
 async def test_quiz_questions_are_numbered_and_options_lettered(
@@ -380,13 +355,13 @@ async def test_quiz_questions_are_numbered_and_options_lettered(
 
     submit(signed_in_user)
     wait_for_turn_end(turn_runner, learner_id)
-    await _see(signed_in_user, *questions)
+    await see(signed_in_user, *questions)
 
-    quiz = _quiz_text(signed_in_user)
+    quiz = quiz_text(signed_in_user)
     for number, question in enumerate(questions, start=1):
-        assert _labelled(str(number), question).search(quiz), f"question {number} is not numbered"
+        assert labelled(str(number), question).search(quiz), f"question {number} is not numbered"
     for letter, option in zip(ascii_uppercase, SAMPLE_OPTIONS):
-        assert len(_labelled(letter, option).findall(quiz)) == len(questions), f"{option} is not lettered {letter}"
+        assert len(labelled(letter, option).findall(quiz)) == len(questions), f"{option} is not lettered {letter}"
 
 
 async def test_quiz_after_a_lesson_hangs_off_it_by_a_hooked_line(
@@ -400,7 +375,7 @@ async def test_quiz_after_a_lesson_hangs_off_it_by_a_hooked_line(
 
     submit(signed_in_user)
     wait_for_turn_end(turn_runner, learner_id)
-    await _see(signed_in_user, _QUESTION_TEXT)
+    await see(signed_in_user, _QUESTION_TEXT)
 
     await signed_in_user.should_see(marker=QUIZ_HOOK_MARKER)
 
@@ -416,9 +391,9 @@ async def test_quiz_only_turn_draws_the_same_card_with_no_hooked_line(
 
     submit(signed_in_user)
     wait_for_turn_end(turn_runner, learner_id)
-    await _see(signed_in_user, question)
+    await see(signed_in_user, question)
 
-    assert _QUIZ_TITLE in _quiz_text(signed_in_user).splitlines()
+    assert _QUIZ_TITLE in quiz_text(signed_in_user).splitlines()
     await signed_in_user.should_not_see(marker=QUIZ_HOOK_MARKER)
     await signed_in_user.should_not_see(content=REPLY)
 
@@ -442,7 +417,7 @@ async def test_reload_shows_the_same_turn_from_the_checkpointer(
 
     await signed_in_user.open("/")
 
-    await _see(signed_in_user, PROMPT, LESSON_TEXT, _QUESTION_TEXT)
+    await see(signed_in_user, PROMPT, LESSON_TEXT, _QUESTION_TEXT)
     await signed_in_user.should_not_see(content=REPLY)
     assert planner_model.invocation_count == calls_before_reload
 
@@ -461,7 +436,7 @@ async def test_reload_during_a_turn_shows_it_running_then_finished(
 
     await signed_in_user.open("/")
 
-    await _see(signed_in_user, PROMPT)
+    await see(signed_in_user, PROMPT)
     await prompt_is_locked(signed_in_user)
 
     planner_model.release()
@@ -488,7 +463,7 @@ async def test_closed_page_does_not_stop_the_turn(
     wait_for_turn_end(turn_runner, learner_id)
 
     await signed_in_user.open("/")
-    await _see(signed_in_user, LESSON_TEXT)
+    await see(signed_in_user, LESSON_TEXT)
 
 
 # ---------------------------------------------------------------------------
@@ -513,13 +488,13 @@ async def test_a_second_turn_replaces_the_first(
 
     # Gone as soon as the new turn is on screen, not only when it finishes.
     await held_turn_is_shown(signed_in_user, planner_model)
-    await _see(signed_in_user, SECOND_PROMPT)
+    await see(signed_in_user, SECOND_PROMPT)
     await signed_in_user.should_not_see(content=LESSON_TEXT)
 
     planner_model.release()
     wait_for_turn_end(turn_runner, learner_id)
 
-    await _see(signed_in_user, SECOND_LESSON_TEXT)
+    await see(signed_in_user, SECOND_LESSON_TEXT)
     await signed_in_user.should_not_see(content=LESSON_TEXT)
 
 
@@ -562,7 +537,7 @@ async def test_blank_prompt_starts_nothing(
     assert turn_runner.active(learner_id) is None
     assert planner_model.invocation_count == 0
     assert prompt_input(signed_in_user).enabled
-    assert _coach_lines(app_logs) == []
+    assert coach_lines(app_logs) == []
 
 
 async def test_second_browser_submitting_during_a_turn_is_told_logs_it_and_starts_nothing(
@@ -582,14 +557,14 @@ async def test_second_browser_submitting_during_a_turn_is_told_logs_it_and_start
     submit(signed_in_user)
     click_submit(second_browser)
 
-    await _see(second_browser, _ALREADY_RUNNING_TEXT)
+    await see(second_browser, _ALREADY_RUNNING_TEXT)
 
     # That page then follows the running turn through to its result.
     await held_turn_is_shown(second_browser, planner_model)
     planner_model.release()
     await _see_lesson(second_browser, turn_runner, learner_id)
     assert set(planner_model.human_texts()) == {PROMPT}
-    rejected = only(_coach_lines(app_logs), _TURN_REJECTED)
+    rejected = only(coach_lines(app_logs), _TURN_REJECTED)
     assert rejected == {"user_id": str(learner_id), "reason": _ALREADY_RUNNING_REASON}
 
 
@@ -610,7 +585,7 @@ async def test_graph_that_raises_partway_shows_the_error_logs_it_and_reopens_the
     with caplog.at_level(logging.ERROR):
         submit(signed_in_user)
         wait_for_turn_end(turn_runner, learner_id)
-        await _see(signed_in_user, FAILED_TEXT, PROMPT)
+        await see(signed_in_user, FAILED_TEXT, PROMPT)
 
     await prompt_is_open(signed_in_user)
     assert _TRACEBACK_HEADER in caplog.text
@@ -631,11 +606,11 @@ async def test_reload_after_a_failed_turn_shows_the_notice_and_not_the_previous_
     await prompt_is_open(signed_in_user)
     submit(signed_in_user, SECOND_PROMPT)
     wait_for_turn_end(turn_runner, learner_id)
-    await _see(signed_in_user, FAILED_TEXT)
+    await see(signed_in_user, FAILED_TEXT)
 
     await signed_in_user.open("/")
 
-    await _see(signed_in_user, UNFINISHED_TEXT)
+    await see(signed_in_user, UNFINISHED_TEXT)
     await signed_in_user.should_not_see(content=LESSON_TEXT)
     await signed_in_user.should_not_see(content=REPLY)
     await prompt_is_open(signed_in_user)
@@ -648,9 +623,9 @@ async def test_reload_after_a_failed_turn_shows_the_notice_and_not_the_previous_
 
 async def _open_and_read_log(user: User, caplog: pytest.LogCaptureFixture) -> list[str]:
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger=_COACH_LOGGER):
+    with caplog.at_level(logging.INFO, logger=COACH_LOGGER):
         await user.open("/")
-    return [record.getMessage() for record in caplog.records if record.name == _COACH_LOGGER]
+    return [record.getMessage() for record in caplog.records if record.name == COACH_LOGGER]
 
 
 async def test_opening_the_page_with_no_turn_logs_that(
@@ -730,7 +705,7 @@ async def test_typed_prompt_logs_one_request_line(
     submit(signed_in_user)
     await _see_lesson(signed_in_user, turn_runner, learner_id)
 
-    request = only(_coach_lines(app_logs), _TURN_REQUEST)
+    request = only(coach_lines(app_logs), _TURN_REQUEST)
     assert request == {"user_id": str(learner_id), "via": _VIA_TYPED}
 
 
@@ -770,7 +745,7 @@ async def test_a_turn_logs_no_learner_message_lesson_text_or_passage(
     submit(signed_in_user, _SCANNED_LEARNER_MESSAGE)
     await _see_lesson(signed_in_user, turn_runner, learner_id)
     await signed_in_user.open("/")
-    await _see(signed_in_user, LESSON_TEXT)
+    await see(signed_in_user, LESSON_TEXT)
 
     assert _turn_lines(app_logs), "the turn wrote no log lines, so the scan proves nothing"
     passages = [passage.chunk.text for passage in planner_fakes.retriever.chunks(DEFAULT_THEME)]

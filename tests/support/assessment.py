@@ -90,6 +90,11 @@ def generated_item_explanation(call_index: int, item_index: int) -> str:
     return explanation_for(generated_item_text(call_index, item_index))
 
 
+def default_generation_reply(call_index: int, count: int = MAX_ITEMS_PER_CALL) -> str:
+    """The reply FakeChatModel gives by default at `call_index`: `count` items naming groups 1, 2, ..."""
+    return grouped_generation_reply(*((i + 1, generated_item_text(call_index, i)) for i in range(count)))
+
+
 class FakeChatModel(FakeChatModelBase):
     """Fake chat model: replies with well-formed items naming groups 1, 2, ... in order.
 
@@ -119,7 +124,7 @@ class FakeChatModel(FakeChatModelBase):
             if call_index < len(self.items_by_call)
             else self.items_per_call
         )
-        return grouped_generation_reply(*((i + 1, generated_item_text(call_index, i)) for i in range(count)))
+        return default_generation_reply(call_index, count)
 
 
 def reject_all_critic(

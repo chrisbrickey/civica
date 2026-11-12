@@ -31,5 +31,6 @@ def register(deps: AppDeps) -> None:
             ui.label(f"Signed in as {user.username}")
             with ui.row().classes("items-center"):
                 build_intro_dialog_button()
+                quick_actions = ui.row().classes("items-center no-wrap")
                 ui.button("Log out", on_click=log_out).mark("logout")
-        await coach.render(deps, user.user_id)
+        await coach.render(deps, user.user_id, quick_actions)

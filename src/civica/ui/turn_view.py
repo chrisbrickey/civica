@@ -44,10 +44,22 @@ class SourcePage:
 
 @dataclass(frozen=True)
 class QuizItemView:
-    """A question as the learner sees it: the correct answer is never carried."""
+    """A question for the page. The answer and explanation stay on the server and are drawn only after a check."""
 
+    question_id: str
     text: str
     options: tuple[str, ...]
+    correct_index: int
+    explanation: str
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """The outcome of a practice check: the correct option's text and why it is correct."""
+
+    correct: bool
+    correct_option: str
+    explanation: str
 
 
 @dataclass(frozen=True)
@@ -120,6 +132,15 @@ def group_by_page(sources: Iterable[SourceView]) -> tuple[SourcePage, ...]:
     )
 
 
+def check_choice(item: QuizItemView, choice: int) -> CheckResult:
+    """Whether the chosen option index is the right one, with the right option and its explanation."""
+    return CheckResult(
+        correct=choice == item.correct_index,
+        correct_option=item.options[item.correct_index],
+        explanation=item.explanation,
+    )
+
+
 def build_turn_view(snapshot: StateSnapshot) -> TurnView | None:  # type: ignore[explicit-any]
     """The turn saved on the thread, or None for an empty thread.
 
@@ -142,7 +163,9 @@ def build_turn_view(snapshot: StateSnapshot) -> TurnView | None:  # type: ignore
         reply="" if lesson is not None or quiz_questions else reply,
         lesson_text=lesson.text if lesson is not None else None,
         sources=_sources(chunks),
-        quiz_items=tuple(QuizItemView(q.text, q.options) for q in quiz_questions),
+        quiz_items=tuple(
+            QuizItemView(q.question_id, q.text, q.options, q.correct_index, q.explanation) for q in quiz_questions
+        ),
         is_fallback=is_fallback,
         notice=None,
     )

@@ -1,18 +1,34 @@
 """Planner scripts, page lookups, and waits shared by the coach page tests."""
 
 import asyncio
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
 from typing import Final
 
+import pytest
 from langchain_core.messages import AIMessage
-from nicegui import ui
-from nicegui.testing import User
+from nicegui import ElementFilter, ui
+from nicegui.elements.mixins.text_element import TextElement
+from nicegui.testing import User, UserInteraction
 
 from civica.domain.user import UserId
 from civica.ui.turns import TurnRunner
-from tests.support.assessment import FakeChatModel, generated_item_text
+from tests.support.assessment import (
+    SAMPLE_OPTIONS,
+    FakeChatModel,
+    default_generation_reply,
+    generated_item_text,
+    make_question,
+)
+from tests.support.logs import LogLine, lines_from
 from tests.support.planner import DEFAULT_THEME, ControlledPlannerModel, final_message, tool_call
-from tests.support.ui import PROMPT_INPUT_MARKER, SUBMIT_MARKER
+from tests.support.ui import (
+    PROMPT_INPUT_MARKER,
+    QUIZ_CHECK_MARKER,
+    QUIZ_MARKER,
+    QUIZ_RESULT_MARKER,
+    SUBMIT_MARKER,
+)
 
 PROMPT: Final = "sample-prompt-001"
 SECOND_PROMPT: Final = "sample-prompt-002"
@@ -27,6 +43,12 @@ READ_STATE: Final = "read_learner_state"
 TEACH: Final = "teach"
 GENERATE_QUIZ: Final = "generate_quiz"
 SUGGEST_THEME: Final = "suggest_review_theme"
+
+TEACH_ME_TEXT: Final = "Teach me"
+QUIZ_ME_TEXT: Final = "Quiz me"
+PRACTICE_LABEL: Final = "not scored or saved yet"
+
+COACH_LOGGER: Final = "civica.ui.pages.coach"
 
 FAILED_TEXT: Final = "Something went wrong. Please try again."
 UNFINISHED_TEXT: Final = "Your last request didn't finish. Please try again."
@@ -80,6 +102,15 @@ def script_quiz_only(planner_model: ControlledPlannerModel, question_count: int 
     )
 
 
+def script_quiz_then_lesson(
+    planner_model: ControlledPlannerModel, content_model: FakeChatModel, question_count: int = 1
+) -> None:
+    """A quiz-only turn, then a lesson turn."""
+    script_quiz_only(planner_model, question_count)
+    planner_model.script = (*planner_model.script, *lesson_script(SECOND_REPLY, "002"))
+    content_model.replies = (default_generation_reply(QUIZ_ONLY_CALL), LESSON_TEXT)
+
+
 def script_reply(planner_model: ControlledPlannerModel) -> None:
     planner_model.script = (final_message(REPLY),)
 
@@ -103,6 +134,11 @@ def script_failure(planner_model: ControlledPlannerModel) -> None:
 
 def question_texts(call_index: int, question_count: int) -> tuple[str, ...]:
     return tuple(generated_item_text(call_index, index) for index in range(question_count))
+
+
+def question_id_of(text: str) -> str:
+    """The question_id of the question with this text."""
+    return make_question(text=text).question_id
 
 
 def type_prompt(user: User, prompt: str) -> None:
@@ -175,3 +211,84 @@ async def finish_turn(user: User, turn_runner: TurnRunner, user_id: UserId, prom
     submit(user, prompt)
     wait_for_turn_end(turn_runner, user_id)
     await prompt_is_open(user)
+
+
+async def see(user: User, *contents: str) -> None:
+    """Wait until each text is on the page or in a notification, allowing for a turn in flight."""
+    for content in contents:
+        await user.should_see(content, retries=TURN_RETRIES)
+
+
+def coach_lines(caplog: pytest.LogCaptureFixture) -> list[LogLine]:
+    return lines_from(caplog.records, COACH_LOGGER)
+
+
+# ---------------------------------------------------------------------------
+# Quiz card
+# ---------------------------------------------------------------------------
+
+
+def marked(user: User, marker: str) -> list[ui.element]:
+    """Every element carrying `marker`, in page order; empty when there is none."""
+    assert user.client is not None
+    with user.client:
+        return list(ElementFilter(marker=marker))
+
+
+def _texts(elements: Iterable[ui.element]) -> list[str]:
+    """The text of each element and of each radio option, so assertions do not depend on layout."""
+    texts: list[str] = []
+    for element in elements:
+        if isinstance(element, TextElement):
+            texts.append(element.text)
+        elif isinstance(element, ui.radio):
+            options = element.options
+            texts.extend(str(label) for label in (options.values() if isinstance(options, dict) else options))
+    return texts
+
+
+def labelled(marker: str, text: str) -> re.Pattern[str]:
+    """A marker such as "1" or "A" directly before the text, as "1. text", "A) text", or on its own line."""
+    return re.compile(rf"(?<!\w){re.escape(marker)}[.)]?\s+{re.escape(text)}")
+
+
+def quiz_text(user: User) -> str:
+    """Every piece of text inside the quiz card, in page order."""
+    return "\n".join(_texts(the(user, QUIZ_MARKER).descendants()))
+
+
+def result_text(user: User) -> str:
+    """The text of every shown check result, in page order."""
+    return "\n".join(text for found in marked(user, QUIZ_RESULT_MARKER) for text in _texts(found.descendants(include_self=True)))
+
+
+def quiz_radios(user: User) -> list[ui.radio]:
+    """One answer radio per question, in question order."""
+    return [element for element in the(user, QUIZ_MARKER).descendants() if isinstance(element, ui.radio)]
+
+
+def check_buttons(user: User) -> list[ui.button]:
+    """One Check button per question, in question order."""
+    buttons = [element for element in marked(user, QUIZ_CHECK_MARKER) if isinstance(element, ui.button)]
+    assert buttons, "the quiz card has no Check buttons"
+    return buttons
+
+
+def choose_option(user: User, question: int, option: int) -> None:
+    """Pick the option holding SAMPLE_OPTIONS[option] on the question at index `question`, as a click would."""
+    radios = quiz_radios(user)
+    assert question < len(radios), f"expected an answer radio for question {question + 1}, found {len(radios)} radios"
+    radio = radios[question]
+    labels = _texts([radio])
+    matching = [label for label in labels if SAMPLE_OPTIONS[option] in label]
+    assert len(matching) == 1, f"expected one radio option holding {SAMPLE_OPTIONS[option]!r}, found {labels}"
+    UserInteraction(user, {radio}, matching[0]).click()
+
+
+def click_check(user: User, question: int) -> None:
+    """Press the Check button of the question at index `question`; a disabled button ignores it."""
+    UserInteraction(user, {check_buttons(user)[question]}, None).click()
+
+
+def click_marked(user: User, marker: str) -> None:
+    UserInteraction(user, {the(user, marker)}, None).click()

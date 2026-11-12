@@ -8,7 +8,6 @@ from nicegui.elements.mixins.content_element import ContentElement
 from nicegui.elements.mixins.text_element import TextElement
 from nicegui.testing import User
 
-from civica.domain.themes import THEMES_BY_SLUG
 from civica.domain.user import UserId
 from civica.ui.turns import CoachGraph, TurnRunner
 from tests.support.assessment import FakeChatModel
@@ -16,6 +15,8 @@ from tests.support.coach import (
     FAILED_TEXT,
     FINAL_CALL,
     PROMPT,
+    QUIZ_ME_TEXT,
+    TEACH_ME_TEXT,
     UNFINISHED_TEXT,
     finish_turn,
     held_turn_is_shown,
@@ -44,9 +45,6 @@ _READ_FAILURE = "sample-read-failure"
 # The header uses the theme's primary color, so a button of that color would vanish into it.
 _HEADER_COLOR = "primary"
 
-_THEME_NAMES = tuple(theme.display_name_fr for theme in THEMES_BY_SLUG.values())
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -71,10 +69,11 @@ def _text_in(element: ui.element) -> str:
     return "\n".join(parts)
 
 
-def _assert_names_every_theme(element: ui.element) -> None:
-    text = _text_in(element)
-    missing = [name for name in _THEME_NAMES if name not in text]
-    assert not missing, f"themes missing from the intro: {missing}"
+def _points_out_quick_actions(element: ui.element) -> bool:
+    """Some line names both quick-action buttons, so they read as a pair rather than as example prompts."""
+    return any(
+        TEACH_ME_TEXT in line and QUIZ_ME_TEXT in line for line in _text_in(element).splitlines()
+    )
 
 
 async def _no_card(user: User) -> None:
@@ -92,14 +91,20 @@ def _dialog(user: User) -> ui.dialog:
 # ---------------------------------------------------------------------------
 
 
-async def test_new_learner_sees_the_welcome_card_in_the_turn_area_naming_every_theme(
+async def test_new_learner_sees_the_welcome_card_in_the_turn_area(
     signed_in_user: User,
 ) -> None:
     await signed_in_user.should_see(marker=INTRO_CARD_MARKER)
 
     card = the(signed_in_user, INTRO_CARD_MARKER)
     assert card in list(the(signed_in_user, CHAT_MARKER).descendants()), "the welcome card should sit in the turn area"
-    _assert_names_every_theme(card)
+
+
+@pytest.mark.parametrize("marker", [INTRO_CARD_MARKER, INTRO_DIALOG_MARKER], ids=["card", "dialog"])
+async def test_intro_points_unsure_learners_to_teach_me_and_quiz_me(signed_in_user: User, marker: str) -> None:
+    await signed_in_user.should_see(marker=INTRO_CARD_MARKER)
+
+    assert _points_out_quick_actions(the(signed_in_user, marker)), "the intro should name Teach me and Quiz me together"
 
 
 @pytest.mark.parametrize("script", [_script_lesson, _script_reply], ids=["lesson", "reply"])
@@ -186,7 +191,6 @@ async def _open_and_close_intro(user: User) -> None:
 
     user.find(marker=INTRO_OPEN_MARKER).click()
     await wait_until(lambda: dialog.value)
-    _assert_names_every_theme(dialog)
 
     user.find(marker=INTRO_CLOSE_MARKER).click()
     await wait_until(lambda: not dialog.value)

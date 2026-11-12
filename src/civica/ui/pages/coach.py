@@ -12,7 +12,14 @@ from civica.domain.user import UserId
 from civica.graph.graph import GraphInput, InputKind
 from civica.ui.deps import AppDeps
 from civica.ui.intro import draw_intro_card
-from civica.ui.turn_view import QuizItemView, SourceView, TurnView, build_turn_view, group_by_page
+from civica.ui.turn_view import (
+    QuizItemView,
+    SourceView,
+    TurnView,
+    build_turn_view,
+    check_choice,
+    group_by_page,
+)
 from civica.ui.turns import ActiveTurn, TurnAlreadyRunning, TurnStatus, coach_config
 
 logger = logging.getLogger(__name__)
@@ -30,6 +37,14 @@ SPINNER_VERBS: Final = (
 PROMPT_HINT: Final = "Ask for a lesson or a quiz"
 _MAX_PROMPT_LENGTH: Final = 1000
 _VIA_TYPED: Final = "typed"
+_VIA_TEACH_ME: Final = "teach_me"
+_VIA_QUIZ_ME: Final = "quiz_me"
+_TEACH_ME_TEXT: Final = "Teach me"
+_QUIZ_ME_TEXT: Final = "Quiz me"
+CORRECT_TEXTS: Final = ("That's correct!", "Correct, well done!", "Yes, that's right!")
+MISSED_TEXT: Final = "Not quite."
+_PRACTICE_LABEL: Final = "Practice only: not scored or saved yet"
+_CHECK_TEXT: Final = "Check"
 _FAILED_TEXT: Final = "Something went wrong. Please try again."
 _ALREADY_RUNNING_TEXT: Final = "A turn is already running"
 _FALLBACK_NOTE: Final = "This is a fallback lesson."
@@ -50,6 +65,8 @@ _LESSON_CSS: Final = """
 .q-message-sent { align-self: flex-end; }
 /* The lesson bubble and the welcome card share one outer width; the bubble's padding sits inside it. */
 .civica-panel { width: var(--civica-panel-width); }
+/* On narrow screens the quick actions show only their icon; the tooltip names them. */
+@media (max-width: 600px) { .civica-quick-action .q-btn__content > span:not(.q-icon) { display: none; } }
 .civica-lesson-body { width: calc(var(--civica-panel-width) - 2 * var(--civica-bubble-padding)); }
 /* After a lesson the quiz hangs off it by a hooked line; its right edge meets the bubble's. */
 .civica-quiz-thread { margin-top: -8px; gap: 0; flex-wrap: nowrap; }
@@ -65,6 +82,7 @@ _LESSON_CSS: Final = """
   font-size: 1rem; line-height: 1.4; font-weight: 700; margin: 0.75rem 0 0.25rem;
 }
 .nicegui-markdown.civica-lesson > :first-child { margin-top: 0; }
+.civica-quiz-result { white-space: pre-line; }
 .civica-sources { margin-top: 10px; border-top: 1px solid rgba(0, 0, 0, 0.18); font-size: 13.5px; }
 .civica-sources .q-item { min-height: 0; padding: 3px 0; }
 .civica-sources .q-item__section--side { min-width: 0; padding-right: 6px; color: inherit; }
@@ -84,7 +102,7 @@ _LESSON_CSS: Final = """
 def _draw_sources(sources: tuple[SourceView, ...]) -> None:
     """One closed footer; sources grouped under their page, each opening to its passage."""
     pages = group_by_page(sources)
-    with ui.expansion(f"{_SOURCES_TITLE} ({len(pages)})").props(_COMPACT_PROPS).classes("w-full civica-sources"):
+    with ui.expansion(_SOURCES_TITLE).props(_COMPACT_PROPS).classes("w-full civica-sources"):
         for page in pages:
             ui.label(page.page_title).classes("civica-source-page")
             for source in page.sources:
@@ -100,30 +118,55 @@ def _draw_lesson(view: TurnView, lesson_text: str) -> None:
             _draw_sources(view.sources)
 
 
-def _draw_quiz_card(items: tuple[QuizItemView, ...]) -> None:
-    """All questions in one read-only card, numbered and lettered."""
+def _draw_question(user_id: UserId, item: QuizItemView) -> None:
+    """One question: lettered radio, a Check button, and a result area filled only after a check."""
+    labels = {index: f"{letter}. {option}" for index, (letter, option) in enumerate(zip(ascii_uppercase, item.options))}
+    radio = ui.radio(labels, value=None)
+    check = ui.button(_CHECK_TEXT).mark("quiz-check")
+    check.set_enabled(False)
+    result = ui.label().mark("quiz-result").classes("civica-quiz-result")
+    radio.on_value_change(lambda event: check.set_enabled(event.value is not None))
+
+    def run_check() -> None:
+        if radio.value is None:
+            return
+        outcome = check_choice(item, radio.value)
+        logger.info("practice_check user_id=%s question_id=%s correct=%s", user_id, item.question_id, outcome.correct)
+        if outcome.correct:
+            result.set_text(random.choice(CORRECT_TEXTS))
+        else:
+            letter = ascii_uppercase[item.correct_index]
+            result.set_text(f"{MISSED_TEXT} The answer is {letter}. {outcome.correct_option}\n{outcome.explanation}")
+        radio.disable()
+        check.disable()
+
+    check.on_click(run_check)
+
+
+def _draw_quiz_card(user_id: UserId, items: tuple[QuizItemView, ...]) -> None:
+    """All questions in one card, numbered and lettered; checks are practice only and lock the question."""
     with ui.card().classes("civica-quiz").mark("coach-quiz"):
         with ui.row().classes("items-center gap-2"):
             ui.icon("quiz")
             ui.label(_QUIZ_TITLE).classes("text-weight-medium")
+        ui.label(_PRACTICE_LABEL).classes("text-caption")
         for number, item in enumerate(items, start=1):
             ui.separator()
             ui.label(f"{number}. {item.text}").classes("text-weight-medium")
-            for letter, option in zip(ascii_uppercase, item.options):
-                ui.label(f"{letter}. {option}")
+            _draw_question(user_id, item)
 
 
-def _draw_quiz(items: tuple[QuizItemView, ...], after_lesson: bool) -> None:
+def _draw_quiz(user_id: UserId, items: tuple[QuizItemView, ...], after_lesson: bool) -> None:
     """After a lesson the card hangs off it by a hooked line; on its own it has none."""
     if not after_lesson:
-        _draw_quiz_card(items)
+        _draw_quiz_card(user_id, items)
         return
     with ui.row().classes("civica-quiz-thread"):
         ui.element().classes("civica-quiz-hook").mark("coach-quiz-hook")
-        _draw_quiz_card(items)
+        _draw_quiz_card(user_id, items)
 
 
-def _draw_view(view: TurnView) -> None:
+def _draw_view(user_id: UserId, view: TurnView) -> None:
     """A saved turn, in generation order: message, lesson, questions, reply, fallback note."""
     ui.chat_message(view.learner_message, sent=True)
     if view.notice is not None:
@@ -132,7 +175,7 @@ def _draw_view(view: TurnView) -> None:
     if view.lesson_text is not None:
         _draw_lesson(view, view.lesson_text)
     if view.quiz_items:
-        _draw_quiz(view.quiz_items, after_lesson=view.lesson_text is not None)
+        _draw_quiz(user_id, view.quiz_items, after_lesson=view.lesson_text is not None)
     if view.reply:
         with ui.chat_message():
             ui.markdown(view.reply)
@@ -167,10 +210,19 @@ def _draw_read_failed() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _quick_action(slot: ui.element, icon: str, text: str, marker: str) -> ui.button:
+    """A flat header button with an icon, a label that hides on narrow screens, and a tooltip."""
+    with slot:
+        button = ui.button(text, icon=icon).props("flat color=white").classes("civica-quick-action").mark(marker)
+        with button:
+            ui.tooltip(text)
+    return button
+
+
 class _CoachPage:
     """One page visit: draws the saved turn and follows any live turn of the user, from this tab or another."""
 
-    def __init__(self, deps: AppDeps, user_id: UserId) -> None:
+    def __init__(self, deps: AppDeps, user_id: UserId, quick_actions: ui.element) -> None:
         self._deps = deps
         self._user_id = user_id
         self._followed: ActiveTurn | None = None
@@ -178,13 +230,17 @@ class _CoachPage:
 
         ui.add_css(_LESSON_CSS)
         self._turn_area = ui.column().classes("w-full").mark("coach-chat")
+        self._teach_me = _quick_action(quick_actions, "school", _TEACH_ME_TEXT, "teach-me")
+        self._quiz_me = _quick_action(quick_actions, "quiz", _QUIZ_ME_TEXT, "quiz-me")
+        self._teach_me.on_click(lambda: self._submit(_TEACH_ME_TEXT, _VIA_TEACH_ME))
+        self._quiz_me.on_click(lambda: self._submit(_QUIZ_ME_TEXT, _VIA_QUIZ_ME))
         # The prompt is page content right after the turn area, not a footer.
         with ui.row().classes("w-full items-center no-wrap"):
             self._prompt = ui.input(placeholder=PROMPT_HINT).props(f"maxlength={_MAX_PROMPT_LENGTH}").classes("grow")
             self._prompt.mark("prompt-input")
             self._send = ui.button(icon="send").mark("prompt-submit")
-        self._send.on_click(self._submit)
-        self._prompt.on("keydown.enter", self._submit)
+        self._send.on_click(self._submit_typed)
+        self._prompt.on("keydown.enter", self._submit_typed)
 
     async def open(self) -> None:
         """Draw what the thread holds now, then keep following the user's turns."""
@@ -205,24 +261,31 @@ class _CoachPage:
     def _set_locked(self, locked: bool) -> None:
         self._prompt.set_enabled(not locked)
         self._send.set_enabled(not locked)
+        self._teach_me.set_enabled(not locked)
+        self._quiz_me.set_enabled(not locked)
 
     def _follow(self, turn: ActiveTurn) -> None:
         self._followed, self._drawn_running = turn, False
         self._set_locked(True)
 
-    def _submit(self) -> None:
-        text = self._prompt.value.strip()
+    def _submit_typed(self) -> None:
+        self._submit(self._prompt.value, _VIA_TYPED)
+
+    def _submit(self, message: str, via: str) -> None:
+        """Start a turn from typed or quick-action text."""
+        text = message.strip()
         if not text or self._followed is not None:
             return
         graph_input: GraphInput = {"kind": InputKind.MESSAGE, "learner_message": text}
-        logger.info("turn_request user_id=%s via=%s", self._user_id, _VIA_TYPED)
+        logger.info("turn_request user_id=%s via=%s", self._user_id, via)
         try:
             turn = self._deps.turn_runner.start(self._user_id, graph_input)
         except TurnAlreadyRunning:
             logger.info("turn_rejected user_id=%s reason=already_running", self._user_id)
             ui.notify(_ALREADY_RUNNING_TEXT)
             return
-        self._prompt.set_value("")
+        if via == _VIA_TYPED:
+            self._prompt.set_value("")
         self._follow(turn)
 
     async def _tick(self) -> None:
@@ -257,10 +320,10 @@ class _CoachPage:
         if view is None:
             self._show(draw_intro_card)
             return "no_turn"
-        self._show(lambda: _draw_view(view))
+        self._show(lambda: _draw_view(self._user_id, view))
         return "unfinished_turn" if view.notice is not None else "saved_turn"
 
 
-async def render(deps: AppDeps, user_id: UserId) -> None:
-    """Build the coach for one page visit."""
-    await _CoachPage(deps, user_id).open()
+async def render(deps: AppDeps, user_id: UserId, quick_actions: ui.element) -> None:
+    """Build the coach for one page visit; its quick-action buttons go inside the given container."""
+    await _CoachPage(deps, user_id, quick_actions).open()
