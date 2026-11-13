@@ -15,6 +15,7 @@ from civica.graph.planner import (
     SUMMARY_KEY,
     HaltReason,
     PlannerDeps,
+    PreviousExchange,
     ToolCall,
     default_planner_deps,
 )
@@ -43,6 +44,7 @@ class GraphState(GraphInput):
     quiz_questions: list[Question]
     tool_calls: list[ToolCall]
     halt_reason: HaltReason | None
+    previous_exchange: PreviousExchange | None
 
 
 class Node(Protocol):

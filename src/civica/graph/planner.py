@@ -62,6 +62,24 @@ class ToolCall:
     args: Mapping[str, object]
 
 
+# Bounds the previous lesson carried into the next turn, so tokens per turn stay predictable.
+LESSON_EXCERPT_LIMIT = 1500
+
+
+@dataclass(frozen=True)
+class PreviousExchange:
+    """The last completed turn, bounded: no quiz options, answers, or explanations."""
+
+    learner_message: str
+    reply: str
+    lesson_excerpt: str | None
+    quiz_stems: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        # The checkpointer reads tuples back as lists, so restore the declared type.
+        object.__setattr__(self, "quiz_stems", tuple(self.quiz_stems))
+
+
 @dataclass(frozen=True)
 class PlannerContext:
     """Per-run context injected into nodes and tools; the model never sees it."""

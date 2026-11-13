@@ -13,7 +13,7 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 
@@ -27,7 +27,13 @@ from civica.embeddings.embedder import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL
 from civica.explanation.engine import Explanation
 from civica.graph.graph import InputKind, build_graph
 from civica.graph.nodes import PlannerContext
-from civica.graph.planner import SUMMARY_KEY, HaltReason, ToolCall, default_planner_deps
+from civica.graph.planner import (
+    SUMMARY_KEY,
+    HaltReason,
+    PreviousExchange,
+    ToolCall,
+    default_planner_deps,
+)
 from civica.ingestion.repository import EmbeddedChunk, upsert_chunks
 from civica.memory.checkpointer import get_saver
 from civica.memory.records import MemoryKind, SessionSummary, TopicMastery
@@ -309,6 +315,31 @@ class TestRetrievalGap:
         assert _execute(_GAP_ROWS_SQL, query) == [{"theme": _EMPTY_THEME.slug, "query": query}]
 
 
+@pytest.mark.usefixtures("corpus")
+class TestPreviousExchange:
+    """The last exchange is checkpointed as a typed value and reaches a restarted graph's next turn."""
+
+    def test_previous_exchange_survives_a_restart_on_the_same_thread(
+        self, user_id: UserId, config: RunnableConfig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _turn(_graph(_scripted(*_lesson_and_check())), user_id, config)
+        model = _scripted(final_message(_SECOND_FINAL_TEXT))
+        restarted = _graph(model)
+
+        with caplog.at_level(logging.WARNING):
+            saved = _values(restarted, config)["previous_exchange"]
+            _turn(restarted, user_id, config, _SECOND_LEARNER_MESSAGE)
+
+        assert isinstance(saved, PreviousExchange)
+        assert (saved.learner_message, saved.reply) == (_LEARNER_MESSAGE, _FINAL_TEXT)
+        assert saved.lesson_excerpt == _LESSON_TEXT
+        assert saved.quiz_stems == (_QUESTION_TEXT,)
+        context = "\n".join(str(m.content) for m in model.received[0])
+        for text in (_LEARNER_MESSAGE, _FINAL_TEXT, _LESSON_TEXT, _QUESTION_TEXT):
+            assert text in context
+        assert [r.message for r in caplog.records if r.name.startswith(_SERIALIZER_LOGGER)] == []
+
+
 class TestThreadPersistence:
     """The thread survives between turns, while each turn starts clean."""
 
@@ -323,16 +354,24 @@ class TestThreadPersistence:
         _turn(restarted, user_id, config, _SECOND_LEARNER_MESSAGE)
         assert _values(restarted, config)["reply"] == _SECOND_FINAL_TEXT
 
-    def test_message_history_does_not_carry_into_the_next_turn(
+    def test_only_the_previous_exchange_carries_into_the_next_turn(
         self, user_id: UserId, config: RunnableConfig
     ) -> None:
-        model = _scripted(final_message(_FINAL_TEXT), final_message(_SECOND_FINAL_TEXT))
+        model = _scripted(
+            tool_call(_READ_STATE, "call-state"),
+            final_message(_FINAL_TEXT),
+            final_message(_SECOND_FINAL_TEXT),
+        )
         graph = _graph(model)
 
         _turn(graph, user_id, config)
         _turn(graph, user_id, config, _SECOND_LEARNER_MESSAGE)
 
-        humans = [m.content for m in model.received[-1] if isinstance(m, HumanMessage)]
-        assert humans == [_SECOND_LEARNER_MESSAGE]
-        assert len(model.received[-1]) == len(model.received[0])
+        messages = model.received[-1]
+        assert [type(m) for m in messages] == [SystemMessage, HumanMessage, AIMessage, HumanMessage]
+        assert [m.content for m in messages if isinstance(m, HumanMessage)] == [
+            _LEARNER_MESSAGE,
+            _SECOND_LEARNER_MESSAGE,
+        ]
+        assert not any(isinstance(m, ToolMessage) for m in messages)
         assert "messages" not in _values(graph, config)

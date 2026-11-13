@@ -1422,7 +1422,7 @@ Stop and confirm with user that the implemented code is satisfactory. Prompt the
 
 ---
 
-## Step 13: Coach UI for quizzes and practice checks
+## ✅ Step 13: Coach UI for quizzes and practice checks
 
 **Goal:** The learner can ask for a quiz and check answers as practice. At this point, a logged-in user can also:
   - Use quick actions: **Teach me** and **Quiz me** buttons above the prompt input send those messages, so a learner who does not know what to type can start. They are shortcuts for a message, not modes.
@@ -1505,7 +1505,7 @@ Stop and confirm with user that the implemented code is satisfactory. Prompt the
 
 ---
 
-## Step 14: Follow-up context
+## ✅ Step 14: Follow-up context
 
 **Goal:** 
 - The coach remembers the previous exchange, so a learner can follow up on the last turn. 
@@ -1536,6 +1536,10 @@ The previous exchange must be saved when a turn completes.
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - A new `finish_turn` node in the planner subgraph writes `previous_exchange` (instead of `graph.py`), which kept the follow-up tests on the subgraph.
+    - The previous exchange goes to the model as a Human and an AI message, never a system message. The portion of the lesson passed on is limited to 1500 characters.
+    - Follow-ups skip the comprehension check. Bumped planner prompt version.
+  
 
 ---
 

@@ -28,9 +28,11 @@ from civica.domain.question import Question
 from civica.explanation.engine import Explanation
 from civica.graph.planner import (
     MAX_PLANNER_STEPS,
+    LESSON_EXCERPT_LIMIT,
     HaltReason,
     PlannerContext,
     PlannerDeps,
+    PreviousExchange,
     ToolCall,
     build_planner_tools,
     teach_theme,
@@ -46,6 +48,7 @@ START_TURN: Final = "start_turn"
 PLANNER_MODEL: Final = "planner_model"
 PLANNER_TOOLS: Final = "planner_tools"
 FALLBACK_LESSON: Final = "fallback_lesson"
+FINISH_TURN: Final = "finish_turn"
 
 _T = TypeVar("_T")
 
@@ -57,6 +60,7 @@ def _last_wins(_: _T, new: _T) -> _T:
 
 class PlannerInput(TypedDict):
     learner_message: str
+    previous_exchange: PreviousExchange | None
 
 
 class PlannerState(PlannerInput):
@@ -125,16 +129,45 @@ def start_turn(state: PlannerState) -> dict[str, object]:
     }
 
 
+def finish_turn(state: PlannerState) -> dict[str, object]:
+    """Save this turn as the previous exchange for the next one."""
+
+    lesson = state["lesson"]
+    excerpt = lesson.text[:LESSON_EXCERPT_LIMIT] if lesson is not None else None
+    # On a fallback the reply is the lesson itself, so keep only the excerpt.
+    reply = "" if lesson is not None and state["reply"] == lesson.text else state["reply"]
+    stems = tuple(q.text for q in state["quiz_questions"])
+    exchange = PreviousExchange(state["learner_message"], reply, excerpt, stems)
+    return {"previous_exchange": exchange}
+
+
+def _coach_text(exchange: PreviousExchange) -> str:
+    """The coach's side of the previous exchange: reply, lesson excerpt, numbered quiz stems."""
+
+    numbered = [f"{n}. {stem}" for n, stem in enumerate(exchange.quiz_stems, start=1)]
+    parts = [exchange.reply, exchange.lesson_excerpt or "", *numbered]
+    return "\n\n".join(part for part in parts if part)
+
+
+def _previous_messages(state: PlannerState) -> list[AnyMessage]:
+    """The previous exchange as a human and AI message pair; empty on a thread's first turn."""
+
+    exchange = state.get("previous_exchange")
+    if exchange is None:
+        return []
+    return [HumanMessage(content=exchange.learner_message), AIMessage(content=_coach_text(exchange))]
+
+
 def _make_planner_model(deps: PlannerDeps) -> Node:
     model = deps.planner_model.bind_tools(build_planner_tools(deps))
 
     def planner_model(
         state: PlannerState, runtime: NodeRuntime
     ) -> dict[str, object]:
-        """One model call; the system prompt is added here and never stored."""
+        """One model call; the system prompt and previous exchange are added here and never stored."""
 
         system = SystemMessage(content=PLANNER_PROMPTS.system())
-        response = model.invoke([system, *state["messages"]])
+        response = model.invoke([system, *_previous_messages(state), *state["messages"]])
         assert isinstance(response, AIMessage)
 
         model_calls = state["model_calls"] + 1
@@ -208,7 +241,7 @@ def _after_model(state: PlannerState) -> str:
     if state["halt_reason"] == HaltReason.MAX_STEPS:
         return FALLBACK_LESSON
     wants_tools = tools_condition(state) == "tools"  # type: ignore[arg-type]
-    return PLANNER_TOOLS if wants_tools else END
+    return PLANNER_TOOLS if wants_tools else FINISH_TURN
 
 
 def _after_tools(state: PlannerState) -> str:
@@ -224,11 +257,13 @@ def build_planner_graph(deps: PlannerDeps) -> StateGraph[PlannerState, PlannerCo
     graph.add_node(PLANNER_MODEL, _make_planner_model(deps))
     graph.add_node(PLANNER_TOOLS, _make_tool_node(deps))
     graph.add_node(FALLBACK_LESSON, _make_fallback_lesson(deps))
+    graph.add_node(FINISH_TURN, finish_turn)
 
     graph.add_edge(START, START_TURN)
     graph.add_edge(START_TURN, PLANNER_MODEL)
-    graph.add_conditional_edges(PLANNER_MODEL, _after_model, [PLANNER_TOOLS, FALLBACK_LESSON, END])
+    graph.add_conditional_edges(PLANNER_MODEL, _after_model, [PLANNER_TOOLS, FALLBACK_LESSON, FINISH_TURN])
     graph.add_conditional_edges(PLANNER_TOOLS, _after_tools, [PLANNER_MODEL, FALLBACK_LESSON])
-    graph.add_edge(FALLBACK_LESSON, END)
+    graph.add_edge(FALLBACK_LESSON, FINISH_TURN)
+    graph.add_edge(FINISH_TURN, END)
 
     return graph

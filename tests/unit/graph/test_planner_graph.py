@@ -6,11 +6,12 @@ retrieval, content generation and the trace writer are fakes. No network, no dat
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.memory import InMemoryStore
@@ -24,6 +25,7 @@ from civica.domain.themes import (
 )
 from civica.graph.nodes import PlannerContext, build_planner_graph
 from civica.graph.planner import (
+    LESSON_EXCERPT_LIMIT,
     MAX_PLANNER_STEPS,
     MAX_QUIZ_QUESTIONS,
     PROFILE_KEY,
@@ -35,7 +37,13 @@ from civica.graph.prompts import PLANNER_PROMPTS
 from civica.graph.trace import RetrievalGap, TraceStep
 from civica.memory.records import LearnerProfile, MistakeEpisode, SessionSummary, TopicMastery
 from civica.memory.writer import get, list_records, put
-from tests.support.assessment import FakeRetriever, explanation_for, reject_all_critic
+from tests.support.assessment import (
+    SAMPLE_OPTIONS,
+    FakeChatModel,
+    FakeRetriever,
+    explanation_for,
+    reject_all_critic,
+)
 from tests.support.memory import (
     FULL_MASTERY,
     WEIGHTED_CHOICE,
@@ -47,7 +55,9 @@ from tests.support.planner import (
     GOAL,
     MISTAKE,
     SAMPLE_KEY,
+    PLANNER_FAILURE_TEXT,
     SAMPLE_QUESTION_ID,
+    ControlledPlannerModel,
     FakePlannerModel,
     PlannerFakes,
     final_message,
@@ -63,8 +73,12 @@ from tests.support.users import USER_ID
 
 LEARNER_MESSAGE = "sample-learner-message-001"
 SECOND_LEARNER_MESSAGE = "sample-learner-message-002"
+THIRD_LEARNER_MESSAGE = "sample-learner-message-003"
 THREAD_ID = "sample-thread-001"
 FINAL_TEXT = "sample-final-reply"
+SECOND_FINAL_TEXT = "sample-second-final-reply"
+THIRD_FINAL_TEXT = "sample-third-final-reply"
+LESSON_TEXT = "sample-lesson-text"
 FOCUS = "sample-focus"
 QUERY = "sample-query"
 UNKNOWN_THEME_SLUG = "sample-unknown-theme"
@@ -78,6 +92,10 @@ MULTI_QUERY_THEME = HISTOIRE_GEOGRAPHIE_ET_CULTURE
 
 QUIZ_SIZE = 2
 COMPREHENSION_CHECK_SIZE = 1
+
+# A lesson exactly at the excerpt limit, then text that must be cut from the previous exchange.
+LESSON_AT_LIMIT = ("sample-lesson-head-" * LESSON_EXCERPT_LIMIT)[:LESSON_EXCERPT_LIMIT]
+LESSON_TAIL = "sample-text-beyond-the-limit"
 
 # Final graph state keys: the subgraph's output contract.
 REPLY = "reply"
@@ -200,6 +218,25 @@ def _assert_fallback_reply(state: State) -> None:
     assert state[REPLY] == state[LESSON].text
 
 
+def _previous_exchange(messages: list[BaseMessage]) -> tuple[str, str]:
+    """The (learner, coach) pair placed between the system prompt and the current turn."""
+    layout = [type(m).__name__ for m in messages[:3]]
+    assert layout == ["SystemMessage", "HumanMessage", "AIMessage"], f"no previous exchange in {layout}"
+    _, learner, coach = messages[:3]
+    assert isinstance(coach, AIMessage)
+    assert not coach.tool_calls
+    return str(learner.content), str(coach.content)
+
+
+def _context_text(messages: list[BaseMessage]) -> str:
+    """Every non-system message of one model call, joined."""
+    return "\n".join(str(m.content) for m in messages if not isinstance(m, SystemMessage))
+
+
+def _humans(messages: list[BaseMessage]) -> list[str]:
+    return [str(m.content) for m in messages if isinstance(m, HumanMessage)]
+
+
 # ---------------------------------------------------------------------------
 # Tool set offered to the model
 # ---------------------------------------------------------------------------
@@ -320,7 +357,7 @@ class TestStepBound:
 
 
 class TestTurnsOnOneThread:
-    """Each turn on a thread starts fresh: a full step budget and none of the previous turn's messages."""
+    """Each turn on a thread starts fresh: a full step budget and only the bounded previous exchange."""
 
     @pytest.fixture()
     def model(self) -> FakePlannerModel:
@@ -340,12 +377,16 @@ class TestTurnsOnOneThread:
         assert model.invocation_count == 2 * MAX_PLANNER_STEPS
         assert [s[HALT_REASON] for s in states] == [HaltReason.MAX_STEPS, HaltReason.MAX_STEPS]
 
-    def test_second_turn_does_not_see_the_first_turns_messages(
+    def test_second_turn_sees_only_the_previous_exchange_not_its_tool_calls(
         self, model: FakePlannerModel, states: list[State]
     ) -> None:
         for messages in model.received[MAX_PLANNER_STEPS:]:
-            humans = [str(m.content) for m in messages if isinstance(m, HumanMessage)]
-            assert humans == [SECOND_LEARNER_MESSAGE]
+            learner, _ = _previous_exchange(messages)
+            assert learner == LEARNER_MESSAGE
+            assert _humans(messages) == [LEARNER_MESSAGE, SECOND_LEARNER_MESSAGE]
+            current = messages[3]
+            assert isinstance(current, HumanMessage)
+            assert current.content == SECOND_LEARNER_MESSAGE
 
     def test_each_turn_is_traced_on_its_own(
         self, planner_fakes: PlannerFakes, states: list[State]
@@ -659,6 +700,152 @@ class TestLearnerMessageBoundary:
         _run(planner_fakes, model)
 
         assert any(LEARNER_MESSAGE in text for text in model.human_texts())
+
+    def test_previous_message_stays_out_of_system_messages(self, planner_fakes: PlannerFakes) -> None:
+        model = _scripted(final_message(FINAL_TEXT), final_message(SECOND_FINAL_TEXT))
+        graph = _compile(planner_fakes, model)
+
+        _invoke(graph)
+        _invoke(graph, learner_message=SECOND_LEARNER_MESSAGE)
+
+        assert LEARNER_MESSAGE in model.human_text(1)
+        assert all(LEARNER_MESSAGE not in text for text in model.system_texts())
+
+
+# ---------------------------------------------------------------------------
+# Previous exchange: the bounded context a follow-up turn sees
+# ---------------------------------------------------------------------------
+
+
+def _fallback_by_forbidden_write() -> tuple[AIMessage, ...]:
+    return (tool_call(RECORD, "call-record", **TOPIC_MASTERY_ARGS),)
+
+
+def _fallback_by_step_bound() -> tuple[AIMessage, ...]:
+    return tuple(tool_call(SUGGEST, f"call-suggest-{i}") for i in range(MAX_PLANNER_STEPS))
+
+
+class TestPreviousExchange:
+    """The next turn's model calls see the last completed exchange, bounded and without answers."""
+
+    def test_next_turn_sees_the_previous_message_and_reply_on_every_call(
+        self, planner_fakes: PlannerFakes
+    ) -> None:
+        model = _scripted(
+            final_message(FINAL_TEXT),
+            tool_call(SUGGEST, "call-suggest"),
+            final_message(SECOND_FINAL_TEXT),
+        )
+        graph = _compile(planner_fakes, model)
+
+        _invoke(graph)
+        _invoke(graph, learner_message=SECOND_LEARNER_MESSAGE)
+
+        for messages in model.received[1:]:
+            learner, coach = _previous_exchange(messages)
+            assert learner == LEARNER_MESSAGE
+            assert FINAL_TEXT in coach
+            assert _humans(messages) == [LEARNER_MESSAGE, SECOND_LEARNER_MESSAGE]
+
+    def test_first_turn_on_a_thread_has_no_previous_exchange(self, planner_fakes: PlannerFakes) -> None:
+        model = _scripted(final_message(FINAL_TEXT))
+
+        _run(planner_fakes, model)
+
+        (messages,) = model.received
+        assert [type(m) for m in messages] == [SystemMessage, HumanMessage]
+
+    def test_quiz_stems_are_numbered_as_displayed_without_options_or_answers(
+        self, planner_fakes: PlannerFakes
+    ) -> None:
+        model = _scripted(
+            _quiz("call-quiz", QUIZ_SIZE), final_message(FINAL_TEXT), final_message(SECOND_FINAL_TEXT)
+        )
+        graph = _compile(planner_fakes, model)
+
+        questions = _invoke(graph)[QUIZ_QUESTIONS]
+        _invoke(graph, learner_message=SECOND_LEARNER_MESSAGE)
+
+        messages = model.received[-1]
+        _, coach = _previous_exchange(messages)
+        assert len(questions) == QUIZ_SIZE
+        for number, question in enumerate(questions, start=1):
+            assert re.search(rf"\b{number}[.):]\s*{re.escape(question.text)}", coach), coach
+        context = _context_text(messages)
+        assert all(option not in context for option in SAMPLE_OPTIONS)
+        assert all(explanation_for(q.text) not in context for q in questions)
+        assert ANSWER_FIELD.search(context) is None, context
+
+    def test_lesson_at_the_limit_is_kept_whole(self, planner_fakes: PlannerFakes) -> None:
+        fakes = replace(planner_fakes, content_model=FakeChatModel(canned_text=LESSON_AT_LIMIT))
+        model = _scripted(
+            _teach("call-teach"), final_message(FINAL_TEXT), final_message(SECOND_FINAL_TEXT)
+        )
+        graph = _compile(fakes, model)
+
+        _invoke(graph)
+        _invoke(graph, learner_message=SECOND_LEARNER_MESSAGE)
+
+        _, coach = _previous_exchange(model.received[-1])
+        assert LESSON_AT_LIMIT in coach
+
+    def test_lesson_beyond_the_limit_is_cut(self, planner_fakes: PlannerFakes) -> None:
+        long_lesson = LESSON_AT_LIMIT + LESSON_TAIL
+        fakes = replace(planner_fakes, content_model=FakeChatModel(canned_text=long_lesson))
+        model = _scripted(
+            _teach("call-teach"), final_message(FINAL_TEXT), final_message(SECOND_FINAL_TEXT)
+        )
+        graph = _compile(fakes, model)
+
+        _invoke(graph)
+        _invoke(graph, learner_message=SECOND_LEARNER_MESSAGE)
+
+        messages = model.received[-1]
+        _, coach = _previous_exchange(messages)
+        assert LESSON_AT_LIMIT in coach
+        assert LESSON_TAIL not in _context_text(messages)
+
+    def test_failed_turn_leaves_the_last_good_exchange(self, planner_fakes: PlannerFakes) -> None:
+        model = ControlledPlannerModel(
+            script=(
+                final_message(FINAL_TEXT),
+                final_message(SECOND_FINAL_TEXT),
+                final_message(THIRD_FINAL_TEXT),
+            ),
+            fail_at_call=1,
+        )
+        graph = _compile(planner_fakes, model)
+
+        _invoke(graph)
+        with pytest.raises(RuntimeError, match=PLANNER_FAILURE_TEXT):
+            _invoke(graph, learner_message=SECOND_LEARNER_MESSAGE)
+        _invoke(graph, learner_message=THIRD_LEARNER_MESSAGE)
+
+        messages = model.received[-1]
+        learner, coach = _previous_exchange(messages)
+        assert learner == LEARNER_MESSAGE
+        assert FINAL_TEXT in coach
+        assert _humans(messages) == [LEARNER_MESSAGE, THIRD_LEARNER_MESSAGE]
+
+    @pytest.mark.parametrize(
+        "fallback_turn",
+        [_fallback_by_forbidden_write, _fallback_by_step_bound],
+        ids=["forbidden-write", "step-bound"],
+    )
+    def test_fallback_turn_counts_and_its_lesson_appears_once(
+        self, planner_fakes: PlannerFakes, fallback_turn: Callable[[], tuple[AIMessage, ...]]
+    ) -> None:
+        fakes = replace(planner_fakes, content_model=FakeChatModel(canned_text=LESSON_TEXT))
+        model = _scripted(*fallback_turn(), final_message(SECOND_FINAL_TEXT))
+        graph = _compile(fakes, model)
+
+        _invoke(graph)
+        _invoke(graph, learner_message=SECOND_LEARNER_MESSAGE)
+
+        messages = model.received[-1]
+        learner, _ = _previous_exchange(messages)
+        assert learner == LEARNER_MESSAGE
+        assert _context_text(messages).count(LESSON_TEXT) == 1
 
 
 # ---------------------------------------------------------------------------
