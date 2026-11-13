@@ -19,8 +19,8 @@ if TYPE_CHECKING:
 # Editing a prompt means bumping its set's version and re-pinning the hash here, together.
 _PINS: list[tuple["DataclassInstance", str, str]] = [
     (QUIZ_PROMPTS, "quiz-v005", "49cfcdaafb74e7254e87175ace9bf427c9745c64cb6269a93f17861615eb2dbe"),
-    (PLANNER_PROMPTS, "planner-v007", "b97ca7aa74de3c2521b6063e4d265192a6b0187e05d3c01208ffcb78ce14b433"),
-    (EXPLANATION_PROMPTS, "explanation-v002", "de590047f994ac36b07f3fe51837addd190f5ae81d0b7a0cc2aa83fd8476a28e"),
+    (PLANNER_PROMPTS, "planner-v008", "160702170835333d7c7090515a3eacc2ed45d8ac3268584f8826f25c19b5523f"),
+    (EXPLANATION_PROMPTS, "explanation-v003", "770e8d52f994fa47ef23949ad3f6cff16b344f5c73135198eb0528f83a0bf00e"),
 ]
 _PIN_IDS = ["quiz", "planner", "explanation"]
 
@@ -40,6 +40,18 @@ _SAMPLE_THEME = "sample-theme"
 _SAMPLE_COUNT = 42
 _SAMPLE_BODY = "sample-body"
 _SAMPLE_QUESTION = "sample-question"
+
+# Word limits and length rules pinned as literals, so a passing test proves the prompt text.
+_LESSON_WORDS = 150
+_BRIEF_WORDS = 80
+_LENGTH_RULES = (
+    "start with the key point",
+    "at most three bullets",
+    "no more than one heading",
+    "no closing summary",
+    "do not repeat facts",
+)
+_BRIEF_FOLLOW_UPS = ("explain that more simply", "another example")
 
 
 class TestVersionPins:
@@ -123,9 +135,27 @@ class TestRenderMethods:
         (check_rule,) = [s for s in PLANNER_PROMPTS.system().split(". ") if "comprehension check" in s]
         assert "follow-up" in check_rule
 
+    def test_planner_system_sets_brief_for_follow_ups(self) -> None:
+        brief_rules = [
+            sentence.lower() for sentence in PLANNER_PROMPTS.system().split(". ") if "brief=true" in sentence.lower()
+        ]
+        assert brief_rules, "the planner prompt never asks for brief=true"
+        assert all(any(f in rule for rule in brief_rules) for f in _BRIEF_FOLLOW_UPS)
+
     def test_english_coach_prompts_carry_the_shared_writing_style(self) -> None:
         assert WRITING_STYLE in PLANNER_PROMPTS.system()
-        assert WRITING_STYLE in EXPLANATION_PROMPTS.system
+        assert WRITING_STYLE in EXPLANATION_PROMPTS.system(word_limit=_LESSON_WORDS)
+
+    def test_explanation_system_is_fully_rendered(self) -> None:
+        assert "{" not in EXPLANATION_PROMPTS.system(word_limit=_LESSON_WORDS)
+
+    @pytest.mark.parametrize("word_limit", [_LESSON_WORDS, _BRIEF_WORDS])
+    def test_explanation_system_sets_the_word_limit(self, word_limit: int) -> None:
+        assert f"at most {word_limit} words" in EXPLANATION_PROMPTS.system(word_limit=word_limit)
+
+    @pytest.mark.parametrize("rule", _LENGTH_RULES)
+    def test_explanation_system_keeps_lessons_tight(self, rule: str) -> None:
+        assert rule in EXPLANATION_PROMPTS.system(word_limit=_LESSON_WORDS).lower()
 
     def test_explanation_human_carries_its_arguments(self) -> None:
         text = EXPLANATION_PROMPTS.human(question=_SAMPLE_QUESTION, passages=_SAMPLE_BODY)

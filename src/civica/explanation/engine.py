@@ -10,7 +10,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict
 
 from civica.domain.themes import Theme
-from civica.explanation.prompts import EXPLANATION_PROMPTS
+from civica.explanation.prompts import DEFAULT_WORD_LIMITS, EXPLANATION_PROMPTS, WordLimits
 from civica.llm.client import EXPLANATION_PROFILE, get_chat_model
 from civica.retrieval.content import ContentChunk, SearchFn, search
 
@@ -50,11 +50,15 @@ def explain(
     *,
     retriever: SearchFn = _grounded_search,
     chat_client: BaseChatModel | None = None,
+    brief: bool = False,
+    word_limits: WordLimits = DEFAULT_WORD_LIMITS,
 ) -> Explanation:
     """Answer a learner's question about `theme`, grounded only in retrieved passages.
 
     MINIMUM_SIMILARITY is passed to the retriever to prevent retrieval of chunks
     that are not deemed 'relevant enough'.
+
+    A brief answer is held to a shorter word limit than a lesson.
 
     If no passages are retrieved, the function returns early without calling the LLM to prevent free-association.
     """
@@ -66,8 +70,9 @@ def explain(
         return Explanation(text=_INSUFFICIENT_MATERIAL_MESSAGE, context_chunks=())
 
     client = chat_client if chat_client is not None else get_chat_model(EXPLANATION_PROFILE)
+    word_limit = word_limits.brief if brief else word_limits.lesson
     messages: list[BaseMessage] = [
-        SystemMessage(content=EXPLANATION_PROMPTS.system),
+        SystemMessage(content=EXPLANATION_PROMPTS.system(word_limit=word_limit)),
         _build_human_message(user_question, chunks),
     ]
     response = client.invoke(messages)

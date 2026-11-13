@@ -33,6 +33,7 @@ from civica.graph.planner import (
     HaltReason,
     ToolCall,
 )
+from civica.explanation.prompts import WordLimits
 from civica.graph.prompts import PLANNER_PROMPTS
 from civica.graph.trace import RetrievalGap, TraceStep
 from civica.memory.records import LearnerProfile, MistakeEpisode, SessionSummary, TopicMastery
@@ -96,6 +97,14 @@ COMPREHENSION_CHECK_SIZE = 1
 # A lesson exactly at the excerpt limit, then text that must be cut from the previous exchange.
 LESSON_AT_LIMIT = ("sample-lesson-head-" * LESSON_EXCERPT_LIMIT)[:LESSON_EXCERPT_LIMIT]
 LESSON_TAIL = "sample-text-beyond-the-limit"
+
+# Word limits the content model must receive, pinned as literals.
+LESSON_WORD_RULE = "150 words"
+BRIEF_WORD_RULE = "80 words"
+INJECTED_WORD_LIMITS = WordLimits(lesson=42, brief=7)
+INJECTED_LESSON_RULE = "42 words"
+INJECTED_BRIEF_RULE = "7 words"
+BRIEF = "brief"
 
 # Final graph state keys: the subgraph's output contract.
 REPLY = "reply"
@@ -354,6 +363,49 @@ class TestStepBound:
         assert lesson.context_chunks
         assert {c.chunk.theme for c in lesson.context_chunks} == {SUGGESTED_THEME}
         assert (SUGGESTED_THEME.display_name_fr, SUGGESTED_THEME) in planner_fakes.retriever.calls
+
+
+class TestLessonLength:
+    """teach asks for a full lesson by default and a short answer when the model sets brief."""
+
+    def test_brief_is_an_optional_boolean_of_teach(self, planner_fakes: PlannerFakes) -> None:
+        model = _scripted(final_message(FINAL_TEXT))
+
+        _run(planner_fakes, model)
+
+        parameters = model.offered_tools()[TEACH]
+        assert parameters["properties"][BRIEF]["type"] == "boolean"
+        assert BRIEF not in parameters.get("required", [])
+
+    def test_teach_sends_the_lesson_word_limit(self, planner_fakes: PlannerFakes) -> None:
+        _run(planner_fakes, _scripted(_teach("call-teach"), final_message(FINAL_TEXT)))
+
+        assert LESSON_WORD_RULE in planner_fakes.content_model.system_text(0)
+
+    def test_brief_teach_sends_only_the_brief_word_limit(self, planner_fakes: PlannerFakes) -> None:
+        brief_teach = tool_call(TEACH, "call-teach", theme=DEFAULT_THEME.slug, focus=FOCUS, brief=True)
+
+        _run(planner_fakes, _scripted(brief_teach, final_message(FINAL_TEXT)))
+
+        system_text = planner_fakes.content_model.system_text(0)
+        assert BRIEF_WORD_RULE in system_text
+        assert LESSON_WORD_RULE not in system_text
+
+    def test_fallback_lesson_keeps_the_lesson_word_limit(self, planner_fakes: PlannerFakes) -> None:
+        _run(planner_fakes, _repeat_forever())
+
+        assert LESSON_WORD_RULE in planner_fakes.content_model.system_text(0)
+
+    def test_teach_sends_the_injected_word_limits(self, planner_fakes: PlannerFakes) -> None:
+        brief_teach = tool_call(TEACH, "call-brief", theme=DEFAULT_THEME.slug, focus=FOCUS, brief=True)
+        model = _scripted(_teach("call-teach"), brief_teach, final_message(FINAL_TEXT))
+        deps = replace(planner_deps(planner_fakes, model), word_limits=INJECTED_WORD_LIMITS)
+        graph = build_planner_graph(deps).compile(checkpointer=InMemorySaver(), store=planner_fakes.store)
+
+        _invoke(graph)
+
+        assert INJECTED_LESSON_RULE in planner_fakes.content_model.system_text(0)
+        assert INJECTED_BRIEF_RULE in planner_fakes.content_model.system_text(1)
 
 
 class TestTurnsOnOneThread:
