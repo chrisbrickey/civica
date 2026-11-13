@@ -8,6 +8,7 @@ from typing import Any
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import (
     AIMessage,
+    SystemMessage,
     ToolMessage,
 )
 from langchain_core.runnables import Runnable
@@ -18,6 +19,7 @@ from pydantic import PrivateAttr
 
 from civica.assessment.critic import CritiqueFn
 from civica.domain.themes import DROITS_ET_DEVOIRS
+from civica.explanation.prompts import EXPLANATION_PROMPTS
 from civica.graph.planner import PlannerDeps
 from civica.graph.trace import RetrievalGap, TraceStep
 from civica.memory.records import MistakeEpisode
@@ -143,6 +145,22 @@ class ControlledPlannerModel(FakePlannerModel):
         if call_index == self.fail_at_call:
             raise RuntimeError(PLANNER_FAILURE_TEXT)
         return super()._reply_for(call_index)
+
+
+class LessonOrQuizModel(FakeChatModelBase):
+    """Fake content model: `lesson` for explanation calls, `quiz_reply` for every other call."""
+
+    lesson: str
+    quiz_reply: str
+
+    def _reply_for(self, call_index: int) -> AIMessage:
+        system = self.received[call_index][0]
+        is_lesson = isinstance(system, SystemMessage) and system.content == EXPLANATION_PROMPTS.system
+        return AIMessage(content=self.lesson if is_lesson else self.quiz_reply)
+
+    @property
+    def _llm_type(self) -> str:
+        return "sample-lesson-or-quiz-model"
 
 
 @dataclass

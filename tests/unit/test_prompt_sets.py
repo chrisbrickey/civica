@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 # Editing a prompt means bumping its set's version and re-pinning the hash here, together.
 _PINS: list[tuple["DataclassInstance", str, str]] = [
     (QUIZ_PROMPTS, "quiz-v005", "49cfcdaafb74e7254e87175ace9bf427c9745c64cb6269a93f17861615eb2dbe"),
-    (PLANNER_PROMPTS, "planner-v006", "c69b575cb6693e419703f4224973f1993fc85fbe84ed96e79066bff06af959bb"),
+    (PLANNER_PROMPTS, "planner-v007", "b97ca7aa74de3c2521b6063e4d265192a6b0187e05d3c01208ffcb78ce14b433"),
     (EXPLANATION_PROMPTS, "explanation-v002", "de590047f994ac36b07f3fe51837addd190f5ae81d0b7a0cc2aa83fd8476a28e"),
 ]
 _PIN_IDS = ["quiz", "planner", "explanation"]
@@ -118,6 +118,10 @@ class TestRenderMethods:
         # A quiz with no count asked for has three questions; the check after a lesson stays at one.
         assert "n=3" in PLANNER_PROMPTS.system()
         assert "n=1" in PLANNER_PROMPTS.system()
+
+    def test_planner_system_skips_the_check_on_follow_ups(self) -> None:
+        (check_rule,) = [s for s in PLANNER_PROMPTS.system().split(". ") if "comprehension check" in s]
+        assert "follow-up" in check_rule
 
     def test_english_coach_prompts_carry_the_shared_writing_style(self) -> None:
         assert WRITING_STYLE in PLANNER_PROMPTS.system()

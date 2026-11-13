@@ -33,6 +33,7 @@ _STATE_TYPES: Final = (
     ("civica.domain.question", "QuestionKind"),
     ("civica.explanation.engine", "Explanation"),
     ("civica.graph.graph", "InputKind"),
+    ("civica.graph.planner", "PreviousExchange"),
     ("civica.graph.planner", "ToolCall"),
     ("civica.graph.trace", "HaltReason"),
 )
