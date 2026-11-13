@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from civica.domain.chunk import Chunk
 from civica.domain.themes import PRINCIPES_ET_VALEURS_DE_LA_REPUBLIQUE, Theme
 from civica.explanation.engine import MINIMUM_SIMILARITY, Explanation, explain
+from civica.explanation.prompts import WordLimits
 from civica.retrieval.content import ContentChunk
 from tests.support.llm import FakeChatModelBase
 
@@ -37,6 +38,13 @@ _BOUNDARY_PASSAGE = "sample passage exactly at the similarity floor."
 # the implementation actually contains this text, rather reusing the same constant.
 _GROUNDING_CONTRACT = "Use only the provided passages. Do not draw on outside knowledge."
 _ENGLISH_CONTRACT = "Respond in English, retaining key French vocabulary"
+
+_LESSON_WORD_RULE = "150 words"
+_BRIEF_WORD_RULE = "80 words"
+
+_INJECTED_WORD_LIMITS = WordLimits(lesson=42, brief=7)
+_INJECTED_LESSON_RULE = "42 words"
+_INJECTED_BRIEF_RULE = "7 words"
 
 _INSUFFICIENT_MATERIAL_SUBSTRING = "insufficient official material"
 
@@ -219,6 +227,54 @@ class TestSystemMessageContract:
         system_text = str(_system_message(chat_client.received[0]).content)
 
         assert _ENGLISH_CONTRACT in system_text
+
+
+class TestWordLimit:
+    """A lesson is held to 150 words and a brief answer to 80, unless other limits are injected."""
+
+    def test_lesson_sends_the_lesson_word_limit(
+        self,
+        retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
+    ) -> None:
+        explain(_SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client)
+
+        assert _LESSON_WORD_RULE in str(_system_message(chat_client.received[0]).content)
+
+    def test_brief_answer_sends_only_the_brief_word_limit(
+        self,
+        retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
+    ) -> None:
+        explain(
+            _SAMPLE_QUESTION, _SAMPLE_THEME, retriever=retriever, chat_client=chat_client, brief=True
+        )
+
+        system_text = str(_system_message(chat_client.received[0]).content)
+        assert _BRIEF_WORD_RULE in system_text
+        assert _LESSON_WORD_RULE not in system_text
+
+    def test_injected_word_limits_replace_the_defaults(
+        self,
+        retriever: _FakeRetriever,
+        chat_client: _FakeChatModel,
+    ) -> None:
+        for brief in (False, True):
+            explain(
+                _SAMPLE_QUESTION,
+                _SAMPLE_THEME,
+                retriever=retriever,
+                chat_client=chat_client,
+                brief=brief,
+                word_limits=_INJECTED_WORD_LIMITS,
+            )
+
+        lesson_text = str(_system_message(chat_client.received[0]).content)
+        brief_text = str(_system_message(chat_client.received[1]).content)
+        assert _INJECTED_LESSON_RULE in lesson_text
+        assert _INJECTED_BRIEF_RULE in brief_text
+        assert _LESSON_WORD_RULE not in lesson_text
+        assert _BRIEF_WORD_RULE not in brief_text
 
 
 class TestPromptInjectionBoundary:

@@ -1,10 +1,10 @@
-"""External contract test on a real agent using the planner's tools.
+"""External contract tests on a real agent using the planner's tools.
 
 Requires ANTHROPIC_API_KEY and network access.
-The planner model is real. Content generation, retrieval, and storage are faked.
 """
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -15,11 +15,15 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.memory import InMemoryStore
 
-from civica.domain.themes import SYSTEME_INSTITUTIONNEL_ET_POLITIQUE
+from civica.domain.chunk import Chunk
+from civica.domain.themes import SYSTEME_INSTITUTIONNEL_ET_POLITIQUE, Theme
+from civica.explanation.engine import MINIMUM_SIMILARITY
+from civica.explanation.prompts import WordLimits
 from civica.graph.graph import InputKind, build_graph
 from civica.graph.nodes import PlannerContext
 from civica.graph.planner import HaltReason, PlannerDeps, ToolCall, build_planner_tools
-from civica.llm.client import PLANNER_PROFILE, get_chat_model
+from civica.llm.client import EXPLANATION_PROFILE, PLANNER_PROFILE, get_chat_model
+from civica.retrieval.content import ContentChunk, SearchFn
 from tests.support.assessment import (
     FakeAnswerLogger,
     FakeChatModel,
@@ -28,7 +32,7 @@ from tests.support.assessment import (
     FakeRetriever,
     grouped_generation_reply,
 )
-from tests.support.planner import FakeTraceWriter, LessonOrQuizModel
+from tests.support.planner import FakeTraceWriter, LessonOrQuizModel, RealLessonFakeQuizModel
 from tests.support.users import USER_ID
 
 _LEARNER_MESSAGE = "Teach me about the rights and duties of citizens."
@@ -42,6 +46,27 @@ _FOLLOW_UP_LESSON = (
     "Le Parlement has two chambers, l'Assemblée nationale and le Sénat. Together they vote the laws."
 )
 _FOLLOW_UP_QUIZ = grouped_generation_reply((1, "Which two chambers make up le Parlement?"))
+
+_SIMPLER = "Explain that more simply."
+
+# Below production so short passages suffice. The model overshoots small limits by up to ~1.75x.
+_WORD_LIMITS = WordLimits(lesson=80, brief=40)
+_WORD_LIMIT_SLACK = 2.0
+
+# Without a binding limit the model writes over 200 words from these, well past either bound.
+_GROUNDED_PASSAGES = (
+    "Le Parlement comprend deux chambres : l'Assemblee nationale et le Senat. "
+    "Les deputes sont elus au suffrage universel direct pour cinq ans. Les senateurs sont elus "
+    "au suffrage universel indirect. Le Parlement vote les lois et controle le Gouvernement.",
+    "Le President de la Republique est elu au suffrage universel direct pour cinq ans. "
+    "Il nomme le Premier ministre, preside le Conseil des ministres, promulgue les lois "
+    "et peut dissoudre l'Assemblee nationale.",
+    "Le Gouvernement, dirige par le Premier ministre, determine et conduit la politique de la nation. "
+    "Il est responsable devant l'Assemblee nationale, qui peut le renverser par une motion de censure.",
+    "Les collectivites territoriales sont les communes, les departements et les regions. "
+    "Elles s'administrent librement par des conseils elus.",
+)
+_PASSAGE_SIMILARITY = MINIMUM_SIMILARITY + 0.4
 
 _QUIZ_REQUEST = "Quiz me with 3 questions on the principles and values of the Republic."
 _EXPLAIN_SECOND = "Explain question 2."
@@ -62,8 +87,27 @@ _Graph = CompiledStateGraph[Any, PlannerContext, Any, Any]  # type: ignore[expli
 _State = dict[str, Any]  # type: ignore[explicit-any]
 
 
-def _deps(content_model: BaseChatModel) -> PlannerDeps:
-    """A real planner model over faked content, retrieval, and storage."""
+def _grounded_passages(query: str, theme: Theme | None) -> list[ContentChunk]:
+    """Fake retriever: the same passages for any query, on the requested theme."""
+    passage_theme = theme or _FOLLOW_UP_THEME
+    return [
+        ContentChunk(
+            chunk=Chunk(
+                theme=passage_theme,
+                page_slug=f"sample-page-{index:03d}",
+                section_id=f"section-{index:03d}",
+                chunk_index=0,
+                content_hash=f"sample-hash-{index:03d}",
+                text=text,
+            ),
+            similarity=_PASSAGE_SIMILARITY,
+        )
+        for index, text in enumerate(_GROUNDED_PASSAGES)
+    ]
+
+
+def _deps(content_model: BaseChatModel, retriever: SearchFn | None = None) -> PlannerDeps:
+    """A real planner model over the given content model, with faked retrieval and storage."""
     return PlannerDeps(
         planner_model=get_chat_model(PLANNER_PROFILE),
         store=InMemoryStore(),
@@ -72,7 +116,7 @@ def _deps(content_model: BaseChatModel) -> PlannerDeps:
         rejection_store=FakeRejectionStore(),
         trace=FakeTraceWriter(),
         content_model=content_model,
-        retriever=FakeRetriever(),
+        retriever=retriever or FakeRetriever(),
     )
 
 
@@ -95,6 +139,20 @@ def _names(calls: list[ToolCall]) -> set[str]:
 
 def _args_text(calls: list[ToolCall]) -> str:
     return json.dumps([dict(call.args) for call in calls], ensure_ascii=False).lower()
+
+
+def _brief_teach_calls(calls: list[ToolCall]) -> list[ToolCall]:
+    return [call for call in calls if call.name == "teach" and call.args.get("brief") is True]
+
+
+def _lesson_words(state: _State) -> int:
+    """Word count of the lesson the learner saw in this turn."""
+    assert "teach" in _names(state["tool_calls"]), "the turn gave no lesson"
+    return len(state["lesson"].text.split())
+
+
+def _within(words: int, limit: int) -> bool:
+    return words <= limit * _WORD_LIMIT_SLACK
 
 
 def _mentions(text: str, keywords: tuple[str, ...]) -> bool:
@@ -150,3 +208,29 @@ def test_explain_question_2_is_about_the_second_displayed_question() -> None:
     assert _mentions(f"{second['reply'].lower()}\n{args}", _STEM_KEYWORDS[target])
     assert not any(_mentions(args, _STEM_KEYWORDS[other]) for other in others)
     assert _QUIZ_TOOL not in _names(second["tool_calls"])
+
+
+@pytest.mark.external
+def test_explain_that_more_simply_asks_teach_for_a_brief_answer() -> None:
+    content_model = LessonOrQuizModel(lesson=_FOLLOW_UP_LESSON, quiz_reply=_FOLLOW_UP_QUIZ)
+    graph = build_graph(_deps(content_model), checkpointer=InMemorySaver())
+
+    _turn(graph, _LESSON_REQUEST)
+    second = _turn(graph, _SIMPLER)
+
+    assert _brief_teach_calls(second["tool_calls"]), second["tool_calls"]
+
+
+@pytest.mark.external
+def test_real_lesson_and_simpler_answer_keep_to_the_word_limits() -> None:
+    content_model = RealLessonFakeQuizModel(
+        lesson_model=get_chat_model(EXPLANATION_PROFILE), quiz_reply=_FOLLOW_UP_QUIZ
+    )
+    deps = replace(_deps(content_model, _grounded_passages), word_limits=_WORD_LIMITS)
+    graph = build_graph(deps, checkpointer=InMemorySaver())
+
+    lesson_words = _lesson_words(_turn(graph, _LESSON_REQUEST))
+    simpler_words = _lesson_words(_turn(graph, _SIMPLER))
+
+    assert _within(lesson_words, _WORD_LIMITS.lesson), lesson_words
+    assert _within(simpler_words, _WORD_LIMITS.brief), simpler_words

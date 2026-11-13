@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.language_models import LanguageModelInput
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
+    BaseMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -18,8 +20,8 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import PrivateAttr
 
 from civica.assessment.critic import CritiqueFn
+from civica.assessment.prompts import QUIZ_PROMPTS
 from civica.domain.themes import DROITS_ET_DEVOIRS
-from civica.explanation.prompts import EXPLANATION_PROMPTS
 from civica.graph.planner import PlannerDeps
 from civica.graph.trace import RetrievalGap, TraceStep
 from civica.memory.records import MistakeEpisode
@@ -147,20 +149,45 @@ class ControlledPlannerModel(FakePlannerModel):
         return super()._reply_for(call_index)
 
 
+def _is_quiz_call(messages: list[BaseMessage]) -> bool:
+    """True for a quiz generator or critic call; every other content call is a lesson."""
+    system = messages[0]
+    quiz_systems = {QUIZ_PROMPTS.system, QUIZ_PROMPTS.critic_system}
+    return isinstance(system, SystemMessage) and system.content in quiz_systems
+
+
 class LessonOrQuizModel(FakeChatModelBase):
-    """Fake content model: `lesson` for explanation calls, `quiz_reply` for every other call."""
+    """Fake content model: `quiz_reply` for quiz calls, `lesson` for every other call."""
 
     lesson: str
     quiz_reply: str
 
     def _reply_for(self, call_index: int) -> AIMessage:
-        system = self.received[call_index][0]
-        is_lesson = isinstance(system, SystemMessage) and system.content == EXPLANATION_PROMPTS.system
-        return AIMessage(content=self.lesson if is_lesson else self.quiz_reply)
+        is_quiz = _is_quiz_call(self.received[call_index])
+        return AIMessage(content=self.quiz_reply if is_quiz else self.lesson)
 
     @property
     def _llm_type(self) -> str:
         return "sample-lesson-or-quiz-model"
+
+
+class RealLessonFakeQuizModel(FakeChatModelBase):
+    """Content model that sends lesson calls to `lesson_model` and answers quiz calls with `quiz_reply`."""
+
+    lesson_model: BaseChatModel
+    quiz_reply: str
+
+    def _reply_for(self, call_index: int) -> AIMessage:
+        messages = self.received[call_index]
+        if _is_quiz_call(messages):
+            return AIMessage(content=self.quiz_reply)
+        reply = self.lesson_model.invoke(messages)
+        assert isinstance(reply, AIMessage)
+        return reply
+
+    @property
+    def _llm_type(self) -> str:
+        return "sample-real-lesson-fake-quiz-model"
 
 
 @dataclass

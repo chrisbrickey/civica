@@ -28,6 +28,7 @@ from civica.assessment.store import (
 from civica.domain.themes import EXAM_QUESTION_COUNTS, Theme, ThemeSlug
 from civica.domain.user import UserId
 from civica.explanation.engine import MINIMUM_SIMILARITY, Explanation, explain
+from civica.explanation.prompts import DEFAULT_WORD_LIMITS, WordLimits
 from civica.graph.router import suggest_review_theme as review_heuristic
 from civica.graph.trace import (
     HaltReason as HaltReason,
@@ -100,6 +101,7 @@ class PlannerDeps:
     content_model: BaseChatModel | None = None
     retriever: SearchFn | None = None
     critic: CritiqueFn | None = None
+    word_limits: WordLimits = DEFAULT_WORD_LIMITS
 
 
 @dataclass(frozen=True)
@@ -165,12 +167,21 @@ def _format_quiz(quiz: Quiz) -> str:
     return "\n".join(lines)
 
 
-def teach_theme(deps: PlannerDeps, theme: Theme, focus: str) -> Explanation:
+def teach_theme(deps: PlannerDeps, theme: Theme, focus: str, brief: bool = False) -> Explanation:
     """Explain a focus; an ungrounded lesson is logged as a retrieval gap."""
     if deps.retriever is None:
-        lesson = explain(focus, theme, chat_client=deps.content_model)
+        lesson = explain(
+            focus, theme, chat_client=deps.content_model, brief=brief, word_limits=deps.word_limits
+        )
     else:
-        lesson = explain(focus, theme, retriever=deps.retriever, chat_client=deps.content_model)
+        lesson = explain(
+            focus,
+            theme,
+            retriever=deps.retriever,
+            chat_client=deps.content_model,
+            brief=brief,
+            word_limits=deps.word_limits,
+        )
     if not lesson.context_chunks:
         deps.trace.record_gap(RetrievalGap(theme=theme, query=focus))
     return lesson
@@ -212,9 +223,14 @@ def build_planner_tools(deps: PlannerDeps) -> list[BaseTool]:
             deps.trace.record_gap(RetrievalGap(theme=parsed, query=query))
         return "\n\n".join(c.chunk.text for c in chunks) or "No passages found."
 
-    def teach(theme: ThemeSlug, focus: str, runtime: ToolRuntime[PlannerContext]) -> Command[Any]:  # type: ignore[explicit-any]
-        """Explain a focus topic within a theme slug, grounded in the corpus."""
-        lesson = teach_theme(deps, Theme.from_slug(theme), focus)
+    def teach(  # type: ignore[explicit-any]
+        theme: ThemeSlug, focus: str, runtime: ToolRuntime[PlannerContext], brief: bool = False
+    ) -> Command[Any]:
+        """Explain a focus topic within a theme slug, grounded in the corpus.
+
+        Set brief=true for a short follow-up answer, not a full lesson.
+        """
+        lesson = teach_theme(deps, Theme.from_slug(theme), focus, brief)
         message = ToolMessage(content=lesson.text, tool_call_id=runtime.tool_call_id)
         return Command(update={"lesson": lesson, "messages": [message]})
 
