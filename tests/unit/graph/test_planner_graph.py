@@ -17,6 +17,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.memory import InMemoryStore
 
 from civica.assessment.critic import CritiqueFn
+from civica.assessment.grounding import QuizGrounding
 from civica.domain.themes import (
     EXAM_QUESTION_COUNTS,
     HISTOIRE_GEOGRAPHIE_ET_CULTURE,
@@ -112,6 +113,7 @@ HALT_REASON = "halt_reason"
 TOOL_CALLS = "tool_calls"
 LESSON = "lesson"
 QUIZ_QUESTIONS = "quiz_questions"
+QUIZ_GROUNDING = "quiz_grounding"
 
 # Tool names are the contract with the planner model.
 SUGGEST = "suggest_review_theme"
@@ -625,6 +627,17 @@ class TestGenerateQuiz:
         assert len(questions) == QUIZ_SIZE
         assert {q.theme for q in questions} == {DEFAULT_THEME}
 
+    def test_state_keeps_the_quizzes_grounding_record(
+        self, planner_fakes: PlannerFakes, model: FakePlannerModel
+    ) -> None:
+        state = _run(planner_fakes, model)
+
+        grounding = state[QUIZ_GROUNDING]
+        assert isinstance(grounding, QuizGrounding)
+        assert [entry.question_id for entry in grounding.questions] == [
+            q.question_id for q in state[QUIZ_QUESTIONS]
+        ]
+
     def test_tool_output_hides_the_correct_answer(
         self, planner_fakes: PlannerFakes, model: FakePlannerModel
     ) -> None:
@@ -1025,8 +1038,10 @@ class TestTurnReset:
 
         assert first[LESSON] is not None
         assert first[QUIZ_QUESTIONS]
+        assert first[QUIZ_GROUNDING] is not None
         assert second[LESSON] is None
         assert second[QUIZ_QUESTIONS] == []
+        assert second[QUIZ_GROUNDING] is None
         assert second[TOOL_CALLS] == []
 
 

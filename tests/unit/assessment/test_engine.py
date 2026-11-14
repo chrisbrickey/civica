@@ -5,11 +5,15 @@ No network calls. No DB spinup."""
 import json
 import socket
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 import pytest
 
+from civica.assessment.critic import CritiqueFn, Verdict
 from civica.assessment.engine import (
+    MINIMUM_SIMILARITY,
+    RETRIEVAL_K,
     QuestionGenerationError,
     generate_mock_exam,
     generate_quiz,
@@ -26,8 +30,10 @@ from civica.domain.themes import (
     Theme,
 )
 from civica.domain.source_ref import SourceRef
-from civica.retrieval.content import SearchFn
+from civica.retrieval.content import ContentChunk, SearchFn
 from tests.support.assessment import (
+    CRITIC_REJECTION_REASON,
+    DEFAULT_SECTION_COUNT,
     MAX_ITEMS_PER_CALL,
     OBJECTIVE_SECTION_IDS,
     OPTION_COUNT,
@@ -216,6 +222,7 @@ def _quiz(
     *,
     theme: Theme = _THEME,
     retriever: SearchFn | None = None,
+    critic: CritiqueFn | None = None,
 ) -> Quiz:
     """A quiz on `theme`; `retriever` overrides the fakes' default retriever."""
     return generate_quiz(
@@ -226,7 +233,7 @@ def _quiz(
         chat_client=fakes.chat_client,
         question_store=fakes.question_store,
         answer_logger=fakes.answer_logger,
-        critic=None,
+        critic=critic,
         rejection_store=fakes.rejection_store,
     )
 
@@ -1047,6 +1054,158 @@ class TestCriticRejectsEverything:
 
         assert not isinstance(raised.value, InsufficientMaterialError)
         assert fakes.question_store.saved_questions == []
+
+# ---------------------------------------------------------------------------
+# Tests: quiz grounding record
+# ---------------------------------------------------------------------------
+
+_TOP_SIMILARITY = 0.9
+_SIMILARITY_STEP = 0.01
+_REJECTED_RANK = 1 # the index of the section rejected by the critic tests
+
+class _ScoredRetriever:
+    """Wraps a fake retriever so every returned chunk has a distinct similarity falling with rank."""
+
+    def __init__(self, inner: SearchFn) -> None:
+        self.inner = inner
+        self.returned: list[ContentChunk] = []
+
+    def __call__(self, query: str, theme: Theme | None) -> list[ContentChunk]:
+        scored = [
+            chunk.model_copy(update={"similarity": _TOP_SIMILARITY - _SIMILARITY_STEP * (len(self.returned) + i)})
+            for i, chunk in enumerate(self.inner(query, theme))
+        ]
+        self.returned.extend(scored)
+        return scored
+
+    def section_chunks(self, source: SourceRef) -> list[ContentChunk]:
+        """The returned chunks of this section."""
+        return [c for c in self.returned if _source_of(c) == source]
+
+    def section_range(self, source: SourceRef) -> tuple[float, float]:
+        """(highest, lowest) similarity among the returned chunks of this section."""
+        scores = [c.similarity for c in self.section_chunks(source)]
+        return max(scores), min(scores)
+
+
+def _source_of(chunk: ContentChunk) -> SourceRef:
+    return SourceRef(page_slug=chunk.chunk.page_slug, section_id=chunk.chunk.section_id)
+
+
+@dataclass(frozen=True)
+class _UnevenSections:
+    """Fake SearchFn: the section ranked r keeps its first r + 1 chunks, so section sizes differ."""
+
+    inner: FakeRetriever
+
+    def __call__(self, query: str, theme: Theme | None) -> list[ContentChunk]:
+        assert theme is not None
+        ranks = {ref: rank for rank, ref in enumerate(self.inner.ranked_source_refs(theme))}
+        return [c for c in self.inner(query, theme) if c.chunk.chunk_index <= ranks[_source_of(c)]]
+
+
+@dataclass
+class _RejectSection:
+    """Fake CritiqueFn rejecting questions written from one section; `times` None rejects forever."""
+
+    section: SourceRef
+    times: int | None = None
+
+    def __call__(
+        self, theme: Theme, questions: Sequence[Question], groups: Sequence[Sequence[ContentChunk]]
+    ) -> list[Verdict]:
+        verdicts = []
+        for group in groups:
+            rejected = self._from_section(group) and (self.times is None or self.times > 0)
+            if rejected and self.times is not None:
+                self.times -= 1
+            verdicts.append(Verdict(passed=not rejected, reason=CRITIC_REJECTION_REASON if rejected else ""))
+        return verdicts
+
+    def _from_section(self, group: Sequence[ContentChunk]) -> bool:
+        return _source_of(group[0]) == self.section
+
+
+def _scored_retriever() -> _ScoredRetriever:
+    """Sections ranked 0, 1, 2 hold 1, 2 and 3 chunks."""
+    return _ScoredRetriever(_UnevenSections(FakeRetriever(chunks_per_section=DEFAULT_SECTION_COUNT)))
+
+
+def _rejected_section() -> SourceRef:
+    # Section identity depends only on theme and rank, not on how many chunks a section holds.
+    return FakeRetriever().ranked_source_refs(_THEME)[_REJECTED_RANK]
+
+
+def _assert_ranges_match_sources(quiz: Quiz, retriever: _ScoredRetriever) -> None:
+    """One entry per question, in question order, holding its section's range and chunk count."""
+    grounding = quiz.grounding
+    assert grounding is not None
+    assert [entry.question_id for entry in grounding.questions] == [q.question_id for q in quiz.questions]
+    for entry, question in zip(grounding.questions, quiz.questions, strict=True):
+        (source,) = question.sources
+        assert (entry.highest, entry.lowest) == pytest.approx(retriever.section_range(source))
+        assert entry.chunks == len(retriever.section_chunks(source))
+
+
+class TestQuizGrounding:
+    """generate_quiz reports how much was retrieved and how similar each question's passages were."""
+
+    def test_counts_every_chunk_retrieved_and_the_single_search_maximum(self, fakes: _Fakes) -> None:
+        retriever = FakeRetriever(chunks_per_section=_CHUNKS_PER_SECTION)
+
+        grounding = _quiz(fakes, retriever=retriever).grounding
+
+        assert grounding is not None
+        assert grounding.chunks_retrieved == len(retriever.chunks(_THEME))
+        assert grounding.max_chunks == RETRIEVAL_K
+        assert grounding.minimum_similarity == MINIMUM_SIMILARITY
+
+    def test_chunk_count_includes_course_objective_sections(self, fakes: _Fakes) -> None:
+        retriever = _objective_retriever(OBJECTIVE_SECTION_IDS[0], _MORE_SECTIONS_THAN_QUESTIONS)
+
+        grounding = _quiz(fakes, retriever=retriever).grounding
+
+        assert grounding is not None
+        assert grounding.chunks_retrieved == len(retriever.chunks(_THEME))
+
+    def test_sub_topic_theme_sums_every_search_and_scales_the_maximum(self, fakes: _Fakes) -> None:
+        retriever = FakeQueryAwareRetriever()
+
+        grounding = _quiz(fakes, theme=_HISTOIRE, retriever=retriever).grounding
+
+        assert grounding is not None
+        assert grounding.chunks_retrieved == _HISTOIRE_QUERY_COUNT * DEFAULT_SECTION_COUNT
+        assert grounding.max_chunks == RETRIEVAL_K * _HISTOIRE_QUERY_COUNT
+
+    def test_each_question_gets_its_sections_highest_and_lowest_similarity(self, fakes: _Fakes) -> None:
+        retriever = _scored_retriever()
+
+        _assert_ranges_match_sources(_quiz(fakes, retriever=retriever), retriever)
+
+    def test_each_question_gets_its_sections_chunk_count(self, fakes: _Fakes) -> None:
+        grounding = _quiz(fakes, retriever=_scored_retriever()).grounding
+
+        assert grounding is not None
+        assert [entry.chunks for entry in grounding.questions] == list(range(1, _QUIZ_SIZE + 1))
+
+    def test_question_the_critic_drops_has_no_entry(self, fakes: _Fakes) -> None:
+        retriever = _scored_retriever()
+        critic = _RejectSection(_rejected_section())
+
+        quiz = _quiz(fakes, retriever=retriever, critic=critic)
+
+        assert len(quiz.questions) == _QUIZ_SIZE - 1
+        _assert_ranges_match_sources(quiz, retriever)
+
+    def test_regenerated_question_keeps_its_sections_range(self, fakes: _Fakes) -> None:
+        retriever = _scored_retriever()
+        critic = _RejectSection(_rejected_section(), times=1)
+
+        quiz = _quiz(fakes, retriever=retriever, critic=critic)
+
+        assert len(quiz.questions) == _QUIZ_SIZE
+        _assert_ranges_match_sources(quiz, retriever)
+
 
 class TestInvalidModelReply:
     """A reply that cannot be turned into the requested questions raises and saves nothing."""

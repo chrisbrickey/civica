@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from civica.assessment.critic import CritiqueFn
 from civica.assessment.errors import InsufficientMaterialError, QuestionGenerationError
+from civica.assessment.grounding import QuestionSimilarity, QuizGrounding
 from civica.assessment.prompts import QUIZ_PROMPTS
 from civica.assessment.replies import strip_code_fence
 from civica.assessment.scoring import AnswerLogger, MockExam, Quiz
@@ -49,8 +50,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-_RETRIEVAL_K = 40
-_MINIMUM_SIMILARITY = 0.3
+RETRIEVAL_K = 40
+MINIMUM_SIMILARITY = 0.3
 
 # Regenerations allowed for questions the critic rejects, after the first generation.
 MAX_REFINE_ATTEMPTS = 2
@@ -88,7 +89,7 @@ _ITEMS_ADAPTER = TypeAdapter(list[_GeneratedItem])
 
 def _grounded_search(query: str, theme: Theme | None) -> list[ContentChunk]:
     """Default retriever: search() sized for a full exam theme, with a similarity floor."""
-    return search(query, theme, k=_RETRIEVAL_K, min_similarity=_MINIMUM_SIMILARITY)
+    return search(query, theme, k=RETRIEVAL_K, min_similarity=MINIMUM_SIMILARITY)
 
 
 def _section_key(chunk: ContentChunk) -> SectionKey:
@@ -230,8 +231,9 @@ def _refine(
     kinds: Sequence[QuestionKind],
     services: _Collaborators,
     critic: CritiqueFn,
-) -> tuple[Question, ...]:
-    """Critique, log rejections, and regenerate only failed items; drop any still failing."""
+) -> tuple[tuple[int, Question], ...]:
+    """Critique, log rejections, and regenerate only failed items; drop any still failing.
+    Returns (group position, question) pairs in group order."""
     accepted: dict[int, Question] = {}
     pending = list(range(len(questions)))
     for attempt in range(1, MAX_REFINE_ATTEMPTS + 2):
@@ -252,7 +254,17 @@ def _refine(
         questions = _generate_batch(
             theme, [groups[i] for i in pending], [kinds[i] for i in pending], services.client
         )
-    return tuple(accepted[position] for position in sorted(accepted))
+    return tuple((position, accepted[position]) for position in sorted(accepted))
+
+
+@dataclass(frozen=True)
+class _Themed:
+    """One theme's questions, each paired with the section group it came from, plus retrieval counts."""
+
+    questions: tuple[Question, ...]
+    groups: tuple[Sequence[ContentChunk], ...]
+    chunks_retrieved: int
+    searches: int
 
 
 def _generate_for_theme(
@@ -263,8 +275,21 @@ def _generate_for_theme(
     retriever: SearchFn,
     services: _Collaborators,
 ) -> tuple[Question, ...]:
+    return _generate_themed(theme, n, scenario_count, retriever=retriever, services=services).questions
+
+
+def _generate_themed(
+    theme: Theme,
+    n: int,
+    scenario_count: int,
+    *,
+    retriever: SearchFn,
+    services: _Collaborators,
+) -> _Themed:
     queries = _SUBTOPIC_QUERIES.get(theme, (theme.display_name_fr,))
-    ranked = _interleave([_sections(retriever(query, theme)) for query in queries])
+    results = [retriever(query, theme) for query in queries]
+    retrieved = sum(map(len, results))
+    ranked = _interleave([_sections(result) for result in results])
     chunks = [c for c in ranked if c.chunk.section_id not in _OBJECTIVE_SECTION_IDS]
     if not chunks:
         raise InsufficientMaterialError(theme, queries)
@@ -273,8 +298,32 @@ def _generate_for_theme(
     kinds = _kinds(n, scenario_count)
     questions = _generate_batch(theme, groups, kinds, services.client)
     if services.critic is None:
-        return tuple(questions)
-    return _refine(theme, questions, groups, kinds, services, services.critic)
+        pairs = tuple(enumerate(questions))
+    else:
+        pairs = _refine(theme, questions, groups, kinds, services, services.critic)
+    return _Themed(
+        questions=tuple(question for _, question in pairs),
+        groups=tuple(groups[position] for position, _ in pairs),
+        chunks_retrieved=retrieved,
+        searches=len(queries),
+    )
+
+
+def _grounding(themed: _Themed) -> QuizGrounding:
+    return QuizGrounding(
+        chunks_retrieved=themed.chunks_retrieved,
+        max_chunks=RETRIEVAL_K * themed.searches,
+        minimum_similarity=MINIMUM_SIMILARITY,
+        questions=tuple(
+            QuestionSimilarity(
+                question_id=question.question_id,
+                highest=max(c.similarity for c in group),
+                lowest=min(c.similarity for c in group),
+                chunks=len(group),
+            )
+            for question, group in zip(themed.questions, themed.groups, strict=True)
+        ),
+    )
 
 
 def _collaborators(
@@ -310,11 +359,14 @@ def generate_quiz(
     services = _collaborators(chat_client, critic, rejection_store)
     store = question_store if question_store is not None else PostgresQuestionStore()
 
-    questions = _generate_for_theme(theme, n, 0, retriever=retriever, services=services)
+    themed = _generate_themed(theme, n, 0, retriever=retriever, services=services)
+    questions = themed.questions
     if not questions:
         raise QuestionGenerationError(f"No question passed the critic for theme {theme.slug!r}")
     store.save(questions, QUIZ_PROMPTS.version)
-    return Quiz(user_id=user_id, questions=questions, answer_logger=answer_logger)
+    return Quiz(
+        user_id=user_id, questions=questions, answer_logger=answer_logger, grounding=_grounding(themed)
+    )
 
 
 def generate_mock_exam(

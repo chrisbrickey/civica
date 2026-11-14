@@ -29,6 +29,8 @@ _DictPool = psycopg_pool.ConnectionPool[psycopg.Connection[psycopg.rows.DictRow]
 
 # Our types held in checkpointed state. Reads refuse any other type, so add new state types here.
 _STATE_TYPES: Final = (
+    ("civica.assessment.grounding", "QuestionSimilarity"),
+    ("civica.assessment.grounding", "QuizGrounding"),
     ("civica.domain.question", "Question"),
     ("civica.domain.question", "QuestionKind"),
     ("civica.explanation.engine", "Explanation"),

@@ -2,15 +2,19 @@
 
 import logging
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from string import ascii_uppercase
 from typing import Final
 
+from langgraph.types import StateSnapshot
 from nicegui import run, ui
 
 from civica.domain.user import UserId
 from civica.graph.graph import GraphInput, InputKind
+from civica.graph.planner import read_learner_state
 from civica.ui.deps import AppDeps
+from civica.ui.dev_panel import DevPanel, TurnPanels, build_error_panel, build_turn_panels
 from civica.ui.intro import draw_intro_card
 from civica.ui.turn_view import (
     QuizItemView,
@@ -51,6 +55,8 @@ _FALLBACK_NOTE: Final = "This is a fallback lesson."
 _SOURCES_TITLE: Final = "Sources for this lesson"
 _UNTITLED_SECTION: Final = "Passage"
 _QUIZ_TITLE: Final = "Check your comprehension"
+_PANEL_TITLE: Final = "Developer panel"
+_UNKNOWN_ERROR: Final = "unknown"
 _COMPACT_PROPS: Final = "dense dense-toggle switch-toggle-side"
 _POLL_SECONDS: Final = 0.1
 _VERB_SECONDS: Final = 3.0
@@ -91,12 +97,40 @@ _LESSON_CSS: Final = """
 .civica-source-passage {
   white-space: pre-line; background: rgba(255, 255, 255, 0.45); border-radius: 4px; padding: 8px 10px; margin: 2px 0 6px;
 }
+/* Developer mode */
+.civica-dev-row { width: 100%; flex-wrap: wrap; align-items: flex-start; gap: 12px; }
+.civica-dev-panel {
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.4; gap: 2px;
+  flex: 1 1 22rem; min-width: 0; max-width: 100%; padding: 8px 10px; border: 1px solid rgba(128, 128, 128, 0.5); border-radius: 4px;
+}
+.civica-dev-panel .civica-dev-value { overflow-wrap: anywhere; padding-left: 12px; }
 """
 
 
 # ---------------------------------------------------------------------------
 # Drawing a turn
 # ---------------------------------------------------------------------------
+
+
+def _draw_dev_panel(panel: DevPanel) -> None:
+    """The panel's lines as small monospace text: each label, then its values."""
+    with ui.column().classes("civica-dev-panel").mark("dev-panel"):
+        ui.label(_PANEL_TITLE).classes("text-weight-bold")
+        for line in panel.lines:
+            ui.label(line.label)
+            for value in line.values:
+                ui.label(value).classes("civica-dev-value")
+
+
+@contextmanager
+def _beside(panel: DevPanel | None) -> Iterator[None]:
+    """Draw a response inside a row that also holds its panel; without a panel the response is drawn alone."""
+    if panel is None:
+        yield
+        return
+    with ui.row().classes("civica-dev-row").mark("dev-row"):
+        yield
+        _draw_dev_panel(panel)
 
 
 def _draw_sources(sources: tuple[SourceView, ...]) -> None:
@@ -166,18 +200,21 @@ def _draw_quiz(user_id: UserId, items: tuple[QuizItemView, ...], after_lesson: b
         _draw_quiz_card(user_id, items)
 
 
-def _draw_view(user_id: UserId, view: TurnView) -> None:
-    """A saved turn, in generation order: message, lesson, questions, reply, fallback note."""
+def _draw_view(user_id: UserId, view: TurnView, panels: TurnPanels | None) -> None:
+    """A saved turn, in generation order: message, lesson, questions, reply, fallback note. Panels only in developer mode."""
+    panels = panels or TurnPanels(None, None, None)
     ui.chat_message(view.learner_message, sent=True)
     if view.notice is not None:
         ui.label(view.notice).classes("text-negative")
         return
     if view.lesson_text is not None:
-        _draw_lesson(view, view.lesson_text)
+        with _beside(panels.lesson):
+            _draw_lesson(view, view.lesson_text)
     if view.quiz_items:
-        _draw_quiz(user_id, view.quiz_items, after_lesson=view.lesson_text is not None)
+        with _beside(panels.quiz):
+            _draw_quiz(user_id, view.quiz_items, after_lesson=view.lesson_text is not None)
     if view.reply:
-        with ui.chat_message():
+        with _beside(panels.reply), ui.chat_message().mark("coach-reply"):
             ui.markdown(view.reply)
     if view.is_fallback:
         ui.label(_FALLBACK_NOTE).classes("text-caption")
@@ -196,9 +233,10 @@ def _draw_running(turn: ActiveTurn) -> None:
     ui.timer(_VERB_SECONDS, next_verb)
 
 
-def _draw_failed(turn: ActiveTurn) -> None:
+def _draw_failed(turn: ActiveTurn, panel: DevPanel | None) -> None:
     ui.chat_message(turn.learner_message, sent=True)
-    ui.label(_FAILED_TEXT).classes("text-negative")
+    with _beside(panel):
+        ui.label(_FAILED_TEXT).classes("text-negative")
 
 
 def _draw_read_failed() -> None:
@@ -302,17 +340,29 @@ class _CoachPage:
             return
         # The turn has ended: let go of it and show the outcome.
         self._followed = None
-        if turn.snapshot().status is TurnStatus.FAILED:
-            self._show(lambda: _draw_failed(turn))
+        outcome = turn.snapshot()
+        if outcome.status is TurnStatus.FAILED:
+            panel = build_error_panel(outcome.error_type or _UNKNOWN_ERROR) if self._deps.dev_mode else None
+            self._show(lambda: _draw_failed(turn, panel))
         else:
             await self._show_saved_turn()
         self._set_locked(False)
+
+    async def _read_panels(self, snapshot: StateSnapshot | None) -> TurnPanels | None:  # type: ignore[explicit-any]
+        """The developer panels of the saved turn, with the learner state read now. None when not in developer mode."""
+        store = self._deps.graph.store
+        if not self._deps.dev_mode or snapshot is None or store is None:
+            return None
+        learner = await run.io_bound(read_learner_state, self._user_id, store)
+        # io_bound returns None only when the app is shutting down.
+        return build_turn_panels(snapshot, coach_config(self._user_id), learner) if learner is not None else None
 
     async def _show_saved_turn(self) -> str:
         """Draw the turn saved on the thread and say what was found."""
         try:
             snapshot = await run.io_bound(self._deps.graph.get_state, coach_config(self._user_id))
             view = build_turn_view(snapshot) if snapshot is not None else None
+            panels = await self._read_panels(snapshot) if view is not None and view.notice is None else None
         except Exception:
             logger.exception("coach_read_failed user_id=%s", self._user_id)
             self._show(_draw_read_failed)
@@ -320,7 +370,7 @@ class _CoachPage:
         if view is None:
             self._show(draw_intro_card)
             return "no_turn"
-        self._show(lambda: _draw_view(self._user_id, view))
+        self._show(lambda: _draw_view(self._user_id, view, panels))
         return "unfinished_turn" if view.notice is not None else "saved_turn"
 
 
