@@ -4,9 +4,9 @@ Tools read the user id from the injected runtime, so the model can never choose 
 The loop itself is extracted to civica.graph.nodes.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import ToolMessage
@@ -14,6 +14,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.prebuilt import ToolRuntime
 from langgraph.store.base import BaseStore
 from langgraph.types import Command
+from pydantic import BaseModel
 
 from civica.assessment.critic import CritiqueFn
 from civica.assessment.engine import generate_quiz
@@ -203,6 +204,21 @@ def _make_quiz(deps: PlannerDeps, user_id: UserId, theme: Theme, n: int) -> Quiz
     )
 
 
+# Args schemas by tool name. Pydantic builds each once per process, since signatures do not vary with deps.
+_ARGS_SCHEMAS: dict[str, type[BaseModel]] = {}
+
+
+def _planner_tool(  # type: ignore[explicit-any]
+    func: Callable[..., object], name: str | None = None
+) -> StructuredTool:
+    """Wrap func as a tool, reusing the cached args schema so pydantic does no per-call work."""
+    tool_name = name or func.__name__
+    if tool_name not in _ARGS_SCHEMAS:
+        built = StructuredTool.from_function(func, name=tool_name)
+        _ARGS_SCHEMAS[tool_name] = cast(type[BaseModel], built.args_schema)
+    return StructuredTool.from_function(func, name=tool_name, args_schema=_ARGS_SCHEMAS[tool_name])
+
+
 def build_planner_tools(deps: PlannerDeps) -> list[BaseTool]:
     """The planner's tools. User_id comes from the injected runtime, not from the model."""
 
@@ -261,10 +277,10 @@ def build_planner_tools(deps: PlannerDeps) -> list[BaseTool]:
         return f"Recorded {kind}."
 
     return [
-        StructuredTool.from_function(suggest_review_theme),
-        StructuredTool.from_function(read_state, name="read_learner_state"),
-        StructuredTool.from_function(retrieve_corpus),
-        StructuredTool.from_function(teach),
-        StructuredTool.from_function(generate_quiz_tool, name="generate_quiz"),
-        StructuredTool.from_function(record_outcome),
+        _planner_tool(suggest_review_theme),
+        _planner_tool(read_state, name="read_learner_state"),
+        _planner_tool(retrieve_corpus),
+        _planner_tool(teach),
+        _planner_tool(generate_quiz_tool, name="generate_quiz"),
+        _planner_tool(record_outcome),
     ]

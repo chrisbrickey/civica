@@ -223,15 +223,23 @@ Ask for a lesson or a quiz in your own words. **Teach me** and **Quiz me** butto
 
 **Run standard test suite (fast, no network calls)**
 ```
-  uv run pytest       # runs unit, integration, and type checking tests
+  uv run pytest       # excludes external tests
 ```
-_NB: Type checking runs as one pytest test (`tests/unit/test_typecheck.py`), so `uv run pytest` fails if `mypy --strict` reports any errors._
+- The suite runs across 8 workers parallel by default. Each test gets its own Postgres schema so that workers do not share state.
+- Type checking runs as one pytest test (`tests/unit/test_typecheck.py`), so `uv run pytest` fails if `mypy --strict` reports any errors.
+
+**Run one test serially (debugging, `pdb`)**
+```
+  uv run pytest -n0 tests/path/to/test_file.py::test_name
+```
+- Adding the flag `-n0` runs tests sequentially without parallelized workers.
 
 
 **Run external tests (network calls confirm API contract)**
 ```
-  uv run pytest -m external
+  uv run pytest -m external -n0
 ```
+- Pass `-n0` so external tests run serially and share one API rate limit and quota.
 
 
 **Run type checking only**
