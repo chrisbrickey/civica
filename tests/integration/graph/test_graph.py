@@ -142,11 +142,13 @@ def config() -> Generator[RunnableConfig, None, None]:
 def corpus(make_chunk_row: Callable[..., EmbeddedChunk]) -> Generator[None, None, None]:
     """One chunk for _THEME in the public corpus, removed with the question built from it."""
     apply_schema()
-    upsert_chunks([make_chunk_row(theme=_THEME, embedding=_VECTOR, content_hash=_CHUNK_HASH)])
+    # A hash per test, so parallel workers do not delete each other's chunk.
+    chunk_hash = f"{_CHUNK_HASH}-{uuid.uuid4().hex}"
+    upsert_chunks([make_chunk_row(theme=_THEME, embedding=_VECTOR, content_hash=chunk_hash)])
     try:
         yield
     finally:
-        _execute("DELETE FROM content_chunks WHERE content_hash = %s", _CHUNK_HASH)
+        _execute("DELETE FROM content_chunks WHERE content_hash = %s", chunk_hash)
         _execute("DELETE FROM generated_questions WHERE text = %s", _QUESTION_TEXT)
 
 
