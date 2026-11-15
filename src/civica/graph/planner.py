@@ -28,7 +28,7 @@ from civica.assessment.store import (
 )
 from civica.domain.themes import EXAM_QUESTION_COUNTS, Theme, ThemeSlug
 from civica.domain.user import UserId
-from civica.explanation.engine import MINIMUM_SIMILARITY, Explanation, explain
+from civica.explanation.engine import MINIMUM_SIMILARITY, RETRIEVAL_K, Explanation, explain
 from civica.explanation.prompts import DEFAULT_WORD_LIMITS, WordLimits
 from civica.graph.router import suggest_review_theme as review_heuristic
 from civica.graph.trace import (
@@ -148,7 +148,7 @@ def read_learner_state(user_id: UserId, store: BaseStore) -> LearnerState:
 
 def _corpus_search(query: str, theme: Theme | None) -> list[ContentChunk]:
     """Default retrieve_corpus search, with the same similarity floor as teach."""
-    return search(query, theme, min_similarity=MINIMUM_SIMILARITY)
+    return search(query, theme, k=RETRIEVAL_K, min_similarity=MINIMUM_SIMILARITY)
 
 
 def _format_state(state: LearnerState) -> str:
@@ -266,6 +266,7 @@ def build_planner_tools(deps: PlannerDeps) -> list[BaseTool]:
         else:
             output = _format_quiz(quiz)
             update["quiz_questions"] = list(quiz.questions)
+            update["quiz_grounding"] = quiz.grounding
         update["messages"] = [ToolMessage(content=output, tool_call_id=runtime.tool_call_id)]
         return Command(update=update)
 

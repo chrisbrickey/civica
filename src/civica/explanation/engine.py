@@ -22,6 +22,8 @@ _INSUFFICIENT_MATERIAL_MESSAGE = (
 
 # Floor below which a retrieved chunk is too dissimilar to the question to ground an answer.
 MINIMUM_SIMILARITY = 0.35
+# Most chunks the default retriever returns for one question.
+RETRIEVAL_K = 5
 
 
 class Explanation(BaseModel):  # type: ignore[explicit-any]
@@ -41,7 +43,7 @@ def _build_human_message(user_question: str, chunks: list[ContentChunk]) -> Huma
 
 def _grounded_search(query: str, theme: Theme | None) -> list[ContentChunk]:
     """Default retriever: search() with the similarity floor already applied."""
-    return search(query, theme, min_similarity=MINIMUM_SIMILARITY)
+    return search(query, theme, k=RETRIEVAL_K, min_similarity=MINIMUM_SIMILARITY)
 
 
 def explain(

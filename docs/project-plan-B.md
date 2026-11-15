@@ -1595,6 +1595,9 @@ The formula, for each response drawn:
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - In preparation for some adjustments to the plan for the developer panel:
+      - The chunk retrieval limit for a lesson is now an explicit `RETRIEVAL_K = 5` in the explanation engine. This supports a dev panel displaying the max chunks to compare to actual chunks for each response.
+      - A new `quiz_grounding` field holds retrieval counts and similarity scores for each question of a quiz so that we can display that data in the dev panel.
 
 ---
 
