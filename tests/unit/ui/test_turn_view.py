@@ -1,11 +1,9 @@
 """Unit tests for civica.ui.turn_view. Final states are built by hand: no graph, no database."""
 
 import json
-from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
-from langgraph.types import StateSnapshot
 
 from civica.domain.chunk import Chunk
 from civica.domain.question import Question
@@ -37,13 +35,17 @@ from tests.support.assessment import (
 from tests.support.planner import (
     DEFAULT_THEME,
 )
+from tests.support.turn_state import (
+    LEARNER_MESSAGE as _LEARNER_MESSAGE,
+    REPLY as _REPLY,
+    finished_state as _state,
+    snapshot_of as _snapshot,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_LEARNER_MESSAGE = "sample-learner-message-001"
-_REPLY = "sample-final-reply"
 _LESSON_TEXT = "sample-lesson-text"
 _INSUFFICIENT_TEXT = "sample-insufficient-material-text"
 _FALLBACK_TEXT = "sample-fallback-lesson-text"
@@ -79,33 +81,6 @@ def _chunks() -> tuple[ContentChunk, ...]:
 
 def _lesson(text: str = _LESSON_TEXT) -> Explanation:
     return Explanation(text=text, context_chunks=_chunks())
-
-
-def _state(**overrides: object) -> dict[str, object]:
-    """The graph's values at the end of a turn that only sent a reply."""
-    state: dict[str, object] = {
-        "kind": InputKind.MESSAGE,
-        "learner_message": _LEARNER_MESSAGE,
-        "reply": _REPLY,
-        "lesson": None,
-        "quiz_questions": [],
-        "tool_calls": [],
-        "halt_reason": HaltReason.FINAL_MESSAGE,
-    }
-    return state | overrides
-
-
-def _snapshot(values: Mapping[str, object], next_nodes: Sequence[str] = ()) -> StateSnapshot:
-    return StateSnapshot(
-        values=dict(values),
-        next=tuple(next_nodes),
-        config={},
-        metadata=None,
-        created_at=None,
-        parent_config=None,
-        tasks=(),
-        interrupts=(),
-    )
 
 
 def _view(**overrides: object) -> TurnView:

@@ -52,7 +52,7 @@ Logging is added in each step that adds a learner action, not in a separate step
 - **Setup:** `src/civica/ui/app.py` owns the logging setup. Every other module uses `logger = logging.getLogger(__name__)`.
 - **Format:** one line per event: a short event name, then `key=value` fields, so lines are easy to search. For example `turn_end user_id=... turn_id=... status=finished halt_reason=... duration=12.3s`. Common keys: `user_id=`, `turn_id=`, `via=`, `status=`, `halt_reason=`, `error_type=`, `duration=`, `question_id=`, `correct=`.
 - **Turn lines:** every line about a coach turn carries its `turn_id`, which matches its `planner_trace` rows. A line logged before the `turn_id` is known shows `turn_id=unknown`.
-- **No learner text:** log lines never carry the learner's message, lesson text, passages, quiz options, usernames, or passwords. Tool arguments often repeat the learner's words, so they belong in the developer panel (developer mode step), never in the logs. IDs, counts, statuses, and error types are fine.
+- **No learner text:** log lines never carry the learner's message, lesson text, passages, quiz options, usernames, or passwords. Tool arguments often repeat the learner's words, so they belong in `planner_trace`, never in the logs. IDs, counts, statuses, and error types are fine.
 - **Failures:** log an unexpected exception once, with `logger.exception`, where it is caught.
 - **Tests:** each step that adds a log line tests it, reading only the logger of the module that writes it (for example `civica.ui.pages.coach`). The no-learner-text test (UI logging foundations step) is extended whenever a step logs a new kind of event.
 - **Out of scope:** Do not log a line per graph node or tool call. Why? Tool calls are already persisted in `planner_trace` and that should be the single source of truth. Logging a line for every graph node would create a lot of noise in the logs.
@@ -1543,7 +1543,7 @@ The previous exchange must be saved when a turn completes.
 
 ---
 
-## Step 15: Developer mode with a panel beside each coach response
+## ✅ Step 15: Developer mode with a panel beside each coach response
 
 **Goal:** 
 - A developer launches the web app in developer mode and sees a panel explaining how that response was made. The panel is displayed beside each coach response: the lesson bubble, the quiz card, or the closing reply on a turn with no lesson or quiz. 
@@ -1595,9 +1595,14 @@ The formula, for each response drawn:
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
-    - In preparation for some adjustments to the plan for the developer panel:
-      - The chunk retrieval limit for a lesson is now an explicit `RETRIEVAL_K = 5` in the explanation engine. This supports a dev panel displaying the max chunks to compare to actual chunks for each response.
-      - A new `quiz_grounding` field holds retrieval counts and similarity scores for each question of a quiz so that we can display that data in the dev panel.
+    - A failed turn's panel shows only the error type, and it is gone after a reload because the error type is not saved.
+    - Tool calls show their names only (no arguments) in both **Code path** and **Tools called** sections. But arguments are still recorded in `planner_trace`.
+    - One **Tools called** line lists every tool call of the turn in order, replacing **Tool calls before it**. Every panel of a turn shows the same list, and the planner's hidden final message is not shown.
+    - The **Learner state** line lists at most five mistakes, then "+N more".
+    - The **Grounding** line shows similarity numbers, not page slugs or sections. 
+      - For a Lesson response, the panel displays: chunks retrieved (out of the max), each similarity in retrieval order, and the floor (minimum similarity allowed). To support this, the chunk retrieval limit for a lesson is now an explicit `RETRIEVAL_K = 5` in the explanation engine, so the panel can show the max.
+      - For a Quiz card, the panel displays: count of questions generated, count of sections cited, total count of chunks retrieved (out of the max), a similarity range per question, and the floor (minimum similarity allowed). In order to facilitate the above, I started passing `quiz_grounding` field to hold retrieval counts and similarity scores for each question. 
+    
 
 ---
 

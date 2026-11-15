@@ -15,9 +15,11 @@ from tests.support.assessment import SAMPLE_OPTIONS, FakeChatModel
 from tests.support.coach import (
     CALLS_PER_LESSON,
     COACH_LOGGER,
+    DEV_PANEL_TITLE,
     FAILED_TEXT,
     FALLBACK_TEXT,
     FINAL_CALL,
+    GENERATE_QUIZ,
     LESSON_TEXT,
     PROMPT,
     QUIZ_AFTER_LESSON_CALL,
@@ -33,6 +35,7 @@ from tests.support.coach import (
     coach_lines,
     labelled,
     held_turn_is_shown,
+    marked,
     press_enter,
     prompt_input,
     prompt_is_locked,
@@ -45,6 +48,7 @@ from tests.support.coach import (
     script_lesson,
     script_lesson_with_quiz,
     script_quiz_only,
+    script_reply,
     script_two_lessons,
     see,
     submit,
@@ -61,6 +65,8 @@ from tests.support.planner import (
 )
 from tests.support.ui import (
     CHAT_MARKER,
+    DEV_PANEL_MARKER,
+    DEV_ROW_MARKER,
     LESSON_MARKER,
     QUIZ_HOOK_MARKER,
     QUIZ_MARKER,
@@ -177,6 +183,42 @@ async def test_learner_sees_no_slugs_scores_or_tool_names(
     for passage in planner_fakes.retriever.chunks(DEFAULT_THEME):
         await signed_in_user.should_not_see(content=passage.chunk.page_slug)
         await signed_in_user.should_not_see(content=str(passage.similarity))
+
+
+async def test_learner_view_shows_no_developer_panel_and_keeps_the_sources(
+    signed_in_user: User,
+    planner_model: ControlledPlannerModel,
+    content_model: FakeChatModel,
+    turn_runner: TurnRunner,
+    learner_id: UserId,
+) -> None:
+    # Developer mode is off unless the app is launched with it, and there is no other switch.
+    script_lesson_with_quiz(planner_model, content_model)
+
+    submit(signed_in_user)
+    await _see_lesson(signed_in_user, turn_runner, learner_id)
+    await see(signed_in_user, _QUESTION_TEXT, _SOURCES_TITLE)
+
+    for marker in (DEV_ROW_MARKER, DEV_PANEL_MARKER):
+        assert marked(signed_in_user, marker) == []
+    for developer_text in (DEV_PANEL_TITLE, GENERATE_QUIZ, f"{learner_id}:coach"):
+        await signed_in_user.should_not_see(content=developer_text)
+
+
+async def test_learner_view_of_a_reply_only_turn_shows_the_reply_and_no_developer_panel(
+    signed_in_user: User,
+    planner_model: ControlledPlannerModel,
+    turn_runner: TurnRunner,
+    learner_id: UserId,
+) -> None:
+    script_reply(planner_model)
+
+    submit(signed_in_user)
+    wait_for_turn_end(turn_runner, learner_id)
+    await see(signed_in_user, REPLY)
+
+    assert marked(signed_in_user, DEV_PANEL_MARKER) == []
+    await signed_in_user.should_not_see(content=DEV_PANEL_TITLE)
 
 
 async def test_sources_sit_inside_the_lesson_as_one_closed_section_of_closed_passages(
@@ -590,6 +632,9 @@ async def test_graph_that_raises_partway_shows_the_error_logs_it_and_reopens_the
     await prompt_is_open(signed_in_user)
     assert _TRACEBACK_HEADER in caplog.text
     assert PLANNER_FAILURE_TEXT in caplog.text
+    # The error type is for the developer panel only.
+    assert marked(signed_in_user, DEV_PANEL_MARKER) == []
+    await signed_in_user.should_not_see(content=RuntimeError.__name__)
 
 
 async def test_reload_after_a_failed_turn_shows_the_notice_and_not_the_previous_lesson(
