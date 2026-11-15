@@ -12,9 +12,11 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
+from civica.assessment.grounding import QuizGrounding
 from civica.graph.graph import InputKind, build_graph
 from civica.graph.nodes import PLANNER_MODEL, PlannerContext
 from civica.graph.planner import SUMMARY_KEY, HaltReason, ToolCall
+from civica.memory.checkpointer import state_serializer
 from civica.memory.records import SessionSummary, TopicMastery
 from civica.memory.writer import get, list_records
 from tests.support.assessment import FakeRetriever
@@ -106,6 +108,20 @@ class TestRouting:
         ]
         assert state["lesson"] is not None
         assert state["quiz_questions"] == []
+        assert state["quiz_grounding"] is None
+
+    def test_quiz_turn_checkpoint_holds_the_quiz_grounding(self, planner_fakes: PlannerFakes) -> None:
+        model = _scripted(
+            tool_call(GENERATE_QUIZ, "call-quiz", theme=DEFAULT_THEME.slug, n=QUIZ_SIZE),
+            final_message(FINAL_TEXT),
+        )
+        graph = build_graph(planner_deps(planner_fakes, model), checkpointer=InMemorySaver(serde=state_serializer()))
+
+        _invoke(graph)
+
+        values = graph.get_state(CONFIG).values
+        assert isinstance(values["quiz_grounding"], QuizGrounding)
+        assert len(values["quiz_grounding"].questions) == len(values["quiz_questions"]) == QUIZ_SIZE
 
     def test_turn_result_is_readable_from_the_checkpoint_after_streaming(
         self, planner_fakes: PlannerFakes

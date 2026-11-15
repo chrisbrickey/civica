@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 
+from civica.assessment.grounding import QuizGrounding
 from civica.domain.question import Question
 from civica.explanation.engine import Explanation
 from civica.graph.nodes import PlannerContext, build_planner_graph
@@ -42,6 +43,7 @@ class GraphState(GraphInput):
     reply: str
     lesson: Explanation | None
     quiz_questions: list[Question]
+    quiz_grounding: QuizGrounding | None
     tool_calls: list[ToolCall]
     halt_reason: HaltReason | None
     previous_exchange: PreviousExchange | None

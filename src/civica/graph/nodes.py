@@ -24,6 +24,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from civica.assessment.grounding import QuizGrounding
 from civica.domain.question import Question
 from civica.explanation.engine import Explanation
 from civica.graph.planner import (
@@ -72,6 +73,7 @@ class PlannerState(PlannerInput):
     reply: str
     lesson: Annotated[Explanation | None, _last_wins]
     quiz_questions: Annotated[list[Question], _last_wins]
+    quiz_grounding: Annotated[QuizGrounding | None, _last_wins]
 
 
 NodeRuntime = Runtime[PlannerContext]
@@ -126,6 +128,7 @@ def start_turn(state: PlannerState) -> dict[str, object]:
         ],
         "model_calls": 0, "turn_id": str(uuid.uuid4()), "tool_calls": [],
         "halt_reason": None, "reply": "", "lesson": None, "quiz_questions": [],
+        "quiz_grounding": None,
     }
 
 

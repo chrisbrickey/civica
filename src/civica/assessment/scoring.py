@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from civica.assessment.grounding import QuizGrounding
 from civica.domain.question import Question
 from civica.domain.themes import Theme
 from civica.domain.user import UserId
@@ -65,6 +66,7 @@ class Quiz:
     user_id: UserId
     questions: tuple[Question, ...]
     answer_logger: AnswerLogger
+    grounding: QuizGrounding | None = None
 
     def score(self, answers: Sequence[int]) -> QuizResult:
         total, per_theme = _score_and_log(self.user_id, self.questions, answers, self.answer_logger)
