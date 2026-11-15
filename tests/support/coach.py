@@ -23,6 +23,8 @@ from tests.support.assessment import (
 from tests.support.logs import LogLine, lines_from
 from tests.support.planner import DEFAULT_THEME, ControlledPlannerModel, final_message, tool_call
 from tests.support.ui import (
+    DEV_PANEL_MARKER,
+    DEV_ROW_MARKER,
     PROMPT_INPUT_MARKER,
     QUIZ_CHECK_MARKER,
     QUIZ_MARKER,
@@ -43,6 +45,10 @@ READ_STATE: Final = "read_learner_state"
 TEACH: Final = "teach"
 GENERATE_QUIZ: Final = "generate_quiz"
 SUGGEST_THEME: Final = "suggest_review_theme"
+RETRIEVE_CORPUS: Final = "retrieve_corpus"
+FALLBACK_NODE: Final = "fallback_lesson"
+FINAL_MESSAGE_TEXT: Final = "final message"
+DEV_PANEL_TITLE: Final = "Developer panel"
 
 TEACH_ME_TEXT: Final = "Teach me"
 QUIZ_ME_TEXT: Final = "Quiz me"
@@ -292,3 +298,39 @@ def click_check(user: User, question: int) -> None:
 
 def click_marked(user: User, marker: str) -> None:
     UserInteraction(user, {the(user, marker)}, None).click()
+
+
+# ---------------------------------------------------------------------------
+# Developer panel
+# ---------------------------------------------------------------------------
+
+
+def dev_panels(user: User) -> list[ui.element]:
+    """Every developer panel on the page, in page order."""
+    return marked(user, DEV_PANEL_MARKER)
+
+
+async def see_dev_panel(user: User) -> None:
+    """Wait until the page shows a developer panel, allowing for a turn in flight."""
+    await user.should_see(marker=DEV_PANEL_MARKER, retries=TURN_RETRIES)
+
+
+def panel_text(panel: ui.element) -> str:
+    """Every piece of text inside one developer panel, in page order."""
+    return "\n".join(_texts(panel.descendants()))
+
+
+def panel_texts(user: User) -> list[str]:
+    """The text of each developer panel on the page, in page order."""
+    return [panel_text(panel) for panel in dev_panels(user)]
+
+
+def panel_beside(user: User, marker: str) -> ui.element:
+    """The one panel sharing a developer row with the response carrying `marker`."""
+    response = the(user, marker)
+    rows = [list(row.descendants()) for row in marked(user, DEV_ROW_MARKER)]
+    holding = [row for row in rows if response in row]
+    assert len(holding) == 1, f"expected one developer row holding {marker!r}, found {len(holding)}"
+    panels = [panel for panel in dev_panels(user) if panel in holding[0]]
+    assert len(panels) == 1, f"expected one panel beside {marker!r}, found {len(panels)}"
+    return panels[0]

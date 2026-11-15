@@ -1,4 +1,4 @@
-"""Shapes a thread's saved graph state into what the coach page shows. No NiceGUI import."""
+"""Shapes a thread's saved graph state into what the coach page shows."""
 
 import re
 from collections.abc import Iterable, Mapping
@@ -73,6 +73,11 @@ class TurnView:
     quiz_items: tuple[QuizItemView, ...]
     is_fallback: bool
     notice: str | None
+
+
+def is_fallback_reason(halt_reason: HaltReason) -> bool:
+    """Whether the turn ended on a fallback lesson instead of the planner's own."""
+    return halt_reason in _FALLBACK_REASONS
 
 
 def _unfinished(learner_message: str) -> TurnView:
@@ -155,7 +160,7 @@ def build_turn_view(snapshot: StateSnapshot) -> TurnView | None:  # type: ignore
     lesson = values["lesson"]
     reply = values["reply"]
     quiz_questions = values["quiz_questions"]
-    is_fallback = values["halt_reason"] in _FALLBACK_REASONS
+    is_fallback = is_fallback_reason(values["halt_reason"])
     chunks = lesson.context_chunks if lesson is not None else ()
     return TurnView(
         learner_message=values["learner_message"],

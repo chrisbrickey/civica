@@ -205,7 +205,8 @@ _Notes: DATABASE_URL and TEST_DATABASE_URL variables are already populated and c
 
 **1. Launch the web app locally**
 ```
-  uv run python -m civica.ui.app
+  uv run python -m civica.ui.app          
+  uv run python -m civica.ui.app --dev    # adds a developer panel beside each coach response with tool calls, etc.
 ```
 
 **2. Sign in**

@@ -62,10 +62,17 @@ def turn_runner(coach_graph: CoachGraph) -> TurnRunner:
 
 
 @pytest.fixture()
+def dev_mode() -> bool:
+    """Whether the app under test runs in developer mode. Modules override it to turn the panels on."""
+    return False
+
+
+@pytest.fixture()
 async def ui_user(
     db_schema: psycopg.Connection[psycopg.rows.TupleRow],
     coach_graph: CoachGraph,
     turn_runner: TurnRunner,
+    dev_mode: bool,
 ) -> AsyncGenerator[User, None]:
     """A simulated browser on the app, wired to the per-test schema connection."""
     async with user_simulation() as user:
@@ -75,6 +82,7 @@ async def ui_user(
                 turn_runner=turn_runner,
                 conn=db_schema,
                 bcrypt_rounds=TEST_BCRYPT_ROUNDS,
+                dev_mode=dev_mode,
             )
         )
         yield user

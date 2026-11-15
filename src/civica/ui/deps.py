@@ -18,9 +18,10 @@ class AppDeps:
     turn_runner: TurnRunner
     conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None
     bcrypt_rounds: int = BCRYPT_ROUNDS
+    dev_mode: bool = False
 
 
-def default_app_deps() -> AppDeps:
+def default_app_deps(dev_mode: bool = False) -> AppDeps:
     """Production wiring. Build it once per process: it holds the chat models and the pool."""
     graph = build_graph()
-    return AppDeps(graph=graph, turn_runner=TurnRunner(graph))
+    return AppDeps(graph=graph, turn_runner=TurnRunner(graph), dev_mode=dev_mode)
