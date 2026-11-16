@@ -21,7 +21,13 @@ from tests.support.assessment import (
     make_question,
 )
 from tests.support.logs import LogLine, lines_from
-from tests.support.planner import DEFAULT_THEME, ControlledPlannerModel, final_message, tool_call
+from tests.support.planner import (
+    DEFAULT_THEME,
+    ControlledPlannerModel,
+    final_message,
+    parallel_tool_calls,
+    tool_call,
+)
 from tests.support.ui import (
     DEV_PANEL_MARKER,
     DEV_ROW_MARKER,
@@ -96,6 +102,18 @@ def script_lesson_with_quiz(
     planner_model.script = (
         tool_call(TEACH, "call-teach", theme=DEFAULT_THEME.slug, focus=FOCUS),
         tool_call(GENERATE_QUIZ, "call-quiz", theme=DEFAULT_THEME.slug, n=question_count),
+        final_message(REPLY),
+    )
+    content_model.replies = (LESSON_TEXT,)
+
+
+def script_parallel_lesson_with_quiz(planner_model: ControlledPlannerModel, content_model: FakeChatModel) -> None:
+    """A lesson and a one-question quiz requested in the same planner step."""
+    planner_model.script = (
+        parallel_tool_calls(
+            tool_call(TEACH, "call-teach", theme=DEFAULT_THEME.slug, focus=FOCUS),
+            tool_call(GENERATE_QUIZ, "call-quiz", theme=DEFAULT_THEME.slug, n=1),
+        ),
         final_message(REPLY),
     )
     content_model.replies = (LESSON_TEXT,)
