@@ -3,7 +3,7 @@
 import logging
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -70,15 +70,18 @@ class ActiveTurn:
         """Block until the turn ends. False if it is still running at the timeout."""
         return self._ended.wait(timeout)
 
-    def apply(self, node: str, values: Mapping[str, object] | None) -> None:
+    def apply(self, node: str, values: Mapping[str, object] | Sequence[Mapping[str, object]] | None) -> None:
         """Fold one node update into the turn's progress."""
         if values is None:
             return
+        # A node that wrote several updates in one step, such as parallel tool calls, reports them as a list.
+        updates = [values] if isinstance(values, Mapping) else values
         with self._lock:
-            if node == START_TURN:
-                self._turn_id = str(values["turn_id"])
-            if values.get("halt_reason") is not None:
-                self._halt_reason = str(values["halt_reason"])
+            for update in updates:
+                if node == START_TURN:
+                    self._turn_id = str(update["turn_id"])
+                if update.get("halt_reason") is not None:
+                    self._halt_reason = str(update["halt_reason"])
 
     def end(self, status: TurnStatus, error_type: str | None = None) -> None:
         with self._lock:

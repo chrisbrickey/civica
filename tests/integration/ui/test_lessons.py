@@ -47,6 +47,7 @@ from tests.support.coach import (
     script_fallback,
     script_lesson,
     script_lesson_with_quiz,
+    script_parallel_lesson_with_quiz,
     script_quiz_only,
     script_reply,
     script_two_lessons,
@@ -420,6 +421,23 @@ async def test_quiz_after_a_lesson_hangs_off_it_by_a_hooked_line(
     await see(signed_in_user, _QUESTION_TEXT)
 
     await signed_in_user.should_see(marker=QUIZ_HOOK_MARKER)
+
+
+async def test_lesson_and_quiz_requested_in_one_planner_step_are_both_shown(
+    signed_in_user: User,
+    planner_model: ControlledPlannerModel,
+    content_model: FakeChatModel,
+    turn_runner: TurnRunner,
+    learner_id: UserId,
+) -> None:
+    script_parallel_lesson_with_quiz(planner_model, content_model)
+
+    submit(signed_in_user)
+    wait_for_turn_end(turn_runner, learner_id)
+
+    await see(signed_in_user, LESSON_TEXT)
+    assert the(signed_in_user, QUIZ_MARKER) is not None
+    await signed_in_user.should_not_see(FAILED_TEXT)
 
 
 async def test_quiz_only_turn_draws_the_same_card_with_no_hooked_line(

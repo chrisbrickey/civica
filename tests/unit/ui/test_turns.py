@@ -43,7 +43,9 @@ _WAIT_TIMEOUT_SECONDS: Final = 5.0
 _SHORT_TIMEOUT_SECONDS: Final = 0.01
 
 _Namespace = tuple[str, ...]
-_StreamEvent = tuple[_Namespace, str, dict[str, dict[str, object] | None]]
+# A node that wrote several updates in one step, such as parallel tool calls, reports them as a list.
+_NodeUpdate = dict[str, object] | list[dict[str, object]] | None
+_StreamEvent = tuple[_Namespace, str, dict[str, _NodeUpdate]]
 
 
 class _Pause:
@@ -53,7 +55,7 @@ class _Pause:
 _PAUSE: Final = _Pause()
 
 
-def _update(node: str, values: dict[str, object] | None, namespace: _Namespace = _SUBGRAPH) -> _StreamEvent:
+def _update(node: str, values: _NodeUpdate, namespace: _Namespace = _SUBGRAPH) -> _StreamEvent:
     """One `updates` item as graph.stream emits it with subgraphs=True and a stream_mode list."""
     return namespace, "updates", {node: values}
 
@@ -185,6 +187,24 @@ def test_turn_that_streams_to_its_end_finishes_with_its_turn_id_and_halt_reason(
     assert snapshot.error_type is None
     assert snapshot.turn_id == _TURN_ID
     assert snapshot.halt_reason == HaltReason.FINAL_MESSAGE
+
+
+def test_turn_whose_tools_ran_in_parallel_finishes(make_graph: _GraphFactory) -> None:
+    parallel_tools = _update(PLANNER_TOOLS, [{"lesson": None}, {"messages": []}, {"messages": []}])
+
+    turn = _run_to_end(TurnRunner(make_graph(_START, _model_update(_READ_CALL, _TEACH_CALL), parallel_tools, _FINAL_MESSAGE)))
+
+    snapshot = turn.snapshot()
+    assert snapshot.status is TurnStatus.FINISHED
+    assert snapshot.halt_reason == HaltReason.FINAL_MESSAGE
+
+
+def test_halt_reason_set_by_one_of_several_parallel_tools_is_kept(make_graph: _GraphFactory) -> None:
+    parallel_tools = _update(PLANNER_TOOLS, [{"messages": []}, {"halt_reason": HaltReason.FORBIDDEN_WRITE}])
+
+    turn = _run_to_end(TurnRunner(make_graph(_START, parallel_tools)))
+
+    assert turn.snapshot().halt_reason == HaltReason.FORBIDDEN_WRITE
 
 
 def test_turn_keeps_the_learner_message(make_graph: _GraphFactory) -> None:
