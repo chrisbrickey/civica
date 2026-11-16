@@ -1651,6 +1651,12 @@ The formula, for each response drawn:
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Added a separate section in the dev panel for Token Counts and placed the total as the first line in that section.
+    - Two types were added to _STATE_TYPES (TurnUsage and its per-caller TokenCounts), not one.
+    - coach.py did not require a change because the panel is built entirely in dev_panel.py.
+    - The critic counts under quiz, because it uses QUIZ_PROFILE. Splitting it out would need its own profile.
+    - A model call with no caller tag is counted under untagged rather than dropped.
+    - Have not yet performed the optimization check-in activity.
 
 ---
 

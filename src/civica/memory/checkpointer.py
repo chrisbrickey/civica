@@ -38,6 +38,8 @@ _STATE_TYPES: Final = (
     ("civica.graph.planner", "PreviousExchange"),
     ("civica.graph.planner", "ToolCall"),
     ("civica.graph.trace", "HaltReason"),
+    ("civica.llm.usage", "TokenCounts"),
+    ("civica.llm.usage", "TurnUsage"),
 )
 
 

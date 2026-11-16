@@ -8,9 +8,10 @@ from civica.explanation.engine import RETRIEVAL_K
 from civica.graph.planner import PROFILE_KEY
 from civica.memory.records import LearnerProfile
 from civica.memory.writer import put
-from civica.ui.dev_panel import GROUNDING, LEARNER_STATE, CODE_PATH, TOOLS_CALLED, TURN
+from civica.ui.dev_panel import GROUNDING, LEARNER_STATE, CODE_PATH, TOKEN_COUNTS, TOOLS_CALLED, TURN
 from civica.ui.turns import TurnRunner, coach_config
 from tests.support.assessment import FakeChatModel
+from tests.support.llm import CONTENT_USAGE, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE
 from tests.support.coach import (
     COACH_LOGGER,
     DEV_PANEL_TITLE,
@@ -54,12 +55,13 @@ from tests.support.planner import (
     PlannerFakes,
 )
 from tests.support.ui import DEV_ROW_MARKER, LESSON_MARKER, QUIZ_MARKER, REPLY_MARKER
+from tests.support.usage import counts_of, sum_counts, token_line
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_LINE_LABELS = (CODE_PATH, TOOLS_CALLED, GROUNDING, TURN, LEARNER_STATE)
+_LINE_LABELS = (CODE_PATH, TOOLS_CALLED, GROUNDING, TURN, TOKEN_COUNTS, LEARNER_STATE)
 _LESSON_QUESTION = question_texts(QUIZ_AFTER_LESSON_CALL, 1)[0]
 _QUIZ_QUESTION = question_texts(QUIZ_ONLY_CALL, 1)[0]
 _OTHER_GOAL = "sample-goal-set-after-the-turn"
@@ -236,6 +238,38 @@ async def test_learner_state_is_read_when_the_panel_is_drawn(
     await signed_in_user.open("/")
 
     await see(signed_in_user, f"goal={_OTHER_GOAL}")
+
+
+async def test_token_counts_show_the_total_and_each_caller_and_they_survive_a_reload(
+    signed_in_user: User,
+    planner_model: ControlledPlannerModel,
+    content_model: FakeChatModel,
+    turn_runner: TurnRunner,
+    learner_id: UserId,
+) -> None:
+    script_lesson(planner_model, content_model)
+
+    await _finish_turn(signed_in_user, turn_runner, learner_id, LESSON_TEXT)
+
+    assert content_model.invocation_count == 1
+    planner = counts_of(PLANNER_USAGE, len(planner_model.script))
+    explanation = counts_of(CONTENT_USAGE)
+    token_lines = (
+        token_line("total", sum_counts(planner, explanation)),
+        token_line(EXPLANATION_TAG, explanation),
+        token_line(PLANNER_TAG, planner),
+    )
+    shown = panel_text(panel_beside(signed_in_user, LESSON_MARKER))
+    assert TOKEN_COUNTS in shown
+    for line in token_lines:
+        assert line in shown
+
+    await signed_in_user.open("/")
+
+    await see_dev_panel(signed_in_user)
+    reloaded = panel_text(panel_beside(signed_in_user, LESSON_MARKER))
+    for line in token_lines:
+        assert line in reloaded
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from civica.explanation.engine import RETRIEVAL_K as LESSON_RETRIEVAL_K
 from civica.explanation.engine import Explanation
 from civica.graph.graph import PLANNER
 from civica.graph.planner import HaltReason, LearnerState, ToolCall
+from civica.llm.usage import TokenCounts, TurnUsage
 from civica.memory.records import MistakeEpisode
 from civica.retrieval.content import ContentChunk
 from civica.ui.dev_panel import (
@@ -26,6 +27,7 @@ from civica.ui.dev_panel import (
     NO_PASSAGES_TEXT,
     NONE_TEXT,
     CODE_PATH,
+    TOKEN_COUNTS,
     TOOLS_CALLED,
     TURN,
     DevPanel,
@@ -40,6 +42,7 @@ from tests.support.coach import (
     FINAL_MESSAGE_TEXT,
     FOCUS,
 )
+from tests.support.llm import CONTENT_USAGE, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE, QUIZ_TAG
 from tests.support.memory import HALF_MASTERY
 from tests.support.planner import (
     DEFAULT_THEME,
@@ -51,6 +54,7 @@ from tests.support.planner import (
     TEACH,
 )
 from tests.support.turn_state import REPLY, finished_state, snapshot_of
+from tests.support.usage import counts_of, token_line, turn_usage
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -85,10 +89,19 @@ _SINGLE_SIMILARITY_TEXT = "0.58"
 _MANY_CHUNKS = 3
 _RANGE_TEXT = f"{_RANGE_HIGH_TEXT}-{_RANGE_LOW_TEXT}"
 
-_LABELS = (CODE_PATH, TOOLS_CALLED, GROUNDING, TURN, LEARNER_STATE)
+_LABELS = (CODE_PATH, TOOLS_CALLED, GROUNDING, TURN, TOKEN_COUNTS, LEARNER_STATE)
 _NONE = (NONE_TEXT,)
 _FALLBACK_REASONS = (HaltReason.MAX_STEPS, HaltReason.FORBIDDEN_WRITE)
 _STEPS_BEFORE_FALLBACK = 5
+
+# Values the Turn line shows: halt_reason, fallback, thread_id.
+_TURN_VALUE_COUNT = 3
+_TOTAL = "total"
+_PLANNER_COUNTS = counts_of(PLANNER_USAGE, calls=3)
+_EXPLANATION_COUNTS = counts_of(CONTENT_USAGE)
+_QUIZ_COUNTS = counts_of(CONTENT_USAGE, calls=2)
+# Deliberately not in name order, so a panel that keeps the saved order is caught.
+_TOKEN_USAGE = turn_usage({QUIZ_TAG: _QUIZ_COUNTS, PLANNER_TAG: _PLANNER_COUNTS, EXPLANATION_TAG: _EXPLANATION_COUNTS})
 
 _NO_LEARNER_STATE = LearnerState(mastery={}, mistakes=(), goal=None, last_session=None)
 
@@ -189,6 +202,10 @@ def _value(panel: DevPanel | None, label: str) -> str:
     values = _values(panel, label)
     assert len(values) == 1, f"expected one {label!r} value, found {values}"
     return values[0]
+
+
+def _token_values(panel: DevPanel | None) -> tuple[str, ...]:
+    return _values(panel, TOKEN_COUNTS)
 
 
 def _range_line(panel: DevPanel | None, number: int) -> str:
@@ -487,7 +504,7 @@ def test_turn_line_shows_why_the_turn_ended_the_fallback_flag_and_the_thread_id(
 ) -> None:
     lesson = _panels(turn).lesson
 
-    assert len(_values(lesson, TURN)) == 3
+    assert len(_values(lesson, TURN)) == _TURN_VALUE_COUNT
     assert halt_reason.value in _keyed(lesson, TURN, "halt_reason")
     assert _keyed(lesson, TURN, "fallback") == f"fallback={fallback}"
     assert _THREAD_ID in _keyed(lesson, TURN, "thread_id")
@@ -508,12 +525,48 @@ def test_halt_reason_saved_as_a_plain_string_builds_the_same_panels(
     assert as_saved == _panels(turn | {"halt_reason": halt_reason})
 
 
+def test_token_counts_show_the_total_then_each_caller_in_name_order() -> None:
+    lesson = _panels(_lesson_turn() | {"token_usage": _TOKEN_USAGE}).lesson
+
+    assert _token_values(lesson) == (
+        token_line(_TOTAL, _TOKEN_USAGE.total),
+        token_line(EXPLANATION_TAG, _EXPLANATION_COUNTS),
+        token_line(PLANNER_TAG, _PLANNER_COUNTS),
+        token_line(QUIZ_TAG, _QUIZ_COUNTS),
+    )
+
+
+def test_turn_line_shows_no_token_counts() -> None:
+    lesson = _panels(_lesson_turn() | {"token_usage": _TOKEN_USAGE}).lesson
+
+    keys = [value.partition("=")[0] for value in _values(lesson, TURN)]
+    assert keys == ["halt_reason", "fallback", "thread_id"]
+
+
+def test_turn_that_counted_no_model_call_shows_a_zero_total() -> None:
+    usage = TurnUsage(by_caller={}, total=TokenCounts())
+
+    reply = _panels(_reply_turn() | {"token_usage": usage}).reply
+
+    assert _token_values(reply) == (token_line(_TOTAL, TokenCounts()),)
+
+
+@pytest.mark.parametrize(
+    "saved", [pytest.param({}, id="key-missing"), pytest.param({"token_usage": None}, id="none")]
+)
+def test_turn_saved_without_token_usage_shows_none(saved: dict[str, object]) -> None:
+    # A turn saved before tokens were counted has no key; a turn run without a tally saves None.
+    lesson = _panels(_lesson_turn() | saved).lesson
+
+    assert _token_values(lesson) == _NONE
+
+
 def test_every_panel_of_a_turn_shows_the_same_tools_turn_and_learner_state() -> None:
     learner = LearnerState(mastery={DEFAULT_THEME: HALF_MASTERY}, mistakes=(), goal=GOAL, last_session=None)
 
-    panels = _panels(_lesson_and_quiz_turn(), learner)
+    panels = _panels(_lesson_and_quiz_turn() | {"token_usage": _TOKEN_USAGE}, learner)
 
-    for label in (TOOLS_CALLED, TURN, LEARNER_STATE):
+    for label in (TOOLS_CALLED, TURN, TOKEN_COUNTS, LEARNER_STATE):
         assert _values(panels.lesson, label) == _values(panels.quiz, label)
 
 

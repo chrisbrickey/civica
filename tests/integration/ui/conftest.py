@@ -20,6 +20,7 @@ from civica.ui.pages import register_pages
 from civica.ui.turns import CoachGraph, TurnRunner
 from civica.users.service import register
 from tests.support.assessment import FakeChatModel
+from tests.support.llm import CONTENT_USAGE, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE
 from tests.support.planner import (
     ControlledPlannerModel,
     PlannerFakes,
@@ -32,16 +33,22 @@ from tests.support.users import TEST_BCRYPT_ROUNDS
 
 @pytest.fixture()
 def planner_model() -> Generator[ControlledPlannerModel, None, None]:
-    """The planner of the app under test. Tests set `script` before submitting a prompt."""
-    model = ControlledPlannerModel()
+    """The planner of the app under test. Tests set `script` before submitting a prompt.
+
+    Tagged as the planner caller, and every reply reports PLANNER_USAGE.
+    """
+    model = ControlledPlannerModel(tags=[PLANNER_TAG], usage=PLANNER_USAGE)
     yield model
     model.release()
 
 
 @pytest.fixture()
 def content_model() -> FakeChatModel:
-    """Writes lessons and questions. Tests set `replies` to script the lesson text."""
-    return FakeChatModel()
+    """Writes lessons and questions. Tests set `replies` to script the lesson text.
+
+    Tagged as the explanation caller, and every reply reports CONTENT_USAGE.
+    """
+    return FakeChatModel(tags=[EXPLANATION_TAG], usage=CONTENT_USAGE)
 
 
 @pytest.fixture()

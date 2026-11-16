@@ -15,6 +15,7 @@ from langgraph.types import StreamMode
 from civica.domain.user import UserId
 from civica.graph.graph import GraphInput, GraphState
 from civica.graph.nodes import START_TURN, PlannerContext
+from civica.llm.usage import UsageTally
 
 logger = logging.getLogger(__name__)
 
@@ -116,9 +117,11 @@ class TurnRunner:
     def _run(self, user_id: UserId, graph_input: GraphInput, turn: ActiveTurn) -> None:
         started = time.monotonic()
         status, error_type = TurnStatus.FINISHED, None
+        tally = UsageTally()
+        config: RunnableConfig = {**coach_config(user_id), "callbacks": [tally]}
         try:
             for _namespace, _mode, update in self._graph.stream(
-                graph_input, coach_config(user_id), context=PlannerContext(user_id=user_id),
+                graph_input, config, context=PlannerContext(user_id=user_id, usage=tally),
                 stream_mode=_STREAM_MODES, subgraphs=True,
             ):
                 assert isinstance(update, dict)
@@ -135,7 +138,7 @@ class TurnRunner:
         finally:
             try:
                 # Logged before turn.end, so a waiter woken by ActiveTurn.wait always sees this line.
-                self._log_end(user_id, turn, status, error_type, time.monotonic() - started)
+                self._log_end(user_id, turn, status, error_type, time.monotonic() - started, tally)
             finally:
                 # Under the runner lock, so the user is freed in the same step the final status is set.
                 with self._lock:
@@ -144,11 +147,13 @@ class TurnRunner:
 
     @staticmethod
     def _log_end(
-        user_id: UserId, turn: ActiveTurn, status: TurnStatus, error_type: str | None, seconds: float
+        user_id: UserId, turn: ActiveTurn, status: TurnStatus, error_type: str | None, seconds: float,
+        tally: UsageTally,
     ) -> None:
         snapshot = turn.snapshot()
-        line = "turn_end user_id=%s turn_id=%s status=%s halt_reason=%s duration=%.1fs" % (
+        line = "turn_end user_id=%s turn_id=%s status=%s halt_reason=%s duration=%.1fs tokens=%d" % (
             user_id, snapshot.turn_id or _UNKNOWN, status.value, snapshot.halt_reason or _NO_HALT_REASON, seconds,
+            tally.totals().total.total,
         )
         if error_type is not None:
             line += f" error_type={error_type}"

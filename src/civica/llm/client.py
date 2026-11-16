@@ -1,6 +1,7 @@
 """Chat-model factory: a flow's model configuration paired with the client built from it."""
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from langchain_anthropic import ChatAnthropic
@@ -14,6 +15,13 @@ REQUEST_TIMEOUT_SECONDS = 120.0
 
 # Anthropic's signal that it stopped at the token cap rather than finishing the answer.
 _ANTHROPIC_TRUNCATION_STOP_REASON = "max_tokens"
+
+class ModelCaller(StrEnum):
+    """Which flow a model call belongs to. Carried as a tag on the model so usage can be split by flow."""
+
+    PLANNER = "planner"
+    EXPLANATION = "explanation"
+    QUIZ = "quiz"
 
 
 class ChatProfile(Protocol):
@@ -34,11 +42,14 @@ class AnthropicChat:
 
     model: str
     max_tokens: int
+    caller: ModelCaller
     timeout: float = REQUEST_TIMEOUT_SECONDS
 
     def build(self) -> BaseChatModel:
         """Construct the client. Does not set temperature: current Claude models reject it."""
-        return ChatAnthropic(model=self.model, max_tokens=self.max_tokens, timeout=self.timeout)  # type: ignore[call-arg]
+        return ChatAnthropic(  # type: ignore[call-arg]
+            model=self.model, max_tokens=self.max_tokens, timeout=self.timeout, tags=[self.caller.value]
+        )
 
     def was_truncated(self, response: BaseMessage) -> bool:
         """True when the provider cut the response off at the token cap instead of finishing."""
@@ -47,15 +58,15 @@ class AnthropicChat:
 
 
 # Sized for a single grounded explanation, not for long multi-question generation.
-EXPLANATION_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=2048)
+EXPLANATION_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=2048, caller=ModelCaller.EXPLANATION)
 
 # max_tokens default is sized to cover a theme with 12 French multiple-choice questions in one call plus lots of buffer.
 # The buffer is free. We only pay for tokens actually generated. max_tokens is tunable. Lowering the max_tokens cap
 # could risk cutting off the generated questions, but this would raise QuestionGenerationError so it would not fail silently.
-QUIZ_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=8192)
+QUIZ_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=8192, caller=ModelCaller.QUIZ)
 
 # Sized for short tool-calling turns: tool arguments and a brief reply, not long generation.
-PLANNER_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=1024)
+PLANNER_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=1024, caller=ModelCaller.PLANNER)
 
 _clients: dict[ChatProfile, BaseChatModel] = {}
 

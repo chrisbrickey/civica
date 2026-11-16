@@ -4,6 +4,7 @@ import pytest
 from langchain_anthropic import ChatAnthropic
 
 from civica.llm.client import EXPLANATION_PROFILE, PLANNER_PROFILE, QUIZ_PROFILE, AnthropicChat
+from tests.support.llm import EXPLANATION_TAG, PLANNER_TAG, QUIZ_TAG
 
 _SAMPLE_API_KEY = "sample-api-key"
 
@@ -26,3 +27,21 @@ def test_each_profile_builds_a_model_with_a_request_timeout(
     assert isinstance(model, ChatAnthropic)
     assert model.default_request_timeout is not None
     assert model.default_request_timeout > 0
+
+
+@pytest.mark.parametrize(
+    ("profile", "caller"),
+    [
+        pytest.param(EXPLANATION_PROFILE, EXPLANATION_TAG, id="explanation"),
+        pytest.param(QUIZ_PROFILE, QUIZ_TAG, id="quiz"),
+        pytest.param(PLANNER_PROFILE, PLANNER_TAG, id="planner"),
+    ],
+)
+def test_each_profile_builds_a_model_tagged_with_its_caller(
+    profile: AnthropicChat, caller: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _SAMPLE_API_KEY)
+
+    model = profile.build()
+
+    assert model.tags == [caller]

@@ -206,7 +206,7 @@ _Notes: DATABASE_URL and TEST_DATABASE_URL variables are already populated and c
 **1. Launch the web app locally**
 ```
   uv run python -m civica.ui.app          
-  uv run python -m civica.ui.app --dev    # adds a developer panel beside each coach response with tool calls, etc.
+  uv run python -m civica.ui.app --dev    # adds a developer panel beside each coach response with tool calls, token counts, etc.
 ```
 
 **2. Sign in**
@@ -229,25 +229,21 @@ Ask for a lesson or a quiz in your own words. **Teach me** and **Quiz me** butto
 - The suite runs across 8 workers parallel by default. Each test gets its own Postgres schema so that workers do not share state.
 - Type checking runs as one pytest test (`tests/unit/test_typecheck.py`), so `uv run pytest` fails if `mypy --strict` reports any errors.
 
-**Run one test serially (debugging, `pdb`)**
-```
-  uv run pytest -n0 tests/path/to/test_file.py::test_name
-```
-- Adding the flag `-n0` runs tests sequentially without parallelized workers.
-
-
 **Run external tests (network calls confirm API contract)**
 ```
   uv run pytest -m external -n0
 ```
 - Pass `-n0` so external tests run serially and share one API rate limit and quota.
 
+**Run one test serially (debugging, `pdb`)**
+```
+  uv run pytest -n0 tests/path/to/test_file.py::test_name
+```
 
 **Run type checking only**
 ```
   uv run mypy src
 ```
-
 
 **Automatically clean up unused variables and imports**
 ```

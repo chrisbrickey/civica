@@ -35,12 +35,14 @@ from civica.graph.planner import (
     default_planner_deps,
 )
 from civica.ingestion.repository import EmbeddedChunk, upsert_chunks
+from civica.llm.usage import TurnUsage, UsageTally
 from civica.memory.checkpointer import get_saver
 from civica.memory.records import MemoryKind, SessionSummary, TopicMastery
 from civica.memory.store import get_store
 from civica.memory.writer import get, list_records
 from civica.users.service import register
 from tests.support.assessment import FakeChatModel, explanation_for, grouped_generation_reply
+from tests.support.llm import CONTENT_USAGE, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE
 from tests.support.memory import FULL_MASTERY
 from tests.support.planner import (
     GENERATE_QUIZ,
@@ -53,6 +55,7 @@ from tests.support.planner import (
     final_message,
     tool_call,
 )
+from tests.support.usage import counts_of, turn_usage
 from tests.support.users import TEST_BCRYPT_ROUNDS
 
 # ---------------------------------------------------------------------------
@@ -156,21 +159,35 @@ def corpus(make_chunk_row: Callable[..., EmbeddedChunk]) -> Generator[None, None
         _execute("DELETE FROM generated_questions WHERE text = %s", _QUESTION_TEXT)
 
 
-def _graph(model: FakePlannerModel) -> _Graph:
+def _content_model() -> FakeChatModel:
+    """Writes the lesson, then the quiz. Each reply reports CONTENT_USAGE under the explanation caller."""
+    return FakeChatModel(
+        replies=(_LESSON_TEXT, grouped_generation_reply((1, _QUESTION_TEXT))),
+        tags=[EXPLANATION_TAG],
+        usage=CONTENT_USAGE,
+    )
+
+
+def _graph(model: FakePlannerModel, content_model: FakeChatModel | None = None) -> _Graph:
     """The production graph with only the chat models faked."""
-    content_model = FakeChatModel(replies=(_LESSON_TEXT, grouped_generation_reply((1, _QUESTION_TEXT))))
-    return build_graph(replace(default_planner_deps(), planner_model=model, content_model=content_model))
+    deps = replace(default_planner_deps(), planner_model=model, content_model=content_model or _content_model())
+    return build_graph(deps)
 
 
 def _turn(
-    graph: _Graph, user_id: UserId, config: RunnableConfig, message: str = _LEARNER_MESSAGE
+    graph: _Graph,
+    user_id: UserId,
+    config: RunnableConfig,
+    message: str = _LEARNER_MESSAGE,
+    tally: UsageTally | None = None,
 ) -> None:
     """One message turn, streamed the way the UI will run it."""
+    counted = tally is not None
     list(
         graph.stream(
             {"kind": InputKind.MESSAGE, "learner_message": message},
-            config=config,
-            context=PlannerContext(user_id=user_id),
+            config={**config, "callbacks": [tally]} if counted else config,
+            context=PlannerContext(user_id=user_id, usage=tally) if counted else PlannerContext(user_id=user_id),
             subgraphs=True,
         )
     )
@@ -182,7 +199,17 @@ def _values(graph: _Graph, config: RunnableConfig) -> _State:
 
 
 def _scripted(*turns: AIMessage) -> FakePlannerModel:
-    return FakePlannerModel(script=tuple(turns))
+    """A planner model whose every reply reports PLANNER_USAGE under the planner caller."""
+    return FakePlannerModel(script=tuple(turns), tags=[PLANNER_TAG], usage=PLANNER_USAGE)
+
+
+def _lesson() -> tuple[AIMessage, ...]:
+    """A turn with planner calls and one explanation call."""
+    return (
+        tool_call(READ_STATE, "call-state"),
+        tool_call(TEACH, "call-teach", theme=_THEME.slug, focus=_FOCUS),
+        final_message(_FINAL_TEXT),
+    )
 
 
 def _lesson_and_check() -> tuple[AIMessage, ...]:
@@ -344,6 +371,61 @@ class TestPreviousExchange:
         for text in (_LEARNER_MESSAGE, _FINAL_TEXT, _LESSON_TEXT, _QUESTION_TEXT):
             assert text in context
         assert [r.message for r in caplog.records if r.name.startswith(_SERIALIZER_LOGGER)] == []
+
+
+@pytest.mark.usefixtures("corpus")
+class TestTokenUsage:
+    """memory_writer saves the turn's token totals in the checkpoint when the turn has a tally."""
+
+    def test_turn_with_a_tally_saves_its_totals_per_caller_as_a_typed_object(
+        self, user_id: UserId, config: RunnableConfig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        script = _lesson()
+        content_model = _content_model()
+        tally = UsageTally()
+
+        with caplog.at_level(logging.WARNING):
+            _turn(_graph(_scripted(*script), content_model), user_id, config, tally=tally)
+            # A new graph has nothing but the checkpoint to read the totals from.
+            saved = _values(_graph(_scripted()), config)["token_usage"]
+
+        assert content_model.invocation_count == 1
+        assert isinstance(saved, TurnUsage)
+        assert saved == turn_usage(
+            {PLANNER_TAG: counts_of(PLANNER_USAGE, len(script)), EXPLANATION_TAG: counts_of(CONTENT_USAGE)}
+        )
+        assert saved == tally.totals()
+        assert [r.message for r in caplog.records if r.name.startswith(_SERIALIZER_LOGGER)] == []
+
+    def test_turn_without_a_tally_saves_no_totals_and_does_not_error(
+        self, user_id: UserId, config: RunnableConfig
+    ) -> None:
+        graph = _graph(_scripted(*_lesson()))
+
+        _turn(graph, user_id, config)
+
+        values = _values(graph, config)
+        assert values["reply"] == _FINAL_TEXT
+        assert values["token_usage"] is None
+
+    def test_second_turn_saves_only_its_own_totals(self, user_id: UserId, config: RunnableConfig) -> None:
+        graph = _graph(_scripted(*_lesson(), final_message(_SECOND_FINAL_TEXT)))
+
+        _turn(graph, user_id, config, tally=UsageTally())
+        _turn(graph, user_id, config, _SECOND_LEARNER_MESSAGE, tally=UsageTally())
+
+        # The second turn made one planner call and no content call.
+        assert _values(graph, config)["token_usage"] == turn_usage({PLANNER_TAG: counts_of(PLANNER_USAGE)})
+
+    def test_turn_without_a_tally_clears_the_totals_of_the_turn_before(
+        self, user_id: UserId, config: RunnableConfig
+    ) -> None:
+        graph = _graph(_scripted(*_lesson(), final_message(_SECOND_FINAL_TEXT)))
+
+        _turn(graph, user_id, config, tally=UsageTally())
+        _turn(graph, user_id, config, _SECOND_LEARNER_MESSAGE)
+
+        assert _values(graph, config)["token_usage"] is None
 
 
 class TestThreadPersistence:
