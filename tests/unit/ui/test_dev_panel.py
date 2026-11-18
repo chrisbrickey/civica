@@ -39,14 +39,17 @@ from tests.support.coach import (
     FALLBACK_NODE,
     FINAL_MESSAGE_TEXT,
     FOCUS,
+)
+from tests.support.memory import HALF_MASTERY
+from tests.support.planner import (
+    DEFAULT_THEME,
     GENERATE_QUIZ,
+    GOAL,
     READ_STATE,
     RETRIEVE_CORPUS,
     SUGGEST_THEME,
     TEACH,
 )
-from tests.support.memory import HALF_MASTERY
-from tests.support.planner import DEFAULT_THEME, GOAL
 from tests.support.turn_state import REPLY, finished_state, snapshot_of
 
 # ---------------------------------------------------------------------------

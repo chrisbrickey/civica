@@ -23,6 +23,10 @@ from tests.support.assessment import (
 from tests.support.logs import LogLine, lines_from
 from tests.support.planner import (
     DEFAULT_THEME,
+    GENERATE_QUIZ,
+    READ_STATE,
+    SUGGEST_THEME,
+    TEACH,
     ControlledPlannerModel,
     final_message,
     parallel_tool_calls,
@@ -47,11 +51,6 @@ REPLY: Final = "sample-final-reply-001"
 SECOND_REPLY: Final = "sample-final-reply-002"
 FOCUS: Final = "sample-focus"
 
-READ_STATE: Final = "read_learner_state"
-TEACH: Final = "teach"
-GENERATE_QUIZ: Final = "generate_quiz"
-SUGGEST_THEME: Final = "suggest_review_theme"
-RETRIEVE_CORPUS: Final = "retrieve_corpus"
 FALLBACK_NODE: Final = "fallback_lesson"
 FINAL_MESSAGE_TEXT: Final = "final message"
 DEV_PANEL_TITLE: Final = "Developer panel"

@@ -19,13 +19,10 @@ from tests.support.coach import (
     FALLBACK_TEXT,
     FINAL_MESSAGE_TEXT,
     FOCUS,
-    GENERATE_QUIZ,
     LESSON_TEXT,
     QUIZ_AFTER_LESSON_CALL,
     QUIZ_ONLY_CALL,
-    READ_STATE,
     REPLY,
-    TEACH,
     UNFINISHED_TEXT,
     dev_panels,
     held_turn_is_shown,
@@ -46,7 +43,16 @@ from tests.support.coach import (
     wait_for_turn_end,
 )
 from tests.support.memory import HALF_MASTERY, seed_mastery, seed_mistake
-from tests.support.planner import DEFAULT_THEME, GOAL, PLANNER_FAILURE_TEXT, ControlledPlannerModel, PlannerFakes
+from tests.support.planner import (
+    DEFAULT_THEME,
+    GENERATE_QUIZ,
+    GOAL,
+    PLANNER_FAILURE_TEXT,
+    READ_STATE,
+    TEACH,
+    ControlledPlannerModel,
+    PlannerFakes,
+)
 from tests.support.ui import DEV_ROW_MARKER, LESSON_MARKER, QUIZ_MARKER, REPLY_MARKER
 
 # ---------------------------------------------------------------------------

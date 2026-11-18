@@ -3,7 +3,7 @@
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -41,6 +41,14 @@ SAMPLE_QUESTION_ID = "sample-question-id-001"
 DEFAULT_THEME = DROITS_ET_DEVOIRS
 MISTAKE = MistakeEpisode(theme=DEFAULT_THEME, question_id=SAMPLE_QUESTION_ID)
 PLANNER_FAILURE_TEXT = "sample-planner-failure"
+
+# Tool names as literals, so a rename in PlannerTool fails the tests instead of following silently.
+SUGGEST_THEME: Final = "suggest_review_theme"
+READ_STATE: Final = "read_learner_state"
+RETRIEVE_CORPUS: Final = "retrieve_corpus"
+TEACH: Final = "teach"
+GENERATE_QUIZ: Final = "generate_quiz"
+RECORD_OUTCOME: Final = "record_outcome"
 
 # Bounds a held call, so a test that never releases it fails instead of hanging.
 _HOLD_TIMEOUT_SECONDS = 10

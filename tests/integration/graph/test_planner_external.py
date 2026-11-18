@@ -32,7 +32,14 @@ from tests.support.assessment import (
     FakeRetriever,
     grouped_generation_reply,
 )
-from tests.support.planner import FakeTraceWriter, LessonOrQuizModel, RealLessonFakeQuizModel
+from tests.support.planner import (
+    GENERATE_QUIZ,
+    RETRIEVE_CORPUS,
+    TEACH,
+    FakeTraceWriter,
+    LessonOrQuizModel,
+    RealLessonFakeQuizModel,
+)
 from tests.support.users import USER_ID
 
 _LEARNER_MESSAGE = "Teach me about the rights and duties of citizens."
@@ -79,9 +86,8 @@ _STEM_KEYWORDS: dict[str, tuple[str, ...]] = {
     "Which song is the French national anthem?": ("anthem", "hymne", "marseillaise"),
 }
 
-_QUIZ_TOOL = "generate_quiz"
 # Tools whose arguments name the theme being taught or quizzed.
-_THEMED_TOOLS = {"teach", "retrieve_corpus", _QUIZ_TOOL}
+_THEMED_TOOLS = {TEACH, RETRIEVE_CORPUS, GENERATE_QUIZ}
 
 _Graph = CompiledStateGraph[Any, PlannerContext, Any, Any]  # type: ignore[explicit-any]
 _State = dict[str, Any]  # type: ignore[explicit-any]
@@ -142,12 +148,12 @@ def _args_text(calls: list[ToolCall]) -> str:
 
 
 def _brief_teach_calls(calls: list[ToolCall]) -> list[ToolCall]:
-    return [call for call in calls if call.name == "teach" and call.args.get("brief") is True]
+    return [call for call in calls if call.name == TEACH and call.args.get("brief") is True]
 
 
 def _lesson_words(state: _State) -> int:
     """Word count of the lesson the learner saw in this turn."""
-    assert "teach" in _names(state["tool_calls"]), "the turn gave no lesson"
+    assert TEACH in _names(state["tool_calls"]), "the turn gave no lesson"
     return len(state["lesson"].text.split())
 
 
@@ -189,7 +195,7 @@ def test_lesson_follow_up_stays_on_theme_without_a_new_check(follow_up: str) -> 
 
     assert _themes(first["tool_calls"]) == {_FOLLOW_UP_THEME.slug}
     assert _themes(second["tool_calls"]) == {_FOLLOW_UP_THEME.slug}
-    assert _QUIZ_TOOL not in _names(second["tool_calls"])
+    assert GENERATE_QUIZ not in _names(second["tool_calls"])
 
 
 @pytest.mark.external
@@ -207,7 +213,7 @@ def test_explain_question_2_is_about_the_second_displayed_question() -> None:
     args = _args_text(second["tool_calls"])
     assert _mentions(f"{second['reply'].lower()}\n{args}", _STEM_KEYWORDS[target])
     assert not any(_mentions(args, _STEM_KEYWORDS[other]) for other in others)
-    assert _QUIZ_TOOL not in _names(second["tool_calls"])
+    assert GENERATE_QUIZ not in _names(second["tool_calls"])
 
 
 @pytest.mark.external

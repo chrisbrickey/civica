@@ -54,6 +54,12 @@ from tests.support.memory import (
 )
 from tests.support.planner import (
     DEFAULT_THEME,
+    GENERATE_QUIZ,
+    READ_STATE,
+    RECORD_OUTCOME,
+    RETRIEVE_CORPUS,
+    SUGGEST_THEME,
+    TEACH,
     GOAL,
     MISTAKE,
     SAMPLE_KEY,
@@ -116,13 +122,7 @@ QUIZ_QUESTIONS = "quiz_questions"
 QUIZ_GROUNDING = "quiz_grounding"
 
 # Tool names are the contract with the planner model.
-SUGGEST = "suggest_review_theme"
-READ_STATE = "read_learner_state"
-RETRIEVE = "retrieve_corpus"
-TEACH = "teach"
-GENERATE_QUIZ = "generate_quiz"
-RECORD = "record_outcome"
-PLANNER_TOOLS = {SUGGEST, READ_STATE, RETRIEVE, TEACH, GENERATE_QUIZ, RECORD}
+PLANNER_TOOLS = {SUGGEST_THEME, READ_STATE, RETRIEVE_CORPUS, TEACH, GENERATE_QUIZ, RECORD_OUTCOME}
 
 # Parameters a tool may receive from the graph, never from the model.
 INJECTED_PARAMS = {"user_id", "runtime"}
@@ -199,7 +199,7 @@ def _scripted(*turns: AIMessage) -> FakePlannerModel:
 
 
 def _repeat_forever() -> FakePlannerModel:
-    return FakePlannerModel(repeat=tool_call(SUGGEST, "call-forever"))
+    return FakePlannerModel(repeat=tool_call(SUGGEST_THEME, "call-forever"))
 
 
 def _favor_suggested_theme(store: InMemoryStore) -> None:
@@ -271,7 +271,7 @@ class TestToolSet:
         for name, parameters in model.offered_tools().items():
             assert not INJECTED_PARAMS & set(parameters.get("properties", {})), name
 
-    @pytest.mark.parametrize("name", [RETRIEVE, TEACH, GENERATE_QUIZ])
+    @pytest.mark.parametrize("name", [RETRIEVE_CORPUS, TEACH, GENERATE_QUIZ])
     def test_theme_parameter_lists_the_official_slugs(
         self, planner_fakes: PlannerFakes, name: str
     ) -> None:
@@ -293,7 +293,7 @@ class TestScriptedTurn:
     @pytest.fixture()
     def model(self) -> FakePlannerModel:
         return _scripted(
-            tool_call(SUGGEST, "call-suggest"),
+            tool_call(SUGGEST_THEME, "call-suggest"),
             _teach("call-teach"),
             final_message(FINAL_TEXT),
         )
@@ -304,7 +304,7 @@ class TestScriptedTurn:
         state = _run(planner_fakes, model)
 
         assert state[TOOL_CALLS] == [
-            ToolCall(name=SUGGEST, args={}),
+            ToolCall(name=SUGGEST_THEME, args={}),
             ToolCall(name=TEACH, args={"theme": DEFAULT_THEME.slug, "focus": FOCUS}),
         ]
 
@@ -459,7 +459,7 @@ class TestReviewSuggestion:
 
     def test_tool_weights_mastery_by_exam_share(self, planner_fakes: PlannerFakes) -> None:
         seed_mastery(planner_fakes.store, USER_ID, WEIGHTED_MASTERY)
-        model = _scripted(tool_call(SUGGEST, "call-suggest"), final_message(FINAL_TEXT))
+        model = _scripted(tool_call(SUGGEST_THEME, "call-suggest"), final_message(FINAL_TEXT))
 
         _run(planner_fakes, model)
 
@@ -467,7 +467,7 @@ class TestReviewSuggestion:
 
     def test_tool_breaks_ties_with_a_mistake(self, planner_fakes: PlannerFakes) -> None:
         put(USER_ID, SAMPLE_KEY, MISTAKE, planner_fakes.store)
-        model = _scripted(tool_call(SUGGEST, "call-suggest"), final_message(FINAL_TEXT))
+        model = _scripted(tool_call(SUGGEST_THEME, "call-suggest"), final_message(FINAL_TEXT))
 
         _run(planner_fakes, model)
 
@@ -495,7 +495,7 @@ class TestRecordOutcomeGuard:
         self, planner_fakes: PlannerFakes, kind: str
     ) -> None:
         model = _scripted(
-            tool_call(RECORD, "call-record", kind=kind, key=SAMPLE_KEY, value=FORBIDDEN_WRITES[kind]),
+            tool_call(RECORD_OUTCOME, "call-record", kind=kind, key=SAMPLE_KEY, value=FORBIDDEN_WRITES[kind]),
             final_message(FINAL_TEXT),
         )
 
@@ -509,7 +509,7 @@ class TestRecordOutcomeGuard:
     def test_topic_mastery_is_refused_to_the_planner_but_allowed_in_process(
         self, planner_fakes: PlannerFakes
     ) -> None:
-        model = _scripted(tool_call(RECORD, "call-record", **TOPIC_MASTERY_ARGS), final_message(FINAL_TEXT))
+        model = _scripted(tool_call(RECORD_OUTCOME, "call-record", **TOPIC_MASTERY_ARGS), final_message(FINAL_TEXT))
         mastery = TopicMastery(theme=DEFAULT_THEME, mastery=FULL_MASTERY)
 
         state = _run(planner_fakes, model)
@@ -522,7 +522,7 @@ class TestRecordOutcomeGuard:
 
     def test_mistake_episode_is_written_for_the_context_user(self, planner_fakes: PlannerFakes) -> None:
         model = _scripted(
-            tool_call(RECORD, "call-record", kind="mistake_episode", key=SAMPLE_KEY, value=MISTAKE_VALUE),
+            tool_call(RECORD_OUTCOME, "call-record", kind="mistake_episode", key=SAMPLE_KEY, value=MISTAKE_VALUE),
             final_message(FINAL_TEXT),
         )
 
@@ -583,7 +583,7 @@ class TestComprehensionCheck:
         _run(planner_fakes, model)
 
         record_tool = next(
-            tool for tool in model.bound_tools() if getattr(tool, "name", None) == RECORD
+            tool for tool in model.bound_tools() if getattr(tool, "name", None) == RECORD_OUTCOME
         )
         for text in (*model.system_texts(), str(getattr(record_tool, "description"))):
             assert "summar" not in text.lower()
@@ -711,7 +711,7 @@ class TestReadTools:
         self, planner_fakes: PlannerFakes
     ) -> None:
         model = _scripted(
-            tool_call(RETRIEVE, "call-retrieve", theme=DEFAULT_THEME.slug, query=QUERY),
+            tool_call(RETRIEVE_CORPUS, "call-retrieve", theme=DEFAULT_THEME.slug, query=QUERY),
             final_message(FINAL_TEXT),
         )
 
@@ -749,7 +749,7 @@ class TestLearnerMessageBoundary:
 
     @pytest.fixture()
     def model(self) -> FakePlannerModel:
-        return _scripted(tool_call(SUGGEST, "call-suggest"), final_message(FINAL_TEXT))
+        return _scripted(tool_call(SUGGEST_THEME, "call-suggest"), final_message(FINAL_TEXT))
 
     def test_absent_from_every_system_message(
         self, planner_fakes: PlannerFakes, model: FakePlannerModel
@@ -783,11 +783,11 @@ class TestLearnerMessageBoundary:
 
 
 def _fallback_by_forbidden_write() -> tuple[AIMessage, ...]:
-    return (tool_call(RECORD, "call-record", **TOPIC_MASTERY_ARGS),)
+    return (tool_call(RECORD_OUTCOME, "call-record", **TOPIC_MASTERY_ARGS),)
 
 
 def _fallback_by_step_bound() -> tuple[AIMessage, ...]:
-    return tuple(tool_call(SUGGEST, f"call-suggest-{i}") for i in range(MAX_PLANNER_STEPS))
+    return tuple(tool_call(SUGGEST_THEME, f"call-suggest-{i}") for i in range(MAX_PLANNER_STEPS))
 
 
 class TestPreviousExchange:
@@ -798,7 +798,7 @@ class TestPreviousExchange:
     ) -> None:
         model = _scripted(
             final_message(FINAL_TEXT),
-            tool_call(SUGGEST, "call-suggest"),
+            tool_call(SUGGEST_THEME, "call-suggest"),
             final_message(SECOND_FINAL_TEXT),
         )
         graph = _compile(planner_fakes, model)
@@ -953,7 +953,7 @@ class TestTraceScriptedTurn:
 
     def test_rows_follow_the_tool_calls_in_order(self, planner_fakes: PlannerFakes) -> None:
         model = _scripted(
-            tool_call(SUGGEST, "call-suggest"),
+            tool_call(SUGGEST_THEME, "call-suggest"),
             _teach("call-teach"),
             final_message(FINAL_TEXT),
         )
@@ -963,7 +963,7 @@ class TestTraceScriptedTurn:
         steps = planner_fakes.trace.steps
         _assert_one_turn(steps, HaltReason.FINAL_MESSAGE, tool_call_count=2)
         assert _step_calls(steps) == [
-            (SUGGEST, {}),
+            (SUGGEST_THEME, {}),
             (TEACH, {"theme": DEFAULT_THEME.slug, "focus": FOCUS}),
         ]
 
@@ -972,7 +972,7 @@ class TestTraceScriptedTurn:
     ) -> None:
         """Calls of one reply may run concurrently; step_index still follows the model's listing."""
         model = _scripted(
-            parallel_tool_calls(tool_call(SUGGEST, "call-suggest"), tool_call(READ_STATE, "call-state")),
+            parallel_tool_calls(tool_call(SUGGEST_THEME, "call-suggest"), tool_call(READ_STATE, "call-state")),
             _teach("call-teach"),
             final_message(FINAL_TEXT),
         )
@@ -982,12 +982,12 @@ class TestTraceScriptedTurn:
         steps = planner_fakes.trace.steps
         _assert_one_turn(steps, HaltReason.FINAL_MESSAGE, tool_call_count=3)
         assert _step_calls(steps) == [
-            (SUGGEST, {}),
+            (SUGGEST_THEME, {}),
             (READ_STATE, {}),
             (TEACH, {"theme": DEFAULT_THEME.slug, "focus": FOCUS}),
         ]
         assert state[TOOL_CALLS] == [
-            ToolCall(name=SUGGEST, args={}),
+            ToolCall(name=SUGGEST_THEME, args={}),
             ToolCall(name=READ_STATE, args={}),
             ToolCall(name=TEACH, args={"theme": DEFAULT_THEME.slug, "focus": FOCUS}),
         ]
@@ -1060,13 +1060,13 @@ class TestTraceForbiddenWrite:
     """A refused write is traced as a step, then the turn ends in one FORBIDDEN_WRITE row."""
 
     def test_forbidden_write_is_traced_then_halts(self, planner_fakes: PlannerFakes) -> None:
-        model = _scripted(tool_call(RECORD, "call-record", **TOPIC_MASTERY_ARGS), final_message(FINAL_TEXT))
+        model = _scripted(tool_call(RECORD_OUTCOME, "call-record", **TOPIC_MASTERY_ARGS), final_message(FINAL_TEXT))
 
         _run(planner_fakes, model)
 
         steps = planner_fakes.trace.steps
         _assert_one_turn(steps, HaltReason.FORBIDDEN_WRITE, tool_call_count=1)
-        assert _step_calls(steps) == [(RECORD, TOPIC_MASTERY_ARGS)]
+        assert _step_calls(steps) == [(RECORD_OUTCOME, TOPIC_MASTERY_ARGS)]
 
 
 # ---------------------------------------------------------------------------
@@ -1097,7 +1097,7 @@ class TestRetrievalGaps:
     def test_empty_retrieve_corpus_records_the_query(self, planner_fakes: PlannerFakes) -> None:
         fakes = _empty_retrieval(planner_fakes)
         model = _scripted(
-            tool_call(RETRIEVE, "call-retrieve", theme=DEFAULT_THEME.slug, query=QUERY),
+            tool_call(RETRIEVE_CORPUS, "call-retrieve", theme=DEFAULT_THEME.slug, query=QUERY),
             final_message(FINAL_TEXT),
         )
 

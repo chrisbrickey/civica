@@ -31,6 +31,7 @@ from civica.domain.user import UserId
 from civica.explanation.engine import MINIMUM_SIMILARITY, RETRIEVAL_K, Explanation, explain
 from civica.explanation.prompts import DEFAULT_WORD_LIMITS, WordLimits
 from civica.graph.router import suggest_review_theme as review_heuristic
+from civica.graph.tool_names import PlannerTool
 from civica.graph.trace import (
     HaltReason as HaltReason,
     PostgresTraceWriter,
@@ -209,14 +210,13 @@ _ARGS_SCHEMAS: dict[str, type[BaseModel]] = {}
 
 
 def _planner_tool(  # type: ignore[explicit-any]
-    func: Callable[..., object], name: str | None = None
+    func: Callable[..., object], name: PlannerTool
 ) -> StructuredTool:
     """Wrap func as a tool, reusing the cached args schema so pydantic does no per-call work."""
-    tool_name = name or func.__name__
-    if tool_name not in _ARGS_SCHEMAS:
-        built = StructuredTool.from_function(func, name=tool_name)
-        _ARGS_SCHEMAS[tool_name] = cast(type[BaseModel], built.args_schema)
-    return StructuredTool.from_function(func, name=tool_name, args_schema=_ARGS_SCHEMAS[tool_name])
+    if name not in _ARGS_SCHEMAS:
+        built = StructuredTool.from_function(func, name=name.value)
+        _ARGS_SCHEMAS[name] = cast(type[BaseModel], built.args_schema)
+    return StructuredTool.from_function(func, name=name.value, args_schema=_ARGS_SCHEMAS[name])
 
 
 def build_planner_tools(deps: PlannerDeps) -> list[BaseTool]:
@@ -278,10 +278,10 @@ def build_planner_tools(deps: PlannerDeps) -> list[BaseTool]:
         return f"Recorded {kind}."
 
     return [
-        _planner_tool(suggest_review_theme),
-        _planner_tool(read_state, name="read_learner_state"),
-        _planner_tool(retrieve_corpus),
-        _planner_tool(teach),
-        _planner_tool(generate_quiz_tool, name="generate_quiz"),
-        _planner_tool(record_outcome),
+        _planner_tool(suggest_review_theme, PlannerTool.SUGGEST_REVIEW_THEME),
+        _planner_tool(read_state, PlannerTool.READ_LEARNER_STATE),
+        _planner_tool(retrieve_corpus, PlannerTool.RETRIEVE_CORPUS),
+        _planner_tool(teach, PlannerTool.TEACH),
+        _planner_tool(generate_quiz_tool, PlannerTool.GENERATE_QUIZ),
+        _planner_tool(record_outcome, PlannerTool.RECORD_OUTCOME),
     ]
