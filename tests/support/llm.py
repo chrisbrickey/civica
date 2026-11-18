@@ -1,17 +1,41 @@
 """Shared base for fake chat models: records every prompt, subclasses supply only the reply."""
 
 from abc import abstractmethod
-from typing import Any
+from typing import Any, Final
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import PrivateAttr
+
+# Caller tags as the production chat profiles write them on their models.
+PLANNER_TAG: Final = "planner"
+EXPLANATION_TAG: Final = "explanation"
+QUIZ_TAG: Final = "quiz"
+
+
+def token_usage(input_tokens: int, output_tokens: int, reasoning: int | None = None) -> UsageMetadata:
+    """Usage as a provider reports it; None leaves the reasoning detail out, as most replies do."""
+    usage = UsageMetadata(
+        input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=input_tokens + output_tokens
+    )
+    if reasoning is not None:
+        usage["output_token_details"] = {"reasoning": reasoning}
+    return usage
+
+
+# Distinct numbers per model, so a total that mixes callers up or drops one is caught.
+PLANNER_USAGE: Final = token_usage(input_tokens=100, output_tokens=20, reasoning=5)
+CONTENT_USAGE: Final = token_usage(input_tokens=3000, output_tokens=400, reasoning=70)
 
 
 class FakeChatModelBase(BaseChatModel):  # type: ignore[explicit-any]
     """Records each message list it receives; subclasses implement `_reply_for(call_index)`."""
+
+    # Reported on every reply when set; None replies carry no usage_metadata.
+    usage: UsageMetadata | None = None
 
     _received: list[list[BaseMessage]] = PrivateAttr(default_factory=list)
 
@@ -57,7 +81,10 @@ class FakeChatModelBase(BaseChatModel):  # type: ignore[explicit-any]
     ) -> ChatResult:
         call_index = len(self._received)
         self._received.append(list(messages))
-        return ChatResult(generations=[ChatGeneration(message=self._reply_for(call_index))])
+        reply = self._reply_for(call_index)
+        if self.usage is not None:
+            reply = reply.model_copy(update={"usage_metadata": self.usage})
+        return ChatResult(generations=[ChatGeneration(message=reply)])
 
     @property
     def _llm_type(self) -> str:

@@ -1,4 +1,9 @@
-"""NiceGUI web app entrypoint. Run with: uv run python -m civica.ui.app"""
+"""Web app entrypoint.
+
+Run with:
+    uv run python -m civica.ui.app
+    uv run python -m civica.ui.app --dev # developer mode
+"""
 
 import argparse
 import logging

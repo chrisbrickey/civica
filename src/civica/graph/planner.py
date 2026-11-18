@@ -39,6 +39,7 @@ from civica.graph.trace import (
     TraceWriter,
 )
 from civica.llm.client import PLANNER_PROFILE, get_chat_model
+from civica.llm.usage import UsageTally
 from civica.memory.records import LearnerProfile, MistakeEpisode, SessionSummary, TopicMastery
 from civica.memory.store import get_store
 from civica.memory.writer import get, list_records, put_planner
@@ -88,6 +89,7 @@ class PlannerContext:
     """Per-run context injected into nodes and tools; the model never sees it."""
 
     user_id: UserId
+    usage: UsageTally | None = None
 
 
 @dataclass(frozen=True)

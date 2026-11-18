@@ -14,12 +14,14 @@ from civica.explanation.engine import Explanation
 from civica.graph.nodes import FALLBACK_LESSON
 from civica.graph.planner import HaltReason, LearnerState, ToolCall
 from civica.graph.tool_names import PlannerTool
+from civica.llm.usage import TokenCounts, TurnUsage
 from civica.ui.turn_view import is_fallback_reason
 
 CODE_PATH: Final = "Code path"
 TOOLS_CALLED: Final = "Tools called"
 GROUNDING: Final = "Grounding"
 TURN: Final = "Turn"
+TOKEN_COUNTS: Final = "Token Counts"
 LEARNER_STATE: Final = "Learner state"
 ERROR: Final = "Error"
 NONE_TEXT: Final = "none"
@@ -28,6 +30,7 @@ MAX_MISTAKES_SHOWN: Final = 5
 
 _FALLBACK_PRODUCER: Final = f"{FALLBACK_LESSON} node"
 _FINAL_MESSAGE: Final = "planner final message"
+_TOTAL: Final = "total"
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,18 @@ def _turn_line(halt_reason: HaltReason, config: RunnableConfig) -> PanelLine:
     return PanelLine(TURN, (f"halt_reason={halt_reason.value}", f"fallback={fallback}", f"thread_id={thread_id}"))
 
 
+def _token_line(usage: TurnUsage | None) -> PanelLine:
+    """The turn's total, then each caller by name. A turn saved before tokens were counted has none."""
+    if usage is None:
+        return PanelLine(TOKEN_COUNTS, (NONE_TEXT,))
+
+    def value(name: str, counts: TokenCounts) -> str:
+        return f"{name}: in={counts.input} out={counts.output} reasoning={counts.reasoning}"
+
+    callers = (value(name, usage.by_caller[name]) for name in sorted(usage.by_caller))
+    return PanelLine(TOKEN_COUNTS, (value(_TOTAL, usage.total), *callers))
+
+
 def _learner_line(learner: LearnerState) -> PanelLine:
     mastery = ", ".join(f"{theme.slug}={score:.2f}" for theme, score in learner.mastery.items())
     shown = [f"{mistake.theme.slug}/{mistake.question_id}" for mistake in learner.mistakes[:MAX_MISTAKES_SHOWN]]
@@ -122,7 +137,7 @@ def build_turn_panels(  # type: ignore[explicit-any]
     questions: list[Question] = values["quiz_questions"]
     halt_reason = HaltReason(values["halt_reason"])
     tools = PanelLine(TOOLS_CALLED, tuple(call.name for call in calls) or (NONE_TEXT,))
-    shared = (_turn_line(halt_reason, config), _learner_line(learner))
+    shared = (_turn_line(halt_reason, config), _token_line(values.get("token_usage")), _learner_line(learner))
 
     def panel(producer: str, grounding: tuple[str, ...]) -> DevPanel:
         return DevPanel((PanelLine(CODE_PATH, (producer,)), tools, PanelLine(GROUNDING, grounding), *shared))

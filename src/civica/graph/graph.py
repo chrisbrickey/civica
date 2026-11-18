@@ -20,6 +20,7 @@ from civica.graph.planner import (
     ToolCall,
     default_planner_deps,
 )
+from civica.llm.usage import TurnUsage
 from civica.memory.checkpointer import get_saver
 from civica.memory.records import SessionSummary
 from civica.memory.writer import put
@@ -47,6 +48,7 @@ class GraphState(GraphInput):
     tool_calls: list[ToolCall]
     halt_reason: HaltReason | None
     previous_exchange: PreviousExchange | None
+    token_usage: TurnUsage | None
 
 
 class Node(Protocol):
@@ -81,9 +83,12 @@ def _recap(state: GraphState) -> str:
 
 def _make_memory_writer(deps: PlannerDeps) -> Node:
     def memory_writer(state: GraphState, runtime: Runtime[PlannerContext]) -> dict[str, object]:
-        """Replace the learner's session summary with this turn's recap."""
+        """End of turn actions.
+
+        Examples: Replaces the session summary with this turn's recap. Saves the turn's token totals."""
         put(runtime.context.user_id, SUMMARY_KEY, SessionSummary(summary=_recap(state)), deps.store)
-        return {}
+        tally = runtime.context.usage
+        return {"token_usage": tally.totals() if tally is not None else None}
 
     return memory_writer
 

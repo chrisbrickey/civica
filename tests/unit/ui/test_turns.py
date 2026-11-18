@@ -7,13 +7,20 @@ from collections.abc import Generator, Iterator, Sequence
 from typing import Final
 
 import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 
 from civica.graph.graph import MEMORY_WRITER, PLANNER, InputKind
 from civica.graph.nodes import PLANNER_MODEL, PLANNER_TOOLS, START_TURN, PlannerContext
 from civica.graph.planner import HaltReason, ToolCall
-from civica.ui.turns import ActiveTurn, TurnAlreadyRunning, TurnRunner, TurnStatus
+from civica.llm.usage import UsageTally
+from civica.ui.turns import ActiveTurn, TurnAlreadyRunning, TurnRunner, TurnStatus, coach_config
+from tests.support.assessment import FakeChatModel
+from tests.support.llm import CONTENT_USAGE, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE
 from tests.support.logs import UNKNOWN_TURN_ID, LogLine, events, lines_from, only, parse_line
 from tests.support.planner import READ_STATE, TEACH
+from tests.support.usage import counts_of, sum_counts
 from tests.support.users import OTHER_USER_ID, USER_ID
 
 # ---------------------------------------------------------------------------
@@ -32,8 +39,13 @@ _TURN_FAILED: Final = "turn_failed"
 _TURN_END: Final = "turn_end"
 _NONE: Final = "none"
 _TURN_KEYS: Final = {"user_id", "turn_id"}
-_END_KEYS: Final = _TURN_KEYS | {"status", "halt_reason", "duration"}
+_END_KEYS: Final = _TURN_KEYS | {"status", "halt_reason", "duration", "tokens"}
+_NO_TOKENS: Final = "0"
 _DURATION_FORMAT: Final = re.compile(r"^\d+\.\ds$")
+
+_MODEL_PROMPT: Final = [HumanMessage(content="sample-model-prompt")]
+# What one turn spends when its graph calls each of `_models()` once.
+_TURN_TOKENS: Final = str(sum_counts(counts_of(PLANNER_USAGE), counts_of(CONTENT_USAGE)).total)
 
 _READ_CALL: Final = ToolCall(name=READ_STATE, args={})
 _TEACH_CALL: Final = ToolCall(name=TEACH, args={"focus": "sample-focus"})
@@ -93,26 +105,44 @@ _FULL_TURN: Final = (
 # ---------------------------------------------------------------------------
 
 
-class _FakeGraph:
-    """Replays a script of stream events, then raises `failure` if one is set."""
+def _models() -> tuple[BaseChatModel, ...]:
+    """A planner model and a content model, each reporting its own usage under its caller tag."""
+    return (
+        FakeChatModel(tags=[PLANNER_TAG], usage=PLANNER_USAGE),
+        FakeChatModel(tags=[EXPLANATION_TAG], usage=CONTENT_USAGE),
+    )
 
-    def __init__(self, script: Sequence[_StreamEvent | _Pause], failure: Exception | None) -> None:
+
+class _FakeGraph:
+    """Calls each of `models` once per turn, replays a script of stream events, then raises `failure` if set."""
+
+    def __init__(
+        self, script: Sequence[_StreamEvent | _Pause], failure: Exception | None, models: Sequence[BaseChatModel]
+    ) -> None:
         self._script = script
         self._failure = failure
+        self._models = models
         self.paused = threading.Event()
         self.resume = threading.Event()
         self.contexts: list[PlannerContext] = []
+        self.configs: list[RunnableConfig] = []
 
     def stream(
         self,
         input: dict[str, object],
-        config: dict[str, object],
+        config: RunnableConfig,
         *,
         context: PlannerContext,
         stream_mode: list[str],
         subgraphs: bool,
     ) -> Iterator[_StreamEvent]:
         self.contexts.append(context)
+        self.configs.append(config)
+
+        # Model calls get the turn's config. LangGraph passes it to every call inside the graph.
+        for model in self._models:
+            model.invoke(_MODEL_PROMPT, config=config)
+
         for item in self._script:
             if isinstance(item, _Pause):
                 self.paused.set()
@@ -129,8 +159,13 @@ class _GraphFactory:
     def __init__(self) -> None:
         self._graphs: list[_FakeGraph] = []
 
-    def __call__(self, *script: _StreamEvent | _Pause, failure: Exception | None = None) -> _FakeGraph:
-        graph = _FakeGraph(script, failure)
+    def __call__(
+        self,
+        *script: _StreamEvent | _Pause,
+        failure: Exception | None = None,
+        models: Sequence[BaseChatModel] = (),
+    ) -> _FakeGraph:
+        graph = _FakeGraph(script, failure, models)
         self._graphs.append(graph)
         return graph
 
@@ -171,6 +206,11 @@ def turn_logs(caplog: pytest.LogCaptureFixture) -> Generator[pytest.LogCaptureFi
 
 def _turn_lines(caplog: pytest.LogCaptureFixture) -> list[LogLine]:
     return lines_from(caplog.records, _TURNS_LOGGER)
+
+
+def _end_tokens(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The `tokens` field of each turn_end line, in log order."""
+    return [fields["tokens"] for event, fields in _turn_lines(caplog) if event == _TURN_END]
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +259,34 @@ def test_turn_runs_with_the_user_in_its_context(make_graph: _GraphFactory) -> No
 
     _run_to_end(TurnRunner(graph))
 
-    assert graph.contexts == [PlannerContext(user_id=USER_ID)]
+    assert [context.user_id for context in graph.contexts] == [USER_ID]
+
+
+def test_turn_runs_on_the_users_coach_thread(make_graph: _GraphFactory) -> None:
+    graph = make_graph(*_FULL_TURN)
+
+    _run_to_end(TurnRunner(graph))
+
+    (config,) = graph.configs
+    assert config["configurable"] == coach_config(USER_ID)["configurable"]
+
+
+def test_each_turn_gets_a_fresh_tally_shared_by_the_config_callbacks_and_the_context(
+    make_graph: _GraphFactory,
+) -> None:
+    graph = make_graph(*_FULL_TURN)
+    runner = TurnRunner(graph)
+
+    _run_to_end(runner)
+    _run_to_end(runner)
+
+    tallies = [context.usage for context in graph.contexts]
+    assert len(tallies) == 2
+    for tally, config in zip(tallies, graph.configs, strict=True):
+        assert isinstance(tally, UsageTally)
+        (callback,) = config["callbacks"]
+        assert callback is tally
+    assert tallies[0] is not tallies[1]
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +316,7 @@ def test_second_start_for_the_same_user_raises(make_graph: _GraphFactory) -> Non
         runner.start(USER_ID, _GRAPH_INPUT)
 
     assert runner.active(USER_ID) is turn
-    assert graph.contexts == [PlannerContext(user_id=USER_ID)]
+    assert [context.user_id for context in graph.contexts] == [USER_ID]
 
 
 def test_a_different_user_is_unaffected_by_a_running_turn(make_graph: _GraphFactory) -> None:
@@ -440,6 +507,53 @@ def test_end_line_carries_status_halt_reason_duration_and_error_type_only_when_f
     assert set(end) == _END_KEYS | set(expected)
     assert _DURATION_FORMAT.match(end["duration"]), f"duration is not in seconds: {end['duration']!r}"
     assert {key: end[key] for key in expected} == expected
+
+
+@pytest.mark.parametrize(
+    ("script", "failure"),
+    [
+        pytest.param(_FULL_TURN, None, id="finished"),
+        pytest.param((_START,), ValueError(_FAILURE_TEXT), id="failed"),
+    ],
+)
+def test_end_line_carries_the_total_tokens_of_the_turns_model_calls(
+    make_graph: _GraphFactory,
+    turn_logs: pytest.LogCaptureFixture,
+    script: tuple[_StreamEvent, ...],
+    failure: Exception | None,
+) -> None:
+    _run_to_end(TurnRunner(make_graph(*script, failure=failure, models=_models())))
+
+    assert _end_tokens(turn_logs) == [_TURN_TOKENS]
+
+
+@pytest.mark.parametrize(
+    ("script", "failure"),
+    [
+        pytest.param(_FULL_TURN, None, id="finished"),
+        pytest.param((), ValueError(_FAILURE_TEXT), id="failed-before-any-call"),
+    ],
+)
+def test_end_line_shows_zero_tokens_when_the_turn_made_no_model_call(
+    make_graph: _GraphFactory,
+    turn_logs: pytest.LogCaptureFixture,
+    script: tuple[_StreamEvent, ...],
+    failure: Exception | None,
+) -> None:
+    _run_to_end(TurnRunner(make_graph(*script, failure=failure)))
+
+    assert _end_tokens(turn_logs) == [_NO_TOKENS]
+
+
+def test_each_end_line_carries_only_its_own_turns_tokens(
+    make_graph: _GraphFactory, turn_logs: pytest.LogCaptureFixture
+) -> None:
+    runner = TurnRunner(make_graph(*_FULL_TURN, models=_models()))
+
+    _run_to_end(runner)
+    _run_to_end(runner)
+
+    assert _end_tokens(turn_logs) == [_TURN_TOKENS, _TURN_TOKENS]
 
 
 def test_end_line_is_logged_by_the_time_a_waiter_sees_the_turn_end(
