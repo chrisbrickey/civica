@@ -13,6 +13,7 @@ from civica.graph.nodes import PLANNER_MODEL, PLANNER_TOOLS, START_TURN, Planner
 from civica.graph.planner import HaltReason, ToolCall
 from civica.ui.turns import ActiveTurn, TurnAlreadyRunning, TurnRunner, TurnStatus
 from tests.support.logs import UNKNOWN_TURN_ID, LogLine, events, lines_from, only, parse_line
+from tests.support.planner import READ_STATE, TEACH
 from tests.support.users import OTHER_USER_ID, USER_ID
 
 # ---------------------------------------------------------------------------
@@ -34,8 +35,8 @@ _TURN_KEYS: Final = {"user_id", "turn_id"}
 _END_KEYS: Final = _TURN_KEYS | {"status", "halt_reason", "duration"}
 _DURATION_FORMAT: Final = re.compile(r"^\d+\.\ds$")
 
-_READ_CALL: Final = ToolCall(name="read_learner_state", args={})
-_TEACH_CALL: Final = ToolCall(name="teach", args={"focus": "sample-focus"})
+_READ_CALL: Final = ToolCall(name=READ_STATE, args={})
+_TEACH_CALL: Final = ToolCall(name=TEACH, args={"focus": "sample-focus"})
 
 # Upper bound only: passing tests return as soon as the turn ends.
 _WAIT_TIMEOUT_SECONDS: Final = 5.0

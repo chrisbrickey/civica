@@ -19,16 +19,13 @@ from tests.support.coach import (
     FAILED_TEXT,
     FALLBACK_TEXT,
     FINAL_CALL,
-    GENERATE_QUIZ,
     LESSON_TEXT,
     PROMPT,
     QUIZ_AFTER_LESSON_CALL,
     QUIZ_ONLY_CALL,
-    READ_STATE,
     REPLY,
     SECOND_LESSON_TEXT,
     SECOND_PROMPT,
-    TEACH,
     TURN_RETRIES,
     UNFINISHED_TEXT,
     click_submit,
@@ -60,7 +57,10 @@ from tests.support.coach import (
 from tests.support.logs import LogLine, events, lines_from, only
 from tests.support.planner import (
     DEFAULT_THEME,
+    GENERATE_QUIZ,
     PLANNER_FAILURE_TEXT,
+    READ_STATE,
+    TEACH,
     ControlledPlannerModel,
     PlannerFakes,
 )

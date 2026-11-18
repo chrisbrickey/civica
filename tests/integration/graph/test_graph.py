@@ -42,7 +42,17 @@ from civica.memory.writer import get, list_records
 from civica.users.service import register
 from tests.support.assessment import FakeChatModel, explanation_for, grouped_generation_reply
 from tests.support.memory import FULL_MASTERY
-from tests.support.planner import FakePlannerModel, final_message, tool_call
+from tests.support.planner import (
+    GENERATE_QUIZ,
+    READ_STATE,
+    RECORD_OUTCOME,
+    RETRIEVE_CORPUS,
+    SUGGEST_THEME,
+    TEACH,
+    FakePlannerModel,
+    final_message,
+    tool_call,
+)
 from tests.support.users import TEST_BCRYPT_ROUNDS
 
 # ---------------------------------------------------------------------------
@@ -63,12 +73,6 @@ _THEME = DROITS_ET_DEVOIRS
 # Never seeded, so retrieval on this theme comes back empty.
 _EMPTY_THEME = VIVRE_DANS_LA_SOCIETE_FRANCAISE
 
-_READ_STATE = "read_learner_state"
-_SUGGEST = "suggest_review_theme"
-_RETRIEVE = "retrieve_corpus"
-_TEACH = "teach"
-_GENERATE_QUIZ = "generate_quiz"
-_RECORD = "record_outcome"
 
 # Identical query and chunk vectors give similarity 1, so the seeded chunk clears every floor.
 _VECTOR = [1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 1)
@@ -184,16 +188,16 @@ def _scripted(*turns: AIMessage) -> FakePlannerModel:
 def _lesson_and_check() -> tuple[AIMessage, ...]:
     """A realistic coach turn: read state, teach, one check question, final message."""
     return (
-        tool_call(_READ_STATE, "call-state"),
-        tool_call(_TEACH, "call-teach", theme=_THEME.slug, focus=_FOCUS),
-        tool_call(_GENERATE_QUIZ, "call-quiz", theme=_THEME.slug, n=1),
+        tool_call(READ_STATE, "call-state"),
+        tool_call(TEACH, "call-teach", theme=_THEME.slug, focus=_FOCUS),
+        tool_call(GENERATE_QUIZ, "call-quiz", theme=_THEME.slug, n=1),
         final_message(_FINAL_TEXT),
     )
 
 
 def _forbidden_write() -> AIMessage:
     return tool_call(
-        _RECORD,
+        RECORD_OUTCOME,
         "call-forbidden",
         kind="topic_mastery",
         key=_THEME.slug,
@@ -256,7 +260,7 @@ class TestCoachTurn:
         _turn(_graph(_scripted(*_lesson_and_check())), user_id, config)
 
         rows = _trace(user_id, config)
-        assert [row["tool_name"] for row in rows] == [_READ_STATE, _TEACH, _GENERATE_QUIZ, None]
+        assert [row["tool_name"] for row in rows] == [READ_STATE, TEACH, GENERATE_QUIZ, None]
         assert rows[-1]["halt_reason"] == HaltReason.FINAL_MESSAGE.value
 
     def test_next_turn_can_read_the_summary_of_the_last(
@@ -264,7 +268,7 @@ class TestCoachTurn:
     ) -> None:
         model = _scripted(
             *_lesson_and_check(),
-            tool_call(_READ_STATE, "call-next-state"),
+            tool_call(READ_STATE, "call-next-state"),
             final_message(_SECOND_FINAL_TEXT),
         )
         graph = _graph(model)
@@ -282,7 +286,7 @@ class TestHaltedTurn:
     def test_step_bound_serves_a_fallback_and_writes_the_summary(
         self, user_id: UserId, config: RunnableConfig
     ) -> None:
-        graph = _graph(FakePlannerModel(repeat=tool_call(_SUGGEST, "call-forever")))
+        graph = _graph(FakePlannerModel(repeat=tool_call(SUGGEST_THEME, "call-forever")))
 
         _turn(graph, user_id, config)
 
@@ -308,7 +312,7 @@ class TestRetrievalGap:
     def test_empty_retrieval_writes_a_gap_row(self, user_id: UserId, config: RunnableConfig) -> None:
         query = f"sample-query-{uuid.uuid4().hex}"
         model = _scripted(
-            tool_call(_RETRIEVE, "call-retrieve", theme=_EMPTY_THEME.slug, query=query),
+            tool_call(RETRIEVE_CORPUS, "call-retrieve", theme=_EMPTY_THEME.slug, query=query),
             final_message(_FINAL_TEXT),
         )
 
@@ -360,7 +364,7 @@ class TestThreadPersistence:
         self, user_id: UserId, config: RunnableConfig
     ) -> None:
         model = _scripted(
-            tool_call(_READ_STATE, "call-state"),
+            tool_call(READ_STATE, "call-state"),
             final_message(_FINAL_TEXT),
             final_message(_SECOND_FINAL_TEXT),
         )

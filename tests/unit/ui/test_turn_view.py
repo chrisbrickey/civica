@@ -34,6 +34,7 @@ from tests.support.assessment import (
 )
 from tests.support.planner import (
     DEFAULT_THEME,
+    TEACH,
 )
 from tests.support.turn_state import (
     LEARNER_MESSAGE as _LEARNER_MESSAGE,
@@ -61,7 +62,6 @@ _BODY = "sample-passage-body"
 _OTHER_BODY = "sample-other-passage-body"
 _UNTITLED_SOURCE = "Official source"
 
-_TEACH = "teach"
 
 # Deliberately unsorted, so a view that re-ranks the passages is caught.
 _SIMILARITIES = (0.7, 0.9, 0.8)
@@ -219,7 +219,7 @@ def test_unfinished_turn_shows_the_notice_and_none_of_the_stale_turn() -> None:
     stale = _state(
         lesson=_lesson(),
         quiz_questions=[make_question()],
-        tool_calls=[ToolCall(name=_TEACH, args={})],
+        tool_calls=[ToolCall(name=TEACH, args={})],
         halt_reason=HaltReason.MAX_STEPS,
     )
 

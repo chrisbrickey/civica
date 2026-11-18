@@ -23,6 +23,10 @@ from tests.support.assessment import FakeRetriever
 from tests.support.memory import FULL_MASTERY
 from tests.support.planner import (
     DEFAULT_THEME,
+    GENERATE_QUIZ,
+    RECORD_OUTCOME,
+    SUGGEST_THEME,
+    TEACH,
     FakePlannerModel,
     PlannerFakes,
     final_message,
@@ -45,10 +49,6 @@ UNKNOWN_THEME_SLUG = "sample-unknown-theme"
 PLANNER_SUMMARY = "sample-planner-summary"
 QUIZ_SIZE = 2
 
-SUGGEST = "suggest_review_theme"
-TEACH = "teach"
-GENERATE_QUIZ = "generate_quiz"
-RECORD = "record_outcome"
 
 State = dict[str, Any]  # type: ignore[explicit-any]
 Graph = CompiledStateGraph[Any, PlannerContext, Any, Any]  # type: ignore[explicit-any]
@@ -196,7 +196,7 @@ class TestSessionSummary:
     def test_turn_halted_at_the_step_bound_reports_the_halt(
         self, planner_fakes: PlannerFakes
     ) -> None:
-        model = FakePlannerModel(repeat=tool_call(SUGGEST, "call-forever"))
+        model = FakePlannerModel(repeat=tool_call(SUGGEST_THEME, "call-forever"))
 
         _invoke(_compile(planner_fakes, model))
 
@@ -206,7 +206,7 @@ class TestSessionSummary:
         self, planner_fakes: PlannerFakes
     ) -> None:
         forbidden = tool_call(
-            RECORD,
+            RECORD_OUTCOME,
             "call-forbidden",
             kind="topic_mastery",
             key=DEFAULT_THEME.slug,
@@ -235,7 +235,7 @@ class TestSessionSummary:
         self, planner_fakes: PlannerFakes
     ) -> None:
         planner_write = tool_call(
-            RECORD,
+            RECORD_OUTCOME,
             "call-record",
             kind="session_summary",
             key=SUMMARY_KEY,

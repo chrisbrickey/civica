@@ -13,6 +13,7 @@ from civica.explanation.engine import RETRIEVAL_K as LESSON_RETRIEVAL_K
 from civica.explanation.engine import Explanation
 from civica.graph.nodes import FALLBACK_LESSON
 from civica.graph.planner import HaltReason, LearnerState, ToolCall
+from civica.graph.tool_names import PlannerTool
 from civica.ui.turn_view import is_fallback_reason
 
 CODE_PATH: Final = "Code path"
@@ -25,8 +26,6 @@ NONE_TEXT: Final = "none"
 NO_PASSAGES_TEXT: Final = "no passages found"
 MAX_MISTAKES_SHOWN: Final = 5
 
-_TEACH: Final = "teach"
-_GENERATE_QUIZ: Final = "generate_quiz"
 _FALLBACK_PRODUCER: Final = f"{FALLBACK_LESSON} node"
 _FINAL_MESSAGE: Final = "planner final message"
 
@@ -53,7 +52,7 @@ class TurnPanels:
     reply: DevPanel | None
 
 
-def _written_by(calls: list[ToolCall], name: str) -> str:
+def _written_by(calls: list[ToolCall], name: PlannerTool) -> str:
     """The code path that triggered the response."""
     return name if any(call.name == name for call in calls) else NONE_TEXT
 
@@ -130,10 +129,10 @@ def build_turn_panels(  # type: ignore[explicit-any]
 
     lesson_panel = quiz_panel = reply_panel = None
     if lesson is not None:
-        producer = _FALLBACK_PRODUCER if is_fallback_reason(halt_reason) else _written_by(calls, _TEACH)
+        producer = _FALLBACK_PRODUCER if is_fallback_reason(halt_reason) else _written_by(calls, PlannerTool.TEACH)
         lesson_panel = panel(producer, _lesson_grounding(lesson))
     if questions:
-        quiz_panel = panel(_written_by(calls, _GENERATE_QUIZ), _quiz_grounding(questions, values.get("quiz_grounding")))
+        quiz_panel = panel(_written_by(calls, PlannerTool.GENERATE_QUIZ), _quiz_grounding(questions, values.get("quiz_grounding")))
     if lesson is None and not questions:
         reply_panel = panel(_FINAL_MESSAGE, (NONE_TEXT,))
     return TurnPanels(lesson_panel, quiz_panel, reply_panel)
