@@ -1,4 +1,6 @@
-"""Unit tests for civica.llm.usage, on fake chat models whose replies carry usage. No network."""
+"""Unit tests for civica.llm.usage.
+
+Uses fake chat models whose replies carry usage. No network calls."""
 
 from concurrent.futures import ThreadPoolExecutor
 from typing import Final

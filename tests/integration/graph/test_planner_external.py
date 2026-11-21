@@ -113,7 +113,7 @@ def _grounded_passages(query: str, theme: Theme | None) -> list[ContentChunk]:
 
 
 def _deps(content_model: BaseChatModel, retriever: SearchFn | None = None) -> PlannerDeps:
-    """A real planner model over the given content model, with faked retrieval and storage."""
+    """A real planner model (over the given content model) with faked retrieval and storage."""
     return PlannerDeps(
         planner_model=get_chat_model(PLANNER_PROFILE),
         store=InMemoryStore(),

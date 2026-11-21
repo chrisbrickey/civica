@@ -49,7 +49,14 @@ class TurnUsage:
         object.__setattr__(self, "total", _counts(self.total))
 
 
-def _caller_of(tags: list[str] | None) -> str:
+def final_message(response: LLMResult) -> AIMessage | None:
+    """The reply message of a finished model call, or None when it carries none."""
+    generation = response.generations[0][0] if response.generations and response.generations[0] else None
+    message = generation.message if isinstance(generation, ChatGeneration) else None
+    return message if isinstance(message, AIMessage) else None
+
+
+def caller_of(tags: list[str] | None) -> str:
     return next((tag for tag in tags or [] if tag in _CALLER_NAMES), UNTAGGED)
 
 
@@ -63,13 +70,12 @@ class UsageTally(BaseCallbackHandler):
     def on_llm_end(
         self, response: LLMResult, *, run_id: UUID, parent_run_id: UUID | None = None, **kwargs: object
     ) -> None:
-        generation = response.generations[0][0] if response.generations and response.generations[0] else None
-        message = generation.message if isinstance(generation, ChatGeneration) else None
-        usage = message.usage_metadata if isinstance(message, AIMessage) else None
+        message = final_message(response)
+        usage = message.usage_metadata if message is not None else None
         if not usage:
             return
         tags = kwargs.get("tags")
-        caller = _caller_of(tags if isinstance(tags, list) else None)
+        caller = caller_of(tags if isinstance(tags, list) else None)
         added = TokenCounts(
             input=usage.get("input_tokens", 0),
             output=usage.get("output_tokens", 0),
