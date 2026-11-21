@@ -98,16 +98,19 @@ def _turn_line(halt_reason: HaltReason, config: RunnableConfig) -> PanelLine:
     return PanelLine(TURN, (f"halt_reason={halt_reason.value}", f"fallback={fallback}", f"thread_id={thread_id}"))
 
 
-def _token_line(usage: TurnUsage | None) -> PanelLine:
-    """The turn's total, then each caller by name. A turn saved before tokens were counted has none."""
-    if usage is None:
-        return PanelLine(TOKEN_COUNTS, (NONE_TEXT,))
+def token_values(usage: TurnUsage) -> tuple[str, ...]:
+    """The turn's total, then each caller by name."""
 
     def value(name: str, counts: TokenCounts) -> str:
         return f"{name}: in={counts.input} out={counts.output} reasoning={counts.reasoning}"
 
     callers = (value(name, usage.by_caller[name]) for name in sorted(usage.by_caller))
-    return PanelLine(TOKEN_COUNTS, (value(_TOTAL, usage.total), *callers))
+    return (value(_TOTAL, usage.total), *callers)
+
+
+def _token_line(usage: TurnUsage | None) -> PanelLine:
+    """The turn's token values. A turn saved before tokens were counted has none."""
+    return PanelLine(TOKEN_COUNTS, (NONE_TEXT,) if usage is None else token_values(usage))
 
 
 def _learner_line(learner: LearnerState) -> PanelLine:

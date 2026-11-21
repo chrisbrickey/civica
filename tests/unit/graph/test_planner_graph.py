@@ -5,6 +5,7 @@ The subgraph runs with an InMemorySaver checkpointer and an InMemoryStore;
 retrieval, content generation and the trace writer are fakes. No network, no database.
 """
 
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import replace
@@ -94,6 +95,11 @@ UNKNOWN_KIND = "sample-unknown-kind"
 UNKNOWN_TOOL = "sample-unknown-tool"
 SAMPLE_ARG_VALUE = "sample-arg-value"
 SUMMARY = "sample-session-summary"
+
+# Provider metadata on replies
+NODES_LOGGER = "civica.graph.nodes"
+TRUNCATED_METADATA: dict[str, Any] = {"stop_reason": "max_tokens"}  # type: ignore[explicit-any]
+COMPLETE_STOP_REASONS = ("end_turn", "tool_use")
 
 SUGGESTED_THEME = VIVRE_DANS_LA_SOCIETE_FRANCAISE
 MULTI_QUERY_THEME = HISTOIRE_GEOGRAPHIE_ET_CULTURE
@@ -365,6 +371,95 @@ class TestStepBound:
         assert lesson.context_chunks
         assert {c.chunk.theme for c in lesson.context_chunks} == {SUGGESTED_THEME}
         assert (SUGGESTED_THEME.display_name_fr, SUGGESTED_THEME) in planner_fakes.retriever.calls
+
+
+def _with_stop(message: AIMessage, metadata: dict[str, Any]) -> AIMessage:  # type: ignore[explicit-any]
+    """`message` as the provider returns it with `metadata` attached."""
+    return message.model_copy(update={"response_metadata": metadata})
+
+
+def _nodes_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == NODES_LOGGER and record.levelno >= logging.WARNING
+    ]
+
+
+class TestTruncatedPlannerResponse:
+    """A planner reply cut off at the token cap is reported in the logs, and the turn goes on."""
+
+    def test_warns_when_a_tool_call_reply_hit_the_token_cap(
+        self, planner_fakes: PlannerFakes, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        model = _scripted(
+            _with_stop(tool_call(SUGGEST_THEME, "call-suggest"), TRUNCATED_METADATA),
+            final_message(FINAL_TEXT),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            _run(planner_fakes, model)
+
+        assert _nodes_warnings(caplog)
+
+    def test_warns_when_a_final_reply_hit_the_token_cap(
+        self, planner_fakes: PlannerFakes, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        model = _scripted(_with_stop(final_message(FINAL_TEXT), TRUNCATED_METADATA))
+
+        with caplog.at_level(logging.WARNING):
+            _run(planner_fakes, model)
+
+        assert _nodes_warnings(caplog)
+
+    @pytest.mark.parametrize("stop_reason", COMPLETE_STOP_REASONS)
+    def test_does_not_warn_when_replies_finished_normally(
+        self, planner_fakes: PlannerFakes, caplog: pytest.LogCaptureFixture, stop_reason: str
+    ) -> None:
+        metadata = {"stop_reason": stop_reason}
+        model = _scripted(
+            _with_stop(tool_call(SUGGEST_THEME, "call-suggest"), metadata),
+            _with_stop(final_message(FINAL_TEXT), metadata),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            _run(planner_fakes, model)
+
+        assert not _nodes_warnings(caplog)
+
+    def test_warning_leaves_out_learner_text_and_tool_calls(
+        self, planner_fakes: PlannerFakes, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        truncated = tool_call(UNKNOWN_TOOL, "call-unknown", sample_arg=SAMPLE_ARG_VALUE)
+        model = _scripted(_with_stop(truncated, TRUNCATED_METADATA), final_message(FINAL_TEXT))
+
+        with caplog.at_level(logging.WARNING):
+            _run(planner_fakes, model)
+
+        warnings = _nodes_warnings(caplog)
+        assert warnings
+        for secret in (LEARNER_MESSAGE, UNKNOWN_TOOL, "sample_arg", SAMPLE_ARG_VALUE):
+            assert all(secret not in warning for warning in warnings)
+
+    def test_truncated_tool_call_still_runs_and_the_turn_completes(
+        self, planner_fakes: PlannerFakes
+    ) -> None:
+        model = _scripted(
+            _with_stop(tool_call(SUGGEST_THEME, "call-suggest"), TRUNCATED_METADATA),
+            final_message(FINAL_TEXT),
+        )
+
+        state = _run(planner_fakes, model)
+
+        assert state[TOOL_CALLS] == [ToolCall(name=SUGGEST_THEME, args={})]
+        assert state[REPLY] == FINAL_TEXT
+        assert state[HALT_REASON] == HaltReason.FINAL_MESSAGE
+
+    def test_truncated_final_reply_is_still_the_reply(self, planner_fakes: PlannerFakes) -> None:
+        state = _run(planner_fakes, _scripted(_with_stop(final_message(FINAL_TEXT), TRUNCATED_METADATA)))
+
+        assert state[REPLY] == FINAL_TEXT
+        assert state[HALT_REASON] == HaltReason.FINAL_MESSAGE
 
 
 class TestLessonLength:

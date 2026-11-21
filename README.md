@@ -293,6 +293,12 @@ So the data itself survives the `docker compose down` command and will still be 
   uv run python -m civica.scripts.migrate        # Re-apply schema to fresh DB
 ```
 
+### Token measurement
+```
+  uv run python -m civica.scripts.measure_tokens   # writes a per-call CSV under data/
+```
+Runs scripted turns through the real graph and records token use against each configured maximum. Makes real API calls. Costs roughly 1 euro as of 2026.
+
 
 ### Project structure
 

@@ -21,6 +21,10 @@ INSERT INTO users (user_id, username, secret_hash)
 VALUES (%s, %s, %s)
 """
 
+_SELECT_USER_ID_SQL = """
+SELECT user_id FROM users WHERE username = %s
+"""
+
 _SELECT_USER_SQL = """
 SELECT user_id, secret_hash FROM users WHERE username = %s
 """
@@ -127,3 +131,16 @@ def verify(
     return run_on_connection(
         lambda connection: _verify_on_connection(username, secret, connection), conn
     )
+
+
+def _find_on_connection(username: str, conn: psycopg.Connection[psycopg.rows.TupleRow]) -> UserId | None:
+    row = conn.execute(_SELECT_USER_ID_SQL, (normalize_username(username),)).fetchone()
+    return UserId(row[0]) if row is not None else None
+
+
+def find_user_id(
+    username: str,
+    conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None,
+) -> UserId | None:
+    """The UserId registered under a username, or None when it is unknown. Normalizes the username."""
+    return run_on_connection(lambda connection: _find_on_connection(username, connection), conn)

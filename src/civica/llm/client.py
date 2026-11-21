@@ -14,7 +14,7 @@ GENERATION_MODEL = "claude-sonnet-5"
 REQUEST_TIMEOUT_SECONDS = 120.0
 
 # Anthropic's signal that it stopped at the token cap rather than finishing the answer.
-_ANTHROPIC_TRUNCATION_STOP_REASON = "max_tokens"
+TRUNCATION_STOP_REASON = "max_tokens"
 
 class ModelCaller(StrEnum):
     """Which flow a model call belongs to. Carried as a tag on the model so usage can be split by flow."""
@@ -54,7 +54,7 @@ class AnthropicChat:
     def was_truncated(self, response: BaseMessage) -> bool:
         """True when the provider cut the response off at the token cap instead of finishing."""
         stop_reason = response.response_metadata.get("stop_reason")
-        return bool(stop_reason == _ANTHROPIC_TRUNCATION_STOP_REASON)
+        return bool(stop_reason == TRUNCATION_STOP_REASON)
 
 
 # Sized for a single grounded explanation, not for long multi-question generation.
@@ -65,8 +65,8 @@ EXPLANATION_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=2048, cal
 # could risk cutting off the generated questions, but this would raise QuestionGenerationError so it would not fail silently.
 QUIZ_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=8192, caller=ModelCaller.QUIZ)
 
-# Sized for short tool-calling turns: tool arguments and a brief reply, not long generation.
-PLANNER_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=1024, caller=ModelCaller.PLANNER)
+# Sized for reasoning, tool calls, and a brief reply.
+PLANNER_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=2048, caller=ModelCaller.PLANNER)
 
 _clients: dict[ChatProfile, BaseChatModel] = {}
 

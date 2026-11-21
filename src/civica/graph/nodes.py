@@ -3,6 +3,7 @@
 Nodes only orchestrate. Business logic lives in explanation, assessment, and memory.
 """
 
+import logging
 import uuid
 from collections.abc import Callable
 from typing import Annotated, Any, Final, Protocol, TypedDict, TypeVar, cast
@@ -41,9 +42,12 @@ from civica.graph.planner import (
 from civica.graph.prompts import PLANNER_PROMPTS
 from civica.graph.router import suggest_review_theme
 from civica.graph.trace import TraceStep
+from civica.llm.client import PLANNER_PROFILE
 from civica.memory.writer import MemoryNotAllowed
 
 __all__ = ["PlannerContext", "build_planner_graph"]
+
+logger = logging.getLogger(__name__)
 
 START_TURN: Final = "start_turn"
 PLANNER_MODEL: Final = "planner_model"
@@ -174,6 +178,11 @@ def _make_planner_model(deps: PlannerDeps) -> Node:
         assert isinstance(response, AIMessage)
 
         model_calls = state["model_calls"] + 1
+        if PLANNER_PROFILE.was_truncated(response):
+            logger.warning(
+                "Planner model call %d hit the generation token cap. The reply or tool calls may be incomplete. Consider raising the cap.",
+                model_calls,
+            )
         update: dict[str, object] = {"messages": [response], "model_calls": model_calls}
         calls = [ToolCall(name=c["name"], args=dict(c["args"])) for c in response.tool_calls]
 

@@ -45,3 +45,16 @@ def test_each_profile_builds_a_model_tagged_with_its_caller(
     model = profile.build()
 
     assert model.tags == [caller]
+
+
+# Largest single planner call in the Step 16 token measurement (2026-11-21), reasoning included.
+_LARGEST_MEASURED_PLANNER_OUTPUT = 770
+
+
+def test_planner_cap_leaves_twice_the_largest_measured_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _SAMPLE_API_KEY)
+
+    model = PLANNER_PROFILE.build()
+
+    assert isinstance(model, ChatAnthropic)
+    assert model.max_tokens >= 2 * _LARGEST_MEASURED_PLANNER_OUTPUT

@@ -1606,44 +1606,71 @@ The formula, for each response drawn:
 
 ---
 
-## Step 16: Token usage per turn
+## ✅ Step 16: Token usage per turn
 
 **Goal:** Show what each turn costs. Total the token usage of every LLM call in a turn (planner, explanation, question generation, critic), split by caller, and show it in the developer panel (developer mode step). Then use real numbers to size the token caps and inform the LLM choice.
 
-- **Test:** extend `tests/unit/llm/test_client.py`: each profile's model carries its caller tag (`planner`, `explanation`, `quiz`).
-- **Test:** `tests/unit/llm/test_usage.py` (unit: fake chat models whose replies carry `usage_metadata`; no network)
-  - Calls made through two different profiles in one run are totaled separately per caller, and the turn total is their sum.
-  - Input, output, and reasoning tokens are each summed. A reply without `usage_metadata` adds nothing and does not error.
-  - A fresh tally starts at zero so that one turn's usage never leaks into the next.
-- **Test:** extend `tests/integration/graph/test_graph.py`
-  - A turn run with a usage tally in its `context` saves that turn's totals in the final state, read back through the real checkpointer. This also proves the new type is registered in `_STATE_TYPES`.
-  - A turn run without a tally saves no totals and does not error.
-  - A second turn saves only its own totals.
-- **Test:** extend `tests/unit/ui/test_turns.py`
-  - Each turn gets a fresh tally, passed both in the graph config's callbacks and in `PlannerContext`.
-  - The turn end log line carries the turn's total tokens.
-- **Test:** extend `tests/integration/ui/test_dev_panel.py`: after a lesson turn the panel's **Turn** line shows the turn's token totals per caller, and they survive a reload.
-- Create `src/civica/llm/usage.py`:
-  - `UsageTally`: a small callback handler that follows LangChain's `UsageMetadataCallbackHandler` pattern but is keyed by caller tag (instead of model name), so totals separate the planner from the explanation and question generation.
-  - `TurnUsage`: a frozen dataclass of input, output, and reasoning tokens per caller, plus the total. `UsageTally.totals()` returns one.
-- Extend `src/civica/llm/client.py`: tag each profile's model with its caller name (`ChatAnthropic` accepts `tags`), so usage can be split by caller even though every profile uses the same model.
-- Extend `src/civica/graph/planner.py`: add `usage: UsageTally | None = None` to `PlannerContext`. Callers that do not count tokens, such as tests and scripts, leave it unset.
-- Extend `src/civica/graph/graph.py`: add `token_usage: TurnUsage | None` to `GraphState`. `memory_writer` returns `runtime.context.usage.totals()` (or `None` with no tally) in its update.
-  - Why here: `memory_writer` runs after the last model call of every path, so the totals are complete, and they are saved in the checkpoint `memory_writer` already writes. No extra save, no new table, and no new DB reader in the UI.
-  - A failed turn never reaches `memory_writer`, so it saves no totals. The page shows the unfinished-turn notice for it anyway.
-- Extend `src/civica/memory/checkpointer.py`: add `TurnUsage` to `_STATE_TYPES`.
-- Extend `src/civica/ui/turns.py`:
-  - Create a fresh `UsageTally` for each turn. Pass it in the graph config (`config={"callbacks": [tally], ...}`), so LangChain hands it every model call made inside the graph's nodes and tools, and in `PlannerContext(usage=tally)`, so `memory_writer` can save its totals. No engine signature changes, and no caller has to return its usage.
-  - Add the turn's total tokens to the turn end log line (`tokens=`), so totals across many turns can be pulled from the logs.
-- Extend `src/civica/ui/dev_panel.py` and `src/civica/ui/pages/coach.py`: show the per-caller and total tokens for the turn on the **Turn** line, read from the saved `token_usage`. A turn saved before this step shows "none".
-- **Check In:** 
-    - Stop and confirm with the user that the token totals look right on a few real lesson and quiz turns. 
-    - Then decide together, using that data, whether to change any cap (e.g. `EXPLANATION_PROFILE` is `max_tokens=2048`) or set `reasoning_effort`. Change nothing without data. 
-    - Some background for the check-in decision:
-      - Spot checks against Sonnet 5 measured `reasoning` tokens at 0, on a simple question and on a deliberately hard one, with content arriving as a plain string rather than typed blocks. Adaptive thinking leaves the decision to the model and it declined both times. Treat this as two data points, not a distribution, and do not assume thinking spend without measuring.
-      - `get_chat_model()` sends no thinking or effort parameter, so adaptive behavior is whatever the server defaults to. Setting `reasoning_effort` makes langchain-anthropic add `thinking={"type": "adaptive", "display": "summarized"}` on its own. `Explanation.text` stays clean either way, because `explain()` reads `response.text`, which takes text blocks only.
-      - Do not reach for `thinking={"type": "disabled"}` on Opus 5. It is rejected at `xhigh` and `max` effort, and it can leak literal `<thinking>` tags into the visible text, where `response.text` cannot filter them. Lower the effort instead.
-      - The truncation warning already in `explain()` is the signal that the cap is set too low. It has not fired in practice.
+**Tests:**
+  - Extend `tests/unit/llm/test_client.py`: each profile's model carries its caller tag (`planner`, `explanation`, `quiz`).
+  - `tests/unit/llm/test_usage.py` (unit: fake chat models whose replies carry `usage_metadata`; no network)
+    - Calls made through two different profiles in one run are totaled separately per caller, and the turn total is their sum.
+    - Input, output, and reasoning tokens are each summed. A reply without `usage_metadata` adds nothing and does not error.
+    - A fresh tally starts at zero so that one turn's usage never leaks into the next.
+  - Extend `tests/integration/graph/test_graph.py`
+    - A turn run with a usage tally in its `context` saves that turn's totals in the final state, read back through the real checkpointer. This also proves the new type is registered in `_STATE_TYPES`.
+    - A turn run without a tally saves no totals and does not error.
+    - A second turn saves only its own totals.
+  - Extend `tests/unit/ui/test_turns.py`
+    - Each turn gets a fresh tally, passed both in the graph config's callbacks and in `PlannerContext`.
+    - The turn end log line carries the turn's total tokens.
+  - Extend `tests/integration/ui/test_dev_panel.py`: after a lesson turn the panel's **Turn** line shows the turn's token totals per caller, and they survive a reload.
+
+**Implementation:**
+  - Create `src/civica/llm/usage.py`:
+    - `UsageTally`: a small callback handler that follows LangChain's `UsageMetadataCallbackHandler` pattern but is keyed by caller tag (instead of model name), so totals separate the planner from the explanation and question generation.
+    - `TurnUsage`: a frozen dataclass of input, output, and reasoning tokens per caller, plus the total. `UsageTally.totals()` returns one.
+  - Extend `src/civica/llm/client.py`: tag each profile's model with its caller name (`ChatAnthropic` accepts `tags`), so usage can be split by caller even though every profile uses the same model.
+  - Extend `src/civica/graph/planner.py`: add `usage: UsageTally | None = None` to `PlannerContext`. Callers that do not count tokens, such as tests and scripts, leave it unset.
+  - Extend `src/civica/graph/graph.py`: add `token_usage: TurnUsage | None` to `GraphState`. `memory_writer` returns `runtime.context.usage.totals()` (or `None` with no tally) in its update.
+    - Why here: `memory_writer` runs after the last model call of every path, so the totals are complete, and they are saved in the checkpoint `memory_writer` already writes. No extra save, no new table, and no new DB reader in the UI.
+    - A failed turn never reaches `memory_writer`, so it saves no totals. The page shows the unfinished-turn notice for it anyway.
+  - Extend `src/civica/memory/checkpointer.py`: add `TurnUsage` to `_STATE_TYPES`.
+  - Extend `src/civica/ui/turns.py`:
+    - Create a fresh `UsageTally` for each turn. Pass it in the graph config (`config={"callbacks": [tally], ...}`), so LangChain hands it every model call made inside the graph's nodes and tools, and in `PlannerContext(usage=tally)`, so `memory_writer` can save its totals. No engine signature changes, and no caller has to return its usage.
+    - Add the turn's total tokens to the turn end log line (`tokens=`), so totals across many turns can be pulled from the logs.
+  - Extend `src/civica/ui/dev_panel.py` and `src/civica/ui/pages/coach.py`: show the per-caller and total tokens for the turn on the **Turn** line, read from the saved `token_usage`. A turn saved before this step shows "none".
+
+**Check In Guidelines:** 
+  - Stop and confirm with the user that the token totals look right on a few real lesson and quiz turns. 
+  - Then decide together, using that data, whether to change any cap (e.g. `EXPLANATION_PROFILE` is `max_tokens=2048`) or set `reasoning_effort`. Change nothing without data. 
+  - Background for the check-in decision:
+    - Spot checks against Sonnet 5 measured `reasoning` tokens at 0, on a simple question and on a deliberately hard one, with content arriving as a plain string rather than typed blocks. Adaptive thinking leaves the decision to the model and it declined both times. Treat this as two data points, not a distribution, and do not assume thinking spend without measuring.
+    - `get_chat_model()` sends no thinking or effort parameter, so adaptive behavior is whatever the server defaults to. Setting `reasoning_effort` makes langchain-anthropic add `thinking={"type": "adaptive", "display": "summarized"}` on its own. `Explanation.text` stays clean either way, because `explain()` reads `response.text`, which takes text blocks only.
+    - Do not reach for `thinking={"type": "disabled"}` on Opus 5. It is rejected at `xhigh` and `max` effort, and it can leak literal `<thinking>` tags into the visible text, where `response.text` cannot filter them. Lower the effort instead.
+    - The truncation warning already in `explain()` is the signal that the cap is set too low. It has not fired in practice.
+
+**Check In Results**
+  - The run: `civica.scripts.measure_tokens` ran 25 scripted turns on the real API and recorded every model call.
+    - Setup: critic on, `planner-v008` prompt, `claude-sonnet-5` everywhere, caps 1024 planner / 2048 explanation / 8192 quiz.
+    - Data: `data/token_measurements/calls-20261121-143139.csv` (git ignored)
+    - Known script flaw: The first version of this script, which was used to run the experiment, had an error: it did not expect the quiz call on full lessons. The result was that the script output produced 8 `"quiz: called unexpectedly"` even though those calls were expected. I corrected the expectation in the script. I did not re-run the experiment because that issue does not impact token counts.
+  - Largest token count on a single call vs. the max token cap:
+    - Planner: 770 of 1024 (75%).
+    - Quiz: 2280 of 8192 (28%, a 12-question quiz).
+    - Explanation: 403 of 2048 (20%).
+    - No calls hit the cap so no responses were truncated.
+  - Findings:
+    - Token accounting is validated correct: saved totals and the panel match the raw API usage on every turn.
+    - Reasoning is not 0. The planner reasons on about half its calls, mostly when picking tools. About 16% of output tokens.
+    - A typical turn is roughly 6,700 input and 1,100 output tokens. Slowest turn was 31s (12-question quiz).
+    - The planner's reply after a lesson or quiz is long (300 to 770 tokens, 4 to 10s), but hidden by the UI. 
+  - Decisions:
+    - Planner cap was raised to 2048 to align with the guideline of assigning caps that are twice the amount of the highest current token consumption. All other caps were kept as is.
+    - `reasoning_effort` remains unset. Reasoning costs very little and helps the planner pick tools. Limiting tokens for this task risks worse tool choices (significant impact to quality) in exchange for a small amount of savings (negligible).
+    - No change to the planner model. Again, it's not worth a small amount of savings (less expensive model) if it jeopardizes correct tool choice. 
+    - Follow-up tasks were added to backlog to address slow lesson turns:
+      - the planner writes a long reply the learner never sees
+      - brief lessons that skip `teach`
 
 - **README:**
   - Add a line to the web app usage text that the developer panel shows each turn's token usage by caller.
@@ -1656,7 +1683,7 @@ The formula, for each response drawn:
     - coach.py did not require a change because the panel is built entirely in dev_panel.py.
     - The critic counts under quiz, because it uses QUIZ_PROFILE. Splitting it out would need its own profile.
     - A model call with no caller tag is counted under untagged rather than dropped.
-    - Have not yet performed the optimization check-in activity.
+    - The check-in was completed with a measurement script rather than by hand. Results and decisions are documented above in the check-in section.
 
 ---
 
