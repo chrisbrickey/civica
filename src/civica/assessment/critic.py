@@ -14,7 +14,7 @@ from civica.assessment.prompts import QUIZ_PROMPTS
 from civica.assessment.replies import strip_code_fence
 from civica.domain.question import Question
 from civica.domain.themes import Theme
-from civica.llm.client import QUIZ_PROFILE, get_chat_model
+from civica.llm.client import CRITIC_PROFILE, get_chat_model
 from civica.retrieval.content import ContentChunk
 
 logger = logging.getLogger(__name__)
@@ -97,8 +97,8 @@ class LlmCritic:
         groups: Sequence[Sequence[ContentChunk]],
     ) -> list[Verdict]:
         if self._chat_client is None:
-            self._chat_client = get_chat_model(QUIZ_PROFILE)
+            self._chat_client = get_chat_model(CRITIC_PROFILE)
         response = self._chat_client.invoke(_build_messages(theme, questions, groups))
-        if QUIZ_PROFILE.was_truncated(response):
+        if CRITIC_PROFILE.was_truncated(response):
             logger.warning("Critique for %r hit the token cap; reply may be cut off.", theme.slug)
         return _parse_verdicts(response.text, len(questions))

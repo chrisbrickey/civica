@@ -12,11 +12,11 @@ import pytest
 from langchain_core.messages import HumanMessage
 from langchain_core.messages.ai import UsageMetadata
 
-from civica.llm.client import EXPLANATION_PROFILE, PLANNER_PROFILE, QUIZ_PROFILE
+from civica.llm.client import CRITIC_PROFILE, EXPLANATION_PROFILE, PLANNER_PROFILE, QUIZ_PROFILE
 from civica.llm.usage import UNTAGGED, TokenCounts, TurnUsage
 from civica.scripts.measure_tokens import CallRecord, CallRecorder, check_turn, default_scenarios, summarize, write_csv
 from tests.support.assessment import FakeChatModel
-from tests.support.llm import EXPLANATION_TAG, PLANNER_TAG, QUIZ_TAG, mapped_usage, raw_usage
+from tests.support.llm import CRITIC_TAG, EXPLANATION_TAG, PLANNER_TAG, QUIZ_TAG, mapped_usage, raw_usage
 from tests.support.usage import token_line, turn_usage
 
 # ---------------------------------------------------------------------------
@@ -330,16 +330,17 @@ def test_each_caller_is_summarized_against_its_profile_cap() -> None:
     assert rows[EXPLANATION_TAG].cap_share == pytest.approx(1024 / EXPLANATION_PROFILE.max_tokens)
 
 
-def test_critic_and_question_calls_share_the_quiz_cap() -> None:
-    """The critic is built from the quiz profile, so its calls carry the quiz tag."""
-    records = [_record(QUIZ_TAG, output_tokens=3000), _record(QUIZ_TAG, output_tokens=200)]
+def test_critic_calls_are_summarized_on_their_own_row_against_the_critic_cap() -> None:
+    records = [_record(QUIZ_TAG, output_tokens=3000), _record(CRITIC_TAG, output_tokens=200)]
 
-    (row,) = summarize(records)
+    rows = {row.caller: row for row in summarize(records)}
 
-    assert row.caller == QUIZ_TAG
-    assert row.calls == 2
-    assert row.cap == QUIZ_PROFILE.max_tokens
-    assert row.max_output == 3000
+    assert rows[QUIZ_TAG].calls == 1
+    assert rows[QUIZ_TAG].cap == QUIZ_PROFILE.max_tokens
+    assert rows[CRITIC_TAG].calls == 1
+    assert rows[CRITIC_TAG].max_output == 200
+    assert rows[CRITIC_TAG].cap == CRITIC_PROFILE.max_tokens
+    assert rows[CRITIC_TAG].cap_share == pytest.approx(200 / CRITIC_PROFILE.max_tokens)
 
 
 def test_reasoning_is_totalled_per_caller() -> None:
@@ -419,7 +420,9 @@ def test_csv_of_no_calls_has_only_the_header(tmp_path: Path) -> None:
 # default_scenarios
 # ---------------------------------------------------------------------------
 
-_WITH_CHECK: Final = frozenset({PLANNER_TAG, EXPLANATION_TAG, QUIZ_TAG})
+# The script turns on the critic, so every turn that generates questions triggers a 'check' to validate the question's quality.
+_WITH_CHECK: Final = frozenset({PLANNER_TAG, EXPLANATION_TAG, QUIZ_TAG, CRITIC_TAG})
+_QUIZ_CALLERS: Final = frozenset({PLANNER_TAG, QUIZ_TAG, CRITIC_TAG})
 _WITHOUT_CHECK: Final = frozenset({PLANNER_TAG, EXPLANATION_TAG})
 
 
@@ -441,3 +444,7 @@ def test_full_lessons_expect_the_comprehension_check(prefix: str) -> None:
 @pytest.mark.parametrize("prefix", ["lesson-brief-", "hard-"])
 def test_brief_lessons_and_direct_questions_expect_no_check(prefix: str) -> None:
     assert _expected_by_prefix(prefix) == {_WITHOUT_CHECK}
+
+
+def test_quizzes_expect_the_critic_alongside_question_generation() -> None:
+    assert _expected_by_prefix("quiz-") == {_QUIZ_CALLERS}
