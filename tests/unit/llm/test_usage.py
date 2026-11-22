@@ -11,7 +11,7 @@ from langchain_core.messages.ai import UsageMetadata
 from civica.llm.client import ModelCaller
 from civica.llm.usage import UNTAGGED, TokenCounts, TurnUsage, UsageTally
 from tests.support.assessment import FakeChatModel
-from tests.support.llm import CONTENT_USAGE, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE, QUIZ_TAG, token_usage
+from tests.support.llm import CONTENT_USAGE, CRITIC_TAG, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE, QUIZ_TAG, token_usage
 from tests.support.usage import counts_of, sum_counts, turn_usage
 
 # ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ def _call(model: FakeChatModel, tally: UsageTally, *run_tags: str) -> None:
 
 
 def test_caller_names_are_the_tags_the_profiles_carry() -> None:
-    assert {caller.value for caller in ModelCaller} == {PLANNER_TAG, EXPLANATION_TAG, QUIZ_TAG}
+    assert {caller.value for caller in ModelCaller} == {PLANNER_TAG, EXPLANATION_TAG, QUIZ_TAG, CRITIC_TAG}
 
 
 # ---------------------------------------------------------------------------

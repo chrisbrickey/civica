@@ -37,6 +37,7 @@ from civica.graph.graph import GraphInput, InputKind, build_graph
 from civica.graph.nodes import PlannerContext
 from civica.graph.planner import default_planner_deps, read_learner_state
 from civica.llm.client import (
+    CRITIC_PROFILE,
     EXPLANATION_PROFILE,
     PLANNER_PROFILE,
     QUIZ_PROFILE,
@@ -58,11 +59,11 @@ _STOP_REASON_KEY: Final = "stop_reason"
 _NO_SAVED_USAGE: Final = ("none",)
 _DEFAULT_OUT_DIR: Final = Path("data/token_measurements")  # data/ is git-ignored
 
-# The critic is built from the quiz profile, so quiz calls cover it too.
 _CAPS: Final[Mapping[str, int]] = {
     ModelCaller.PLANNER.value: PLANNER_PROFILE.max_tokens,
     ModelCaller.EXPLANATION.value: EXPLANATION_PROFILE.max_tokens,
     ModelCaller.QUIZ.value: QUIZ_PROFILE.max_tokens,
+    ModelCaller.CRITIC.value: CRITIC_PROFILE.max_tokens,
 }
 
 
@@ -295,10 +296,12 @@ def run_scenarios(graph: CoachGraph, scenarios: Sequence[Scenario], user_id: Use
     return results
 
 
+# The planner prompt adds a one-question 'check' on the learner's retention after a full lesson.
+# The token measurement script turns the critic on for evaluation regardless of whether it is turned on in production.
 _LESSON: Final = frozenset({ModelCaller.PLANNER.value, ModelCaller.EXPLANATION.value})
-# The planner prompt adds a one-question check after a full lesson.
-_LESSON_WITH_CHECK: Final = _LESSON | {ModelCaller.QUIZ.value}
-_QUIZ: Final = frozenset({ModelCaller.PLANNER.value, ModelCaller.QUIZ.value})
+_LESSON_WITH_CHECK: Final = _LESSON | {ModelCaller.QUIZ.value, ModelCaller.CRITIC.value}
+
+_QUIZ: Final = frozenset({ModelCaller.PLANNER.value, ModelCaller.QUIZ.value, ModelCaller.CRITIC.value})
 _REPLY: Final = frozenset({ModelCaller.PLANNER.value})
 
 _REPLY_MESSAGES: Final = (

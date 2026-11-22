@@ -15,6 +15,7 @@ from pydantic import PrivateAttr
 PLANNER_TAG: Final = "planner"
 EXPLANATION_TAG: Final = "explanation"
 QUIZ_TAG: Final = "quiz"
+CRITIC_TAG: Final = "critic"
 
 
 def token_usage(input_tokens: int, output_tokens: int, reasoning: int | None = None) -> UsageMetadata:

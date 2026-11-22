@@ -3,8 +3,8 @@
 import pytest
 from langchain_anthropic import ChatAnthropic
 
-from civica.llm.client import EXPLANATION_PROFILE, PLANNER_PROFILE, QUIZ_PROFILE, AnthropicChat
-from tests.support.llm import EXPLANATION_TAG, PLANNER_TAG, QUIZ_TAG
+from civica.llm.client import CRITIC_PROFILE, EXPLANATION_PROFILE, PLANNER_PROFILE, QUIZ_PROFILE, AnthropicChat
+from tests.support.llm import CRITIC_TAG, EXPLANATION_TAG, PLANNER_TAG, QUIZ_TAG
 
 _SAMPLE_API_KEY = "sample-api-key"
 
@@ -15,6 +15,7 @@ _SAMPLE_API_KEY = "sample-api-key"
         pytest.param(EXPLANATION_PROFILE, id="explanation"),
         pytest.param(QUIZ_PROFILE, id="quiz"),
         pytest.param(PLANNER_PROFILE, id="planner"),
+        pytest.param(CRITIC_PROFILE, id="critic"),
     ],
 )
 def test_each_profile_builds_a_model_with_a_request_timeout(
@@ -35,6 +36,7 @@ def test_each_profile_builds_a_model_with_a_request_timeout(
         pytest.param(EXPLANATION_PROFILE, EXPLANATION_TAG, id="explanation"),
         pytest.param(QUIZ_PROFILE, QUIZ_TAG, id="quiz"),
         pytest.param(PLANNER_PROFILE, PLANNER_TAG, id="planner"),
+        pytest.param(CRITIC_PROFILE, CRITIC_TAG, id="critic"),
     ],
 )
 def test_each_profile_builds_a_model_tagged_with_its_caller(
@@ -45,6 +47,12 @@ def test_each_profile_builds_a_model_tagged_with_its_caller(
     model = profile.build()
 
     assert model.tags == [caller]
+
+
+def test_critic_profile_uses_the_quiz_model_and_cap() -> None:
+    """Splitting the critic's tokens out must not change how its model is called."""
+    assert CRITIC_PROFILE.model == QUIZ_PROFILE.model
+    assert CRITIC_PROFILE.max_tokens == QUIZ_PROFILE.max_tokens
 
 
 # Largest single planner call in the Step 16 token measurement (2026-11-21), reasoning included.

@@ -22,6 +22,7 @@ class ModelCaller(StrEnum):
     PLANNER = "planner"
     EXPLANATION = "explanation"
     QUIZ = "quiz"
+    CRITIC = "critic"
 
 
 class ChatProfile(Protocol):
@@ -64,6 +65,10 @@ EXPLANATION_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=2048, cal
 # The buffer is free. We only pay for tokens actually generated. max_tokens is tunable. Lowering the max_tokens cap
 # could risk cutting off the generated questions, but this would raise QuestionGenerationError so it would not fail silently.
 QUIZ_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=8192, caller=ModelCaller.QUIZ)
+
+# The critic double-checks questions and generates a very small output verdict. The max token allotment for the critic
+# could be much less than the allotment for a quiz because the output of the critic is comparatively small.
+CRITIC_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=8192, caller=ModelCaller.CRITIC)
 
 # Sized for reasoning, tool calls, and a brief reply.
 PLANNER_PROFILE = AnthropicChat(model=GENERATION_MODEL, max_tokens=2048, caller=ModelCaller.PLANNER)

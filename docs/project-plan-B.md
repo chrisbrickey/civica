@@ -933,8 +933,8 @@ _This step was added and implemented after some of the subsequent steps, but thi
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
     - The critic lives in its own module (`assessment/critic.py`). Prompts moved to `assessment/prompts.py`.
     - LLM call optimization: The critic checks a whole theme batch in one call (instead of per-theme LLM calls). Only failed questions are regenerated, at most `MAX_REFINE_ATTEMPTS = 2` times.
-    - The critic reuses `QUIZ_PROFILE` (same model and max_tokens). No `CRITIC_PROFILE` was added.
-    - Quizes are permitted to be shorter than expected as long as they are not completely blank. However, a mock exam has higher standards because it must adhere to the official exam structure. So if the LLM returns a mock exam that does not meet the requirements for a given them, the app raises `QuestionGenerationError` and persists nothing.
+    - At this point, the critic reuses `QUIZ_PROFILE` (same model and max_tokens). No `CRITIC_PROFILE` was added during this step. `CRITIC_PROFILE` was added later to facilitate independent measurement of token counts.
+    - Quizes are permitted to be shorter than expected as long as they are not completely blank. However, a mock exam has higher standards because it must adhere to the official exam structure. So if the LLM returns a mock exam that does not meet the requirements for a given theme, the app raises `QuestionGenerationError` and persists nothing.
     - The critic is off by default. During validation runs, the critic rejected 0 of 25 questions, which doubled the cost for no quality gain. The critic functionality may be useful as the application evolves. To turn the critic on, pass `critic=LlmCritic()`.
     - Validation runs of the critic surfaced another issue: questions that mention "the passage" or "the fiche" and questions about the course sheets themselves. To address this, the generation prompt (`quiz-v003`) was updated to forbid both. The critic was also updated to check for this issue (if it is turned on). A rerun showed 0 of 25 questions with either problem.
     - Content note: Two corpus claims conflict with outside sources: 1) cousin marriage is "interdit" 2) the Commission "replaced" the Haute Autorité in 1957. The app's intention is to be loyal to the official study material in the corpus so no effort was made to adjust for this discrepency.
@@ -1653,7 +1653,8 @@ The formula, for each response drawn:
   - The run: `civica.scripts.measure_tokens` ran 25 scripted turns on the real API and recorded every model call.
     - Setup: critic on, `planner-v008` prompt, `claude-sonnet-5` everywhere, caps 1024 planner / 2048 explanation / 8192 quiz.
     - Data: `data/token_measurements/calls-20261121-143139.csv` (git ignored)
-    - Known script flaw: The first version of this script, which was used to run the experiment, had an error: it did not expect the quiz call on full lessons. The result was that the script output produced 8 `"quiz: called unexpectedly"` even though those calls were expected. I corrected the expectation in the script. I did not re-run the experiment because that issue does not impact token counts.
+    - Known script flaw: The first version of this script, which was used to run the experiment, had an error: it did not expect the quiz call on full lessons. The result was that the script output produced 8 `"quiz: called unexpectedly"` even though those calls were expected. I corrected the expectation in the script. I did not re-run the experiment because that issue does not impact token counts. 
+    - At the time of this run, the tokens for a call by the critic was included in the 'quiz' count. Later, the calls from a critic were broken out into their own profile, using the same model max token cap as calls by a quiz. I did not re-run the experiment because only the accounting changed. There was no change to the calls made, the tokens consumed, or the effective max token thresholds.
   - Largest token count on a single call vs. the max token cap:
     - Planner: 770 of 1024 (75%).
     - Quiz: 2280 of 8192 (28%, a 12-question quiz).
@@ -1681,7 +1682,6 @@ The formula, for each response drawn:
     - Added a separate section in the dev panel for Token Counts and placed the total as the first line in that section.
     - Two types were added to _STATE_TYPES (TurnUsage and its per-caller TokenCounts), not one.
     - coach.py did not require a change because the panel is built entirely in dev_panel.py.
-    - The critic counts under quiz, because it uses QUIZ_PROFILE. Splitting it out would need its own profile.
     - A model call with no caller tag is counted under untagged rather than dropped.
     - The check-in was completed with a measurement script rather than by hand. Results and decisions are documented above in the check-in section.
 

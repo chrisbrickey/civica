@@ -4,11 +4,13 @@ No network calls. No DB spinup."""
 
 import json
 import string
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import pytest
+from langchain_core.runnables import RunnableLambda
 
+from civica.assessment import critic as critic_module
 from civica.assessment.critic import CritiqueFn, LlmCritic, Verdict
 from civica.assessment.engine import (
     MAX_REFINE_ATTEMPTS,
@@ -26,6 +28,8 @@ from civica.domain.themes import (
     SYSTEME_INSTITUTIONNEL_ET_POLITIQUE,
     Theme,
 )
+from civica.llm.client import AnthropicChat
+from civica.llm.usage import UsageTally
 from civica.retrieval.content import ContentChunk
 from tests.support.assessment import (
     SAMPLE_OPTIONS,
@@ -37,6 +41,8 @@ from tests.support.assessment import (
     grouped_generation_reply,
     make_content_chunk,
 )
+from tests.support.llm import CONTENT_USAGE, CRITIC_TAG, QUIZ_TAG, token_usage
+from tests.support.usage import counts_of
 from tests.support.users import USER_ID
 
 # ---------------------------------------------------------------------------
@@ -70,6 +76,9 @@ _EXAM_THEMES = list(EXAM_QUESTION_COUNTS)
 _EXAM_FAILING_THEME = _EXAM_THEMES[0]
 # The last item of a theme is a scenario question.
 _EXAM_FAILING_POSITION = EXAM_QUESTION_COUNTS[_EXAM_FAILING_THEME] - 1
+
+# Distinct from CONTENT_USAGE so that tokens consumed by the critic generating its verdict are captured separately from question generation
+_CRITIC_USAGE = token_usage(input_tokens=1500, output_tokens=60, reasoning=12)
 
 _MALFORMED_CRITIC_REPLIES = {
     "not-json": "this is not json [",
@@ -565,3 +574,48 @@ class TestLlmCriticPrompt:
         second = _critique_prompt([_sample_question("a", correct_index=2)])
 
         assert first != second
+
+
+# ---------------------------------------------------------------------------
+# Tests: critic token usage
+# ---------------------------------------------------------------------------
+
+
+def _profile_built_chat(reply: str) -> Callable[[AnthropicChat], FakeChatModel]:
+    """Stands in for get_chat_model: a fake tagged with the asked-for profile's caller, as build() tags it."""
+
+    def build(profile: AnthropicChat) -> FakeChatModel:
+        return FakeChatModel(
+            replies=(reply,), fail_when_exhausted=True, usage=_CRITIC_USAGE, tags=[profile.caller.value]
+        )
+
+    return build
+
+
+class TestCriticTokenUsage:
+    """Tokens consumed by the critic, which generate a small verdict, are captured separately under the `critic` category."""
+
+    def test_quiz_with_the_critic_on_records_critic_tokens_apart_from_quiz(
+        self, fakes: _Fakes, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        generation = FakeChatModel(
+            replies=(_generation_reply(_FIRST_TEXT, _UNGROUNDED_TEXT, _THIRD_TEXT),),
+            fail_when_exhausted=True,
+            usage=CONTENT_USAGE,
+            tags=[QUIZ_TAG],
+        )
+        monkeypatch.setattr(
+            critic_module, "get_chat_model", _profile_built_chat(_critic_reply(_PASS, _PASS, _PASS))
+        )
+        tally = UsageTally()
+
+        # The tally reaches both calls through the run config, as in a graph turn.
+        def run(_: None) -> Quiz:
+            return _quiz(fakes, generation, LlmCritic())
+
+        RunnableLambda(run).invoke(None, config={"callbacks": [tally]})
+
+        assert tally.totals().by_caller == {
+            QUIZ_TAG: counts_of(CONTENT_USAGE),
+            CRITIC_TAG: counts_of(_CRITIC_USAGE),
+        }
