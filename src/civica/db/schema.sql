@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS quiz_answers (
 );
 CREATE INDEX IF NOT EXISTS quiz_answers_user_recent_idx
   ON quiz_answers(user_id, is_correct, answered_at DESC);
+CREATE INDEX IF NOT EXISTS quiz_answers_user_theme_idx
+  ON quiz_answers(user_id, theme, answered_at DESC);
 
 
 CREATE TABLE IF NOT EXISTS generated_questions (

@@ -14,7 +14,7 @@ MOCK_EXAM_TIME_LIMIT_SECONDS = 45 * 60
 
 
 class AnswerLogger(Protocol):
-    """Records one scored answer (production: progress.quiz_log.log_answer)."""
+    """Records one scored answer."""
 
     def __call__(
         self,

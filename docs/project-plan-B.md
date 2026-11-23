@@ -1689,7 +1689,9 @@ The formula, for each response drawn:
 
 ## Step 17: Answers + derived mastery
 
-**Goal:** Let the learner answer a quiz question in a later turn, log it, record mistakes, and recompute mastery deterministically. The planner has no scoring tool (autonomous planner step), so the model never supplies or scores an answer. A wrong answer also gets a short explanation grounded in the question's own sources, so quizzes deliver the grounded explanations the MVP overview promises. A mastery dashboard shows the learner all five themes and their mastery of each.
+**Goal:** Let the learner answer a quiz question in a later turn, log it, record mistakes, and recompute mastery deterministically. The planner has no scoring tool (autonomous planner step), so the model never supplies or scores an answer. A wrong answer shows the correct option and the explanation stored with the question when it was generated, with no extra model call. A mastery dashboard shows the learner all five themes and their mastery of each.
+
+**Part A: Answer scoring and mastery (backend).** Nothing in the UI sends an answer yet, so the app behaves as before.
 
 - **Test:** extend `tests/integration/graph/test_graph.py`
   - The quiz questions created in one turn are kept in checkpointed state, and an `answer` input on the next turn scores them.
@@ -1698,77 +1700,152 @@ The formula, for each response drawn:
   - `topic_mastery` for the answered theme is updated, through the in-process `memory.writer.put`, never through `record_outcome`.
   - Expired question: after a quiz turn, a `message` turn on the same thread (which clears `quiz_questions` in `start_turn`), then an `answer` for the earlier question, returns a "that question has expired" reply. It writes no `quiz_answers` row, no `MistakeEpisode`, and does not move mastery. The same applies to an answer whose `question_id` is not in the current `quiz_questions`.
   - Answer once: a second `answer` for a question already answered returns an "already answered" reply. It writes no `quiz_answers` row, no `MistakeEpisode`, and does not move mastery, so repeat answers cannot skew the last-20 mastery window.
-  - Wrong-answer explanation: a wrong answer stores an explanation in the turn's result whose citations come only from the question's `sources`. A correct answer makes no explanation model call.
-  - If the explanation fails (no passages found, or the model errors), the scored result is still returned and logged; only the explanation is missing.
-- **Test:** extend `tests/integration/retrieval/test_content.py`: `search(..., sources=...)` returns only chunks from the given `(page_slug, section_id)` pairs, still ordered by similarity.
+  - No model call: an answer turn, right or wrong, calls neither the content model nor the planner. The turn's result holds the question id, theme, chosen option, and whether it was correct.
+  - The session summary after an answer turn describes the answer ("Answered 1 on <theme>: wrong."), not the quiz still in checkpointed state.
+- **Test:** extend `tests/integration/progress/test_quiz_log.py`: `recent_answers` returns one theme's answers, right and wrong, newest first, up to a limit.
 - **Test:** `tests/unit/graph/test_mastery.py`: mastery is the correct share of the learner's last 20 answers on the theme (fewer answers use what exists; no answers leaves mastery unwritten).
+
+- No model call on an answer turn. Since Step 13, each generated question stores an explanation of why its correct option is right, so a wrong answer can show the correct option and that explanation without an extra call. A learned teaching strategy (teaching strategy step) can add a per-choice explanation later.
+- Answer nodes live in `src/civica/graph/graph.py` (`nodes.py` would create an import cycle with `GraphState`). Their logic lives in `src/civica/graph/answers.py`.
+  - Add the `answer` member to `InputKind`. `GraphInput` gains optional `question_id` and `chosen_index`.
+  - `score_answer` first checks that `question_id` is in the checkpointed `quiz_questions`. If not (the learner moved on and the quiz was cleared, or the id is unknown), it replies that the question has expired and routes straight to `memory_writer` without scoring.
+  - Checkpointed state keeps each answered question's result (`answered: dict[question_id, AnswerResult]`), declared in both the outer graph state and the planner state so `start_turn` clears it with `quiz_questions`. `score_answer` rejects an id already in it with an "already answered" reply, routed straight to `memory_writer`. The UI lock in Part B is the visible part; this check is what enforces it.
+  - `score_answer` scores the choice through a one-question `Quiz` built from the answered question with `deps.answer_logger`, because `Quiz.score` requires an answer for every question. `Quiz.score` already logs to `quiz_answers` (assessment engine). A wrong answer writes a `MistakeEpisode` through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
+    - Decision: the planner keeps its `MistakeEpisode` writes for now. Removing them is left to the backlog story that covers the planner's write allowlist.
+  - `AnswerResult` (question id, theme, chosen option, correct or not) is registered in `_STATE_TYPES` in `memory/checkpointer.py`, along with `Theme`.
+  - `update_mastery`: the **only** writer of `topic_mastery`. See the two-allowlist rule in the autonomous planner step. It computes mastery with `mastery_from_answers` (`src/civica/graph/mastery.py`) from `recent_answers`, a new `src/civica/progress/quiz_log.py` query injected through `PlannerDeps.recent_answers`. Add a `(user_id, theme, answered_at DESC)` index on `quiz_answers` in `db/schema.sql`.
+  - Extract `read_mastery` from `read_learner_state` in `graph/planner.py`, so the developer panel and the mastery dashboard (Part C) read the same numbers.
+  - `memory_writer` writes the answer recap on a scored answer turn, and leaves the previous summary in place on an expired or repeated answer.
+  - Route: `answer` -> `score_answer` -> `update_mastery` -> `memory_writer`; expired or already answered -> `memory_writer`.
+
+- **README:**
+  - Add the `answer` row to the routing diagram (see the graph assembly step), and a line that answers are scored without the LLM, a wrong answer shows the correct option and the explanation stored with the question (no model call), and `update_mastery` is the only node that writes `topic_mastery`.
+  - Add this note to the "Learner graph" section:
+    > Decision against using LangGraph's `interrupt` convention: In civica, user responses to questions result in a new turn tagged `answer`, rather than resuming a LangGraph `interrupt`. This is an intentional decision to ensure that learners are free to skip a question and move on. A new turn handles such a learner redirect like any other turn and always finishes at `memory_writer` with persistence and logging. LangGraph's `interrupt`, which encapsulates both a question and an answer in a single turn, pauses waiting for a learner's response. If the learner chose to redirect after being asked a question and we were using LangGraphs's `interrupt`, that would leave a turn unfinished (no persistence). 
+    > If learners 'skip around' and try to refer to a previous question that is no longer in the current quiz, the app replies with "that question has expired". Nothing is logged and mastery doesn't change.
+
+- **Check In:** Stop and ask the user to confirm if the implementation is satisfactory.
+
+
+**Part B: Answering in the existing quiz UI.** Answers start counting for learners. Therefore, critic is turned on in production.
+
+- **UI:** extend `tests/integration/ui/test_quiz.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in the Coach UI for lessons step) and renders the scored result: under a wrong answer, the correct option and the question's stored explanation, with no citations and no model call; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
+  - In `src/civica/ui/pages/coach.py`, replace the practice-only **Check** (Coach UI for quizzes) with a real submit that sends an `answer` input through `TurnRunner.start`, with "Answered question N" (`answer_message`) as the turn's message. Remove the "not scored or saved yet" label.
+  - Draw the result from the checkpointed `answered` results (an `AnswerView` per question in `ui/turn_view.py`, kept separate from `AnswerResult`). A right answer shows one of `CORRECT_TEXTS`. A wrong answer shows "Not quite. The answer is X. <option>" on one line and the stored explanation on the next. An answer turn always shows its reply, so the expired and already-answered notices appear even while the quiz is on screen.
+  - Lock each question once answered: render it with its chosen option selected and the radio and submit disabled (`.disable()`).
+  - Remove the practice-check helpers `check_choice` and `CheckResult` from `ui/turn_view.py`, and their tests.
+  - **Logging:** replace the practice-check line with an answer request line (`via=answer`, `question_id=`). Test it in `test_quiz.py`, reading only the `civica.ui.pages.coach` logger, and extend the no-learner-text test to a wrong answer turn: the stored explanation is shown but never logged.
+  - The developer panel's **Learner state** line shows the updated mastery for the answered theme.
+
 - **Turn on the question critic (grounding + correctness gate step) in production:** from this step, answers are scored and move mastery, so a question with a wrong answer key would mark a correct learner wrong. The critic is off by default today.
-  - **Test:** extend `tests/integration/graph/test_graph.py`, which already covers `default_planner_deps`: `default_planner_deps()` returns deps with a critic, so coach quizzes and the mock exam (next step) both run it. Test deps keep `critic=None` unless a test needs it.
+  - **Test:** extend `tests/integration/graph/test_graph.py`, which already covers `default_planner_deps`: `default_planner_deps()` returns deps with a critic, so coach quizzes and the mock exam (a subsequent step) both run it. Test deps keep `critic=None` unless a test needs it.
   - Extend `default_planner_deps()` to pass `critic=LlmCritic()`.
   - The critic is one more LLM call per quiz, plus a rewrite and another check for each round with rejections. Its tokens show under the critic caller in the developer panel (token usage step).
-- Add to `src/civica/graph/nodes.py`:
-  - The `answer` input carries the `question_id` it answers, and `score_answer` first checks that id is in the checkpointed `quiz_questions`. If not (the learner moved on and the quiz was cleared, or the id is unknown), it replies that the question has expired and routes straight to `memory_writer` without scoring.
-  - Register any new type held in checkpointed state (such as the answer result) in `_STATE_TYPES` in `memory/checkpointer.py`, and add the `answer` member to `InputKind`.
-  - Checkpointed state keeps each answered question's result (`answered: dict[question_id, result]`), cleared with `quiz_questions` in `start_turn`. `score_answer` rejects an id already in it with an "already answered" reply, routed straight to `memory_writer`. The UI lock below is the visible part; this check is what enforces it.
-  - `score_answer`: rebuilds the `Quiz` from the checkpointed `quiz_questions` with `deps.answer_logger` (the planner graph refactor keeps only serializable data in state), then scores the submitted choice via `Quiz.score`, which already logs each answer to `quiz_answers` (assessment engine). Writes a `MistakeEpisode` for each wrong answer through the in-process `put`, so mistake records do not depend on the planner choosing to call `record_outcome`.
-  - `explain_answer` (wrong answers only): calls `explain()` with a prompt built from the question, the chosen option, and the correct option. Its `retriever` is `search` pinned to the question's `sources`, so the explanation is grounded in the passages the question was generated from. One LLM call per wrong answer; correct answers cost nothing extra. A learned teaching strategy (teaching strategy step) can later plug in here.
-  - `update_mastery`: the **only** writer of `topic_mastery`, computed from `quiz_answers`. See the two-allowlist rule in the autonomous planner step.
-  - Route: `answer` -> `score_answer` -> `explain_answer` (wrong answers only) -> `update_mastery` -> `memory_writer`.
-- Extend `src/civica/retrieval/content.py`: `search` takes an optional `sources: Collection[SourceRef] | None` filter that limits results to those `(page_slug, section_id)` pairs.
-- **UI:** extend `tests/integration/ui/test_quiz.py` first: submitting a quiz choice sends an `answer` input through the graph (compiled with fakes, as in the Coach UI for lessons step) and renders the scored result, with the explanation and its citations under a wrong answer; answering an expired question renders the "expired" reply; an answered question renders locked (disabled radio and submit, its result shown) and stays locked after a page reload.
-  - In `src/civica/ui/pages/coach.py`, replace the practice-only **Check** (Coach UI for quizzes) with a real submit that sends an `answer` input through `TurnRunner.start`. Remove the "not scored or saved yet" label.
-  - Lock each question once answered: render it from the checkpointed `answered` results with the radio and submit disabled (`.disable()`).
-  - **Logging:** replace the practice-check line with an answer request line (`via=answer`, `question_id=`). Test it in `test_quiz.py`, reading only the `civica.ui.pages.coach` logger, and extend the no-learner-text test to an answer turn with a wrong-answer explanation.
-  - The developer panel's **Learner state** line shows the updated mastery for the answered theme.
+
+- **README:**
+  - Remove "Quiz answers are practice only until answer scoring ships" from the web app usage text.
+  
+- **Check In:** Stop and ask the user to confirm if the implementation is satisfactory. Instruct them how to test the changes manually in the UI.
+
+
+**Part C: Mastery dashboard in UI.**
+
 - **UI (mastery dashboard):** create `tests/integration/ui/test_mastery_dashboard.py` first:
   - The dashboard lists all five themes by French display name, read from the theme registry, for every signed-in learner, including one with no answers yet.
   - A theme with saved mastery shows it as a percentage; a theme with none shows "Not started".
   - After an answer turn, reopening the dashboard shows the answered theme's new mastery.
   - The dashboard only reads: opening it writes nothing to the store or `quiz_answers`.
-  - Add the dashboard to `src/civica/ui/pages/` (placement following `coach-ui.md`). Read mastery through the same per-theme `TopicMastery` lookup that `read_learner_state` uses, so the planner and the learner see the same numbers.
+  - Signed-out visitors are sent to sign-in. A header **Mastery** button on the coach page opens it.
+  - Create `src/civica/ui/pages/mastery.py`: its own page at `/mastery`. One row per theme in theme registry order, with the French display name and `round(mastery * 100)%` or "Not started". Its header shows the username, a **Back to coach** button, and **Log out**. If the read fails, it shows a "Something went wrong" message instead of the rows.
+  - Read mastery through `read_mastery` (extracted in Part A), the same per-theme `TopicMastery` lookup that `read_learner_state` uses, so the planner and the learner see the same numbers.
   - Update `coach-ui.md` with the dashboard's placement and content. The welcome card no longer lists the themes (Coach UI for quizzes step), so this is where the learner sees them.
-- **Check In:** Stop and confirm with the user that the mastery formula (last 20 answers) is right. Prompt the user to answer a few questions in the UI and watch mastery move on the mastery dashboard, and confirm its placement. Show the critic's added tokens and wait time per quiz turn, and confirm the user accepts them.
 
 - **README:**
-  - Add the `answer` row to the routing diagram (see the graph assembly step), and a line that answers are scored without the LLM, a wrong answer gets one grounded explanation call, and `update_mastery` is the only node that writes `topic_mastery`.
-  - Remove "Quiz answers are practice only until answer scoring ships" from the web app usage text.
   - Add a line to **Usage → Web UI** saying where to open the mastery dashboard and that it shows mastery for each of the five themes.
-  - Add this note to the "Learner graph" section:
-    > Decision against using LangGraph's `interrupt` convention: In civica, user responses to questions result in a new turn tagged `answer`, rather than resuming a LangGraph `interrupt`. This is an intentional decision to ensure that learners are free to skip a question and move on. A new turn handles such a learner redirect like any other turn and always finishes at `memory_writer` with persistence and logging. LangGraph's `interrupt`, which encapsulates both a question and an answer in a single turn, pauses waiting for a learner's response. If the learner chose to redirect after being asked a question and we were using LangGraphs's `interrupt`, that would leave a turn unfinished (no persistence). 
-    > If learners 'skip around' and try to refer to a previous question that is no longer in the current quiz, the app replies with "that question has expired". Nothing is logged and mastery doesn't change.
+
+- **Check In:** Prompt the user to answer a few questions in the UI and watch mastery move on the mastery dashboard, and confirm its placement. Show the critic's added tokens and wait time per quiz turn, and confirm the user accepts them.
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
+    - Tokens consumed by the critic were distinguished from the tokens consumed by generation of quiz questions so that those processes can be compared. That means that a new caller tag and profile for the critic (with same 8192 max token cap) was added.
+    - A previous version of the plan included an `explain_answer` node making one grounded model call per incorrect answer, with a `sources` filter on `search`. This is no longer relevant because, as of Step 13, the app generates one explanation per question (why the correct option is right) at the same time that it generates the question. No extra model call is required and it would be very undesirable (increased cost and latency).
+    - Mastery algorithm was updated substantially. This significantly impacted the mastery code.
+      - old: The initial plan calculated mastery as the correct share of the last 20 answers given by the learner. That results in a score that is completely independent from the multiple sections per theme.
+      - new: The updated algorithm measures progress against the theme's corpus sections. So 100% requires credit in every section. Rules...
+        - A correct answer adds 1.0 credit. If multiple sections are cited for that question, the value is split equally across those sections (e.g. If there are two sections cited: each section receives 0.5 credit. 
+        - An incorrect answer subtracts the same shares as a correct answer adds. 
+        - The mastery value for each section is bounded by 0 and 1. Extra credit is not banked.
+        - Theme mastery is the average of section credit, weighted by each section's content size. Sections that were never included in a question count as 0.
 
 ---
 
-## Step 18: Mock exam path
+## Step 18: Corpus coverage tracker
 
-**Goal:** A deterministic 40-question mock exam that bypasses the *planner*, never the *logging*.
+**Goal:** Provide a deterministic answer to "how much of this theme has the learner actually seen?", and use it so quizzes spread across the whole theme instead of repeating its top passages.
+Now that mastery counts are available (previous step), a scaffolding is available to ensure better coverage over the corpus. Previously, the coach had a tendency to return to the same few passages.
 
-- **Test:** extend `tests/integration/graph/test_graph.py`
-  - `mock_start` produces 40 questions held in checkpointed state (this path bypasses the planner).
-  - `mock_submit` reports pass/fail and **writes 40 `quiz_answers` rows**, and `topic_mastery` moves for every theme the exam covered. A mock exam that scores without logging would silently discard the densest signal the system gets.
-  - Mock exam failure: when the critic cannot fill a theme, `mock_exam_generate` retries once, then returns a "try again" message, saving no questions and no `quiz_answers` rows.
-- **Mock exams never reuse quiz questions (Product Owner decision, 2026-11-09):** a mock exam should test the learner on questions they have not practiced.
-  - **Test:** extend `tests/unit/assessment/test_engine.py`: a generated mock exam question whose `question_id` is already saved as a quiz question is regenerated like a critic rejection, and is never returned. If a theme still cannot be filled, `generate_mock_exam` raises `QuestionGenerationError` as it does today.
-  - **Test:** extend `tests/integration/assessment/test_store.py`: each saved question records its origin (`quiz` or `mock_exam`). Saving a mock exam question over an existing quiz row keeps `quiz`. Rows saved before this step read as `quiz`.
-  - Extend `src/civica/db/schema.sql`: add `origin TEXT NOT NULL DEFAULT 'quiz'` to `generated_questions` with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so the migration stays idempotent. Old rows default to `quiz` because their origin is unknown, and treating them as quiz questions keeps them out of mock exams.
-  - Extend `src/civica/assessment/store.py`: `save` takes the origin, and the upsert never changes `quiz` to `mock_exam`. Add a read that tells which of a set of `question_id`s are quiz questions, so the engine checks a whole batch in one query.
-  - Limitation: this blocks exact repeats only. A quiz and a mock exam can still ask about the same fact in different words.
-- Add to `src/civica/graph/nodes.py`:
-  - Register any new type held in checkpointed state (such as the exam and its result) in `_STATE_TYPES` in `memory/checkpointer.py`, and add the `mock_start` and `mock_submit` members to `InputKind`.
-  - `mock_exam_generate`: calls `generate_mock_exam`. It raises `QuestionGenerationError` when the critic cannot fill a theme and saves nothing; retry once, then show a "try again" message rather than crash the graph.
-  - `mock_exam_score`: scores via `MockExam.score`, which logs all 40 answers and then runs `update_mastery` like any other assessed path. The result (pass/fail and per-theme scores) stays in the exam thread's checkpointed state, so the UI can render it again after a reload. Only the latest exam is kept; a history of past scores is post-MVP.
-  - Routes: `mock_start` -> `mock_exam_generate` -> `memory_writer`; `mock_submit` -> `mock_exam_score` -> `update_mastery` -> `memory_writer`.
-- **UI:** create `tests/integration/ui/test_mock_exam.py` first: selecting **Mock Exam** and starting renders the questions (graph compiled with fakes, as in the Coach UI for lessons step); switching back to **Coach** shows the coach conversation unchanged; submitting renders pass/fail and the per-theme breakdown; reloading after submitting shows the same result; a generation failure renders the "try again" message.
-  - Create `src/civica/ui/modes.py` with `AppMode(StrEnum)` (`COACH`, `MOCK_EXAM`) and add a Coach / Mock Exam `ui.toggle` to `src/civica/ui/pages/coach.py`. The mock exam uses its own thread (`f"{user_id}:mock_exam"`), so it never disturbs the coach conversation. Create `src/civica/ui/pages/mock_exam.py` for Mock Exam mode: start button, 40 questions each as a `ui.radio`, submit, pass/fail plus per-theme scores. No countdown timer yet (Finish the UI step). This mode calls the deterministic mock-exam path, not the planner.
-  - **Logging:** log exam start, generation failure, and submit (`user_id=`, `status=`, and on submit the score and pass/fail, never the answers). Test it in `test_mock_exam.py`, reading only the `civica.ui.pages.mock_exam` logger.
-- **Check In:** Stop and confirm with user that the implementation is satisfactory. Prompt the user to run one mock exam in the UI (note the generation time and cost of 40 questions).
+**Part A: Quizzed coverage and coverage-aware quizzes.** Quizzes change for the learner; lessons and the planner prompt do not.
+
+- **Test:** `tests/integration/reflection/test_coverage.py` (integration: seeds real `quiz_answers` and `generated_questions` rows)
+  - For a theme with N sections (from `theme_sections`), a learner who answered questions citing two of them reports exactly those two as quizzed and the rest as gaps. An answer counts whether it was right or wrong.
+  - A learner with no history for a theme reports 100% gap, not an error or an empty result.
+  - Coverage is per user: one learner's history never appears in another's gaps.
+- **Test:** extend `tests/integration/retrieval/test_content.py`: a sections read returns only chunks from the given `(page_slug, section_id)` pairs, grouped by section.
+- **Test:** extend `tests/unit/assessment/test_engine.py` and `tests/unit/graph/test_planner_graph.py` (fake retrieval and a fake content model)
+  - A quiz with no lesson in the same turn draws each question's passages from a different gap section, chosen across the theme rather than from the top of one search. The choice comes from an injected random source, so tests are deterministic.
+  - A comprehension check in the same turn as a lesson draws from the sections the lesson cited (`Explanation.context_chunks`), so the check matches what was just taught.
+  - When the theme has fewer gap sections than questions, the rest come from already-quizzed sections; when it has none, the quiz falls back to today's search.
+  - A quiz drawn from gap sections makes no embedding call, since it reads chunks by section rather than searching.
+  - A quiz never includes a question shown in the previous exchange. If generation repeats one, it is regenerated or dropped, and the quiz may come back shorter. If the learner asks for a second lesson on the same theme, they should not recieve a knowledge check that they had just answered.
+- Create `src/civica/reflection/coverage.py`:
+  - `get_coverage_gaps(user_id, theme) -> CoverageReport`, deterministic, no LLM. The universe of sections is `theme_sections` (`retrieval/sections.py`, added in Step 17), which already leaves out the course-objective sections. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`.
+  - `CoverageReport` is a frozen pydantic model: `theme`, `quizzed: list[SourceRef]`, `gaps: list[SourceRef]`, `covered_fraction: float`.
+- Extend `src/civica/retrieval/content.py` with a read of a set of sections' chunks.
+- Extend the quiz path: the `generate_quiz` tool reads the learner's gaps (injected through `PlannerDeps`) and passes the chosen sections to `generate_quiz`. The tool takes no new arguments, so the planner prompt is unchanged.
+- Block repeats from the previous exchange. `PreviousExchange` keeps only question stems today, so decide whether to compare stems or add the shown `question_id`s to it.
+- **Check In:** Stop and confirm with the user that the implementation is satisfactory. Prompt the user to ask for several quizzes on one theme in the UI and confirm the questions cover different sections, that a comprehension check after a lesson matches the lesson, and that two lessons on the same theme in a row get different checks.
 
 - **README:**
-  - Add the `mock_start` and `mock_submit` rows to the routing diagram. Add a line that the mock exam skips the planner: one call creates 40 questions, a second scores the answers.
+  - Add `src/civica/reflection/` to the project structure diagram (first use; the item scheduling step extends it).
+  - Add a line that quizzes draw from sections the learner has not been quizzed on yet, and a comprehension check draws from the lesson it follows.
+
+**Part B: Fixed path for the Teach me and Quiz me buttons.** Builds on Part A, so the fixed path reuses coverage-aware quizzes. Typed messages and the planner prompt do not change.
+
+**Why:** **Teach me** and **Quiz me** always lead to the same steps, yet they run through the autonomous planner, which spends a model call to choose each step. A **Teach me** turn makes 7 model calls and takes about 15 seconds: 5 planner calls (read the learner's state, get the suggested theme, teach, generate the check, reply) plus the lesson and the check. A fixed path needs only the 2 content calls. That makes the buttons faster and cheaper, and their behavior can be tested without a model. Typed messages stay with the planner, where a model's judgment is needed. This reverses Step 13's "shortcuts for a message, not modes" rule for the buttons.
+
+- **Test:** extend `tests/unit/graph/test_graph.py` (fake content model, fake planner model that fails if called)
+  - **Teach me** (`InputKind.TEACH_ME`) makes no planner model call and exactly 2 content model calls (with the critic off). It sets the lesson, the one-question check, the reply, and the halt reason, as a planner turn does.
+  - **Quiz me** (`InputKind.QUIZ_ME`) makes no planner model call and generates a 3-question quiz on the suggested theme, the same size the planner prompt uses. Its questions come from gap sections, as in Part A.
+  - Both turns pass through `memory_writer` on the coach thread (`f"{user_id}:coach"`), so a typed follow-up such as "explain that more simply" sees the lesson as the previous exchange.
+  - A failed lesson or quiz ends the turn with a short reply, as the planner's tool failures do. A lesson with no grounding passages still records a retrieval gap.
+  - "Teach me" typed as a message still goes to the planner.
+- **Test:** extend `tests/integration/ui/test_quiz.py`: each button starts a turn with its input kind. Request log lines are unchanged (`via=teach_me`, `via=quiz_me`).
+- Add `InputKind.TEACH_ME` and `InputKind.QUIZ_ME`. `route_input` sends them to fixed nodes, not the planner.
+- The **Teach me** node picks the theme with `suggest_review_theme`, writes a full lesson through `teach_theme`, and generates a one-question check from the lesson's sections (Part A). The **Quiz me** node picks the theme the same way and calls the coverage-aware quiz path.
+- Record the fixed-path turn in `planner_trace` so the developer panel and the trace still explain it, for example one row per step and a new halt reason such as `fixed_path`.
+- **Decide before building:** whether the lesson and the check run at the same time. Part A draws the check from the lesson's cited sections, so the check waits for the lesson unless the passages are retrieved once and both calls start from them. Retrieving once saves about the length of one content call but splits `teach_theme` into retrieve and generate steps.
+- **Check In:** Stop and confirm with the user that the implementation is satisfactory. Prompt the user to press **Teach me** and **Quiz me** in the running app, compare the speed with Part A, and send "explain that more simply" after the lesson.
+
+- **README:**
+  - Describe the buttons as a fixed path that skips the planner, in the coach section and the graph diagram (`route_input` gains the two fixed nodes).
+
+**Part C: Taught coverage and planner steering.** Builds on Part A's `CoverageReport`; lessons start counting toward coverage and the planner can steer toward unseen material.
+
+**Why a new table:** `planner_trace` rows hold only the tool arguments (`theme`, `focus`), never the sections a lesson used, so "taught" coverage cannot be derived from the trace. The passages are known when `teach` returns (`Explanation` carries them), so they are recorded then.
+
+- **Test:** extend `tests/integration/db/test_migrate.py`: `lesson_sources` exists after migration, and re-running the migration stays idempotent.
+- **Test:** extend `tests/unit/graph/test_planner_graph.py`: a grounded `teach` writes one `lesson_sources` row per cited section through the injected fake writer; an insufficient-material lesson writes none.
+- **Test:** extend `tests/integration/reflection/test_coverage.py` (also seeds `lesson_sources` rows): a learner taught one section and quizzed on another reports both as covered; taught and quizzed coverage stay per user.
+- Extend `src/civica/db/schema.sql` with an append-only `lesson_sources` table (idempotent): `id BIGSERIAL`, `user_id UUID REFERENCES users(user_id)`, `thread_id TEXT`, `turn_id UUID`, `page_slug TEXT`, `section_id TEXT`, `created_at TIMESTAMPTZ DEFAULT NOW()`. Written next to the trace writer, following the optional-connection convention.
+- Extend `CoverageReport` with `taught: list[SourceRef]`. A section is covered when it is taught or quizzed, and `gaps` and `covered_fraction` follow that. Quiz selection (Part A) keeps using sections not yet quizzed, so a taught section can still be quizzed.
+- Bind `get_coverage_gaps` as a planner tool so the planner can deliberately steer lessons toward unseen material instead of re-teaching whatever retrieval happens to surface. Bump `PLANNER_PROMPTS.version`.
+- **UI (coverage readout):** create `tests/integration/ui/test_coverage.py` first: the readout renders one `covered_fraction` per theme for the logged-in user.
+  - Add per-theme coverage to the developer panel's **Learner state** line, e.g. "40% of this theme not yet seen."
+- **Check In:** Stop and confirm with the user that the coverage definition is right. "Taught" counts a section as covered once a grounded lesson cites it, not when the learner shows they read it. Prompt the user to confirm in the UI that the readout moves after a lesson on an unseen passage.
+
+- **README:**
+  - Add `lesson_sources` to the Postgres tables list.
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -1796,7 +1873,7 @@ The formula, for each response drawn:
 
 **Goal:** Give the planner a durable agenda it owns across sessions.
 
-**Rationale (shared with subsequent step):** 
+**Rationale (shared with the corpus coverage tracker step):** 
 - The planner's autonomy lives entirely inside a single turn. 
 - Across sessions it re-derives everything from mastery numbers, so it can loop on the same familiar passages forever and has no agenda to explain. 
 - Mastery says *how well*; coverage says *how much*; the study plan says *what we are doing and why*. Together they are the difference between "the LLM picks the next tool" and "the agent runs a plan it owns," which is the stated purpose of this project.
@@ -1821,30 +1898,33 @@ The formula, for each response drawn:
 
 ---
 
-## Step 21: Corpus coverage tracker
+## Step 21: Mock exam path
 
-**Goal:** Provide a deterministic answer to "how much of this theme has the learner actually seen?".
+**Goal:** A deterministic 40-question mock exam that bypasses the *planner*, never the *logging*.
 
-**Why a new table:** `planner_trace` rows hold only the tool arguments (`theme`, `focus`), never the sections a lesson used, so "taught" coverage cannot be derived from the trace. The passages are known when `teach` returns (`Explanation` carries them), so they are recorded then.
-
-- **Test:** extend `tests/integration/db/test_migrate.py`: `lesson_sources` exists after migration, and re-running the migration stays idempotent.
-- **Test:** extend `tests/unit/graph/test_planner_graph.py`: a grounded `teach` writes one `lesson_sources` row per cited section through the injected fake writer; an insufficient-material lesson writes none.
-- **Test:** `tests/integration/reflection/test_coverage.py` (integration: seeds real `quiz_answers`, `generated_questions`, and `lesson_sources` rows)
-  - For a theme with N total `(page_slug, section_id)` pairs in `content_chunks`, a learner taught or quizzed on two of them reports exactly those two as covered and the rest as gaps.
-  - A learner with no history for a theme reports 100% gap, not an error or an empty result.
-  - Coverage is per user: one learner's history never appears in another's gaps.
-- Extend `src/civica/db/schema.sql` with an append-only `lesson_sources` table (idempotent): `id BIGSERIAL`, `user_id UUID REFERENCES users(user_id)`, `thread_id TEXT`, `turn_id UUID`, `page_slug TEXT`, `section_id TEXT`, `created_at TIMESTAMPTZ DEFAULT NOW()`. Written next to the trace writer, following the optional-connection convention.
-- Create `src/civica/reflection/coverage.py`:
-  - `get_coverage_gaps(user_id, theme) -> CoverageReport` - deterministic, no LLM. The universe of sections comes from `content_chunks`, minus the course-objective sections that assessment skips (retrieval optimization step), so they never show as gaps. **Quizzed** coverage joins `quiz_answers.question_id` to `generated_questions.sources`. **Taught** coverage comes from `lesson_sources`.
-  - `CoverageReport` is a frozen pydantic model: `theme`, `covered: list[SourceRef]`, `gaps: list[SourceRef]`, `covered_fraction: float`.
-- Bind `get_coverage_gaps` as a planner tool so the planner can deliberately steer toward unseen material instead of re-teaching whatever retrieval happens to surface.
-- **UI (coverage readout):** create `tests/integration/ui/test_coverage.py` first: the readout renders one `covered_fraction` per theme for the logged-in user.
-  - Add per-theme coverage to the developer panel's **Learner state** line, e.g. "40% of this theme not yet seen."
-- **Check In:** Stop and confirm with the user that the coverage definition is right. "Taught" counts a section as covered once a grounded lesson cites it, not when the learner shows they read it. Prompt the user to confirm in the UI that the readout moves after a lesson on an unseen passage.
+- **Test:** extend `tests/integration/graph/test_graph.py`
+  - `mock_start` produces 40 questions held in checkpointed state (this path bypasses the planner).
+  - `mock_submit` reports pass/fail and **writes 40 `quiz_answers` rows**, and `topic_mastery` moves for every theme the exam covered. A mock exam that scores without logging would silently discard the densest signal the system gets.
+  - Mock exam failure: when the critic cannot fill a theme, `mock_exam_generate` retries once, then returns a "try again" message, saving no questions and no `quiz_answers` rows.
+- **Mock exams never reuse quiz questions (Product Owner decision, 2026-11-09):** a mock exam should test the learner on questions they have not practiced.
+  - **Test:** extend `tests/unit/assessment/test_engine.py`: a generated mock exam question whose `question_id` is already saved as a quiz question is regenerated like a critic rejection, and is never returned. If a theme still cannot be filled, `generate_mock_exam` raises `QuestionGenerationError` as it does today.
+  - **Test:** extend `tests/integration/assessment/test_store.py`: each saved question records its origin (`quiz` or `mock_exam`). Saving a mock exam question over an existing quiz row keeps `quiz`. Rows saved before this step read as `quiz`.
+  - Extend `src/civica/db/schema.sql`: add `origin TEXT NOT NULL DEFAULT 'quiz'` to `generated_questions` with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so the migration stays idempotent. Old rows default to `quiz` because their origin is unknown, and treating them as quiz questions keeps them out of mock exams.
+  - Extend `src/civica/assessment/store.py`: `save` takes the origin, and the upsert never changes `quiz` to `mock_exam`. Add a read that tells which of a set of `question_id`s are quiz questions, so the engine checks a whole batch in one query.
+  - Limitation: this blocks exact repeats only. A quiz and a mock exam can still ask about the same fact in different words.
+- Add to `src/civica/graph/nodes.py`:
+  - Register any new type held in checkpointed state (such as the exam and its result) in `_STATE_TYPES` in `memory/checkpointer.py`, and add the `mock_start` and `mock_submit` members to `InputKind`.
+  - `mock_exam_generate`: calls `generate_mock_exam`. It raises `QuestionGenerationError` when the critic cannot fill a theme and saves nothing; retry once, then show a "try again" message rather than crash the graph.
+  - `mock_exam_score`: scores via `MockExam.score`, which logs all 40 answers and then runs `update_mastery` like any other assessed path. The result (pass/fail and per-theme scores) stays in the exam thread's checkpointed state, so the UI can render it again after a reload. Only the latest exam is kept; a history of past scores is post-MVP.
+  - Routes: `mock_start` -> `mock_exam_generate` -> `memory_writer`; `mock_submit` -> `mock_exam_score` -> `update_mastery` -> `memory_writer`.
+  - **Reuse the answer path from the answers + derived mastery step:** `score_choice` in `graph/answers.py` writes the `MistakeEpisode` inline. Extract it (for example `record_mistake(deps, user_id, question)`) so `mock_exam_score` writes one per wrong answer through the same code. Call `record_mastery` once per theme the exam covered. Today's `update_mastery` node reads a single `answer_result`, so it needs to handle a set of themes, or the mock path calls `record_mastery` directly.
+- **UI:** create `tests/integration/ui/test_mock_exam.py` first: selecting **Mock Exam** and starting renders the questions (graph compiled with fakes, as in the Coach UI for lessons step); switching back to **Coach** shows the coach conversation unchanged; submitting renders pass/fail and the per-theme breakdown; reloading after submitting shows the same result; a generation failure renders the "try again" message.
+  - Create `src/civica/ui/modes.py` with `AppMode(StrEnum)` (`COACH`, `MOCK_EXAM`) and add a Coach / Mock Exam `ui.toggle` to `src/civica/ui/pages/coach.py`. The mock exam uses its own thread (`f"{user_id}:mock_exam"`), so it never disturbs the coach conversation. Create `src/civica/ui/pages/mock_exam.py` for Mock Exam mode: start button, 40 questions each as a `ui.radio`, submit, pass/fail plus per-theme scores. No countdown timer yet (Finish the UI step). This mode calls the deterministic mock-exam path, not the planner.
+  - **Logging:** log exam start, generation failure, and submit (`user_id=`, `status=`, and on submit the score and pass/fail, never the answers). Test it in `test_mock_exam.py`, reading only the `civica.ui.pages.mock_exam` logger.
+- **Check In:** Stop and confirm with user that the implementation is satisfactory. Prompt the user to run one mock exam in the UI (note the generation time and cost of 40 questions).
 
 - **README:**
-  - Add `src/civica/reflection/` to the project structure diagram (first use; the item scheduling step extends it).
-  - Add `lesson_sources` to the Postgres tables list.
+  - Add the `mock_start` and `mock_submit` rows to the routing diagram. Add a line that the mock exam skips the planner: one call creates 40 questions, a second scores the answers.
 
 - **Update this plan:**
   - Consider if anything in this plan (subsequent steps) should be updated based on the changes implemented.
@@ -1991,10 +2071,10 @@ Per-user scheduling produces the felt behavior we actually wanted (the bank stop
 15. **Step 15 - Developer mode:** needs Step 13; `--dev` adds a panel beside each coach bubble showing how it was made. Later steps add their developer details to this panel.
 16. **Step 16 - Token usage per turn:** needs Steps 12 (graph config) and 15 (developer panel); totals token usage per caller for each turn and shows it in the developer panel. Nothing later depends on it.
 17. **Step 17 - Answers + derived mastery:** needs Step 13 (replaces its practice check); scores answers, writes mistake episodes, derives `topic_mastery` deterministically, and shows it per theme in a learner-facing mastery dashboard.
-18. **Step 18 - Mock exam path:** needs Step 17; deterministic 40-question exam that bypasses the planner but not the logging.
+18. **Step 18 - Corpus coverage tracker:** needs Step 17 (`quiz_answers` from the graph, and `theme_sections` from its mastery change). Placed directly after mastery is implemented so that quizzes stop repeating a theme's top passages. Part A makes quizzes coverage-aware; Part B gives the **Teach me** and **Quiz me** buttons a fixed path that skips the planner; Part C adds `lesson_sources` so "taught" coverage has real section data, and the planner tool.
 19. **Step 19 - Mistake-driven review retrieval:** needs Step 17 (mistake episodes with sources).
 20. **Step 20 - Persistent study plan:** needs Step 12. Additive planner tools; this is what makes the autonomy persist across sessions rather than within a turn.
-21. **Step 21 - Corpus coverage tracker:** needs Step 17 (`quiz_answers` from the graph); adds `lesson_sources` so "taught" coverage has real section data.
+21. **Step 21 - Mock exam path:** needs Step 17; deterministic 40-question exam that bypasses the planner but not the logging.
     - Steps 19, 20 and 21 can be built in any order.
 22. **Step 22 - Finish the UI:** needs Steps 18, 20 and 21; adds onboarding, the mock exam timer, and learner-facing polish to the coach UI from Steps 12 and 13
 23. **Step 23 - Self-improvement via per-learner scheduling:** **in MVP.** Needs Step 9 (persisted bank) and Step 7B (`quiz_answers`) only; no planner dependency, so it can be built in parallel with Steps 10 to 22 and turned on after Step 22 ships. Included in MVP because the project's stated purpose is an agent that improves over time, and per-learner scheduling is the cheapest loop that visibly does that with one real learner. Ships with the reflection-report chore that makes its check-in evidence-based.

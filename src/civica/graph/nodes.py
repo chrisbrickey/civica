@@ -28,6 +28,7 @@ from langgraph.types import Command
 from civica.assessment.grounding import QuizGrounding
 from civica.domain.question import Question
 from civica.explanation.engine import Explanation
+from civica.graph.answers import AnswerResult
 from civica.graph.planner import (
     MAX_PLANNER_STEPS,
     LESSON_EXCERPT_LIMIT,
@@ -78,6 +79,7 @@ class PlannerState(PlannerInput):
     lesson: Annotated[Explanation | None, _last_wins]
     quiz_questions: Annotated[list[Question], _last_wins]
     quiz_grounding: Annotated[QuizGrounding | None, _last_wins]
+    answered: dict[str, AnswerResult]
 
 
 NodeRuntime = Runtime[PlannerContext]
@@ -132,7 +134,7 @@ def start_turn(state: PlannerState) -> dict[str, object]:
         ],
         "model_calls": 0, "turn_id": str(uuid.uuid4()), "tool_calls": [],
         "halt_reason": None, "reply": "", "lesson": None, "quiz_questions": [],
-        "quiz_grounding": None,
+        "quiz_grounding": None, "answered": {},
     }
 
 

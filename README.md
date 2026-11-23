@@ -20,13 +20,14 @@ as opposed to optimization of chunk embedding and retrieval. See [Luminary RAG a
 
 | User types                             | Civica responds with                                                                                         |
 |----------------------------------------|--------------------------------------------------------------------------------------------------------------|
-| "Teach me about the Republic's values" | a short, corpus-grounded lesson on *Principes et valeurs de la République* followed by a check question      |
+| "Teach me something I need to know" | a short, corpus-grounded lesson on one of the official themes of the exam, followed by a check-in question     |
+| "Teach me about the Republic's values" | a short, corpus-grounded lesson on *Principes et valeurs de la République, followed by a check-in question      |
 | "Give me a quiz"                       | an LLM-generated multiple-choice question drawn from the theme most in need of review                        |
 | "Start a mock exam"                    | a 40-question, 45-minute mock mirroring the official theme weighting; reports pass/fail and per-theme scores |
 
 _NB: MVP uses embeddings of the official study materials in conjunction with an LLM to develop questions and answers. Use of the official `liste des questions de connaissance` (list of knowledge questions) is deferred to post-MVP due to lack of an official answer key._
 
-## Architecture Under Development
+## Architecture
 
 ```
                                       ┌───────┐
@@ -60,6 +61,7 @@ _NB: MVP uses embeddings of the official study materials in conjunction with an 
 
 ```
 
+
 ### Learner Graph
 
 Every turn enters through `route_input` and every path ends at `memory_writer`, which persists a summary of the turn. 
@@ -67,9 +69,19 @@ Every turn enters through `route_input` and every path ends at `memory_writer`, 
 ```
 START ─► route_input
            │
-           └─ message ────────────► planner loop (below) ──────────────► memory_writer ─► END
+           ├─ message ──────► planner loop (below) ───────────┐
+           │                                                  ▼
+           └─ answer ─► score_answer ─► update_mastery ─► memory_writer ─► END
+                           │                                  ▲
+                           └─ expired or already answered ────┘
 ```
 
+- `answer` is an input from the learner that demonstrates mastery of some piece of content, for example when the user selects an option for a quiz question.
+- `mastery` is calculated as a proportional penalty. A wrong answer costs as much as a correct answer earns. So mastery scores moves up and down with recent performance.
+- In the case of quizzes and knowledge checks, scoring the learner's answers is synchronous without LLM assist because the correct answer and explanations were previously generated with the questions themselves.
+- Learners are free to skip a question and redirect the coach*. That will result in zero impact to their scores and mastery levels for that section of content.
+
+_*Decision against using LangGraph's `interrupt` convention for redirects during a quiz or knowledge check: In civica, user responses to questions result in a new turn tagged `answer`, rather than resuming a LangGraph `interrupt`. This is an intentional decision to ensure that learners are free to skip a question and move on. A new turn handles such a learner redirect like any other turn and always finishes at `memory_writer` with persistence and logging. LangGraph's `interrupt`, which encapsulates both a question and an answer in a single turn, pauses waiting for a learner's response. If we used it here and the learner chose to redirect after being asked a question, that would leave a turn unfinished (no persistence)._
 
 ### Planner Loop
 
@@ -90,11 +102,11 @@ A fallback lesson will be served if `MAX_PLANNER_STEPS` is exceeded or if there 
                                ▼                       ▼
                              exit                    exit
 ```
-The planner loop is built from LangGraph nodes rather than custom Python to ensure:
+The planner loop is built from `LangGraph` nodes rather than custom Python to ensure:
 - Progress is checkpointed after every tool step so that a crash can resume mid-turn.
 - Each step can be streamed to the UI as it happens.
-- The graph can pause before a tool runs (human-in-the-loop interrupts).
 - Each step is visible in LangGraph tooling.
+- The graph could pause before a tool runs (`interrupt`) if human-in-the-loop approval is required for future features.
 
 
 ### Technology

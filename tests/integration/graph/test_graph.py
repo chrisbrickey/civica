@@ -37,11 +37,18 @@ from civica.graph.planner import (
 from civica.ingestion.repository import EmbeddedChunk, upsert_chunks
 from civica.llm.usage import TurnUsage, UsageTally
 from civica.memory.checkpointer import get_saver
-from civica.memory.records import MemoryKind, SessionSummary, TopicMastery
+from civica.memory.records import MemoryKind, MistakeEpisode, SessionSummary, TopicMastery
 from civica.memory.store import get_store
 from civica.memory.writer import get, list_records
 from civica.users.service import register
-from tests.support.assessment import FakeChatModel, explanation_for, grouped_generation_reply
+from tests.support.answers import (
+    ALREADY_ANSWERED_REPLY,
+    EXPIRED_REPLY,
+    UNKNOWN_QUESTION_ID,
+    answer_input,
+    answer_recap,
+)
+from tests.support.assessment import FakeChatModel, explanation_for, grouped_generation_reply, wrong_index
 from tests.support.llm import CONTENT_USAGE, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE
 from tests.support.memory import FULL_MASTERY
 from tests.support.planner import (
@@ -88,6 +95,11 @@ WHERE user_id = %s AND thread_id = %s
 ORDER BY step_index
 """
 _GAP_ROWS_SQL = "SELECT theme, query FROM retrieval_gaps WHERE query = %s"
+_ANSWER_ROWS_SQL = """
+SELECT theme, question_id, chosen_index, correct_index, is_correct FROM quiz_answers
+WHERE user_id = %s
+ORDER BY id
+"""
 
 _Graph = CompiledStateGraph[Any, PlannerContext, Any, Any]  # type: ignore[explicit-any]
 _State = dict[str, Any]  # type: ignore[explicit-any]
@@ -132,6 +144,7 @@ def user_id() -> Generator[UserId, None, None]:
             for item in store.search(namespace, limit=100):
                 store.delete(namespace, item.key)
         _execute("DELETE FROM planner_trace WHERE user_id = %s", new_user)
+        _execute("DELETE FROM quiz_answers WHERE user_id = %s", new_user)
         _execute("DELETE FROM users WHERE user_id = %s", new_user)
         _execute("DELETE FROM retrieval_gaps WHERE id > %s", last_gap["id"])
 
@@ -168,10 +181,44 @@ def _content_model() -> FakeChatModel:
     )
 
 
+@pytest.fixture()
+def answer_content_model() -> Generator[FakeChatModel, None, None]:
+    """Writes the one-question quiz; any further call fails.
+
+    The question text is unique per test, so parallel tests never delete the bank row mastery reads."""
+    text = f"{_QUESTION_TEXT}-{uuid.uuid4().hex}"
+    try:
+        yield FakeChatModel(
+            replies=(grouped_generation_reply((1, text)),),
+            tags=[EXPLANATION_TAG],
+            usage=CONTENT_USAGE,
+            fail_when_exhausted=True,
+        )
+    finally:
+        _execute("DELETE FROM generated_questions WHERE text = %s", text)
+
+
 def _graph(model: FakePlannerModel, content_model: FakeChatModel | None = None) -> _Graph:
-    """The production graph with only the chat models faked."""
-    deps = replace(default_planner_deps(), planner_model=model, content_model=content_model or _content_model())
+    """The production graph with only the chat models faked. The critic stays off, as in every test deps."""
+    deps = replace(
+        default_planner_deps(), planner_model=model, content_model=content_model or _content_model(), critic=None
+    )
     return build_graph(deps)
+
+
+def _stream(
+    graph: _Graph, user_id: UserId, config: RunnableConfig, graph_input: dict[str, object], tally: UsageTally | None
+) -> None:
+    """One turn, streamed the way the UI runs it."""
+    counted = tally is not None
+    list(
+        graph.stream(
+            graph_input,
+            config={**config, "callbacks": [tally]} if counted else config,
+            context=PlannerContext(user_id=user_id, usage=tally) if counted else PlannerContext(user_id=user_id),
+            subgraphs=True,
+        )
+    )
 
 
 def _turn(
@@ -181,16 +228,20 @@ def _turn(
     message: str = _LEARNER_MESSAGE,
     tally: UsageTally | None = None,
 ) -> None:
-    """One message turn, streamed the way the UI will run it."""
-    counted = tally is not None
-    list(
-        graph.stream(
-            {"kind": InputKind.MESSAGE, "learner_message": message},
-            config={**config, "callbacks": [tally]} if counted else config,
-            context=PlannerContext(user_id=user_id, usage=tally) if counted else PlannerContext(user_id=user_id),
-            subgraphs=True,
-        )
-    )
+    """One message turn."""
+    _stream(graph, user_id, config, {"kind": InputKind.MESSAGE, "learner_message": message}, tally)
+
+
+def _answer(
+    graph: _Graph,
+    user_id: UserId,
+    config: RunnableConfig,
+    question_id: str,
+    chosen_index: int,
+    tally: UsageTally | None = None,
+) -> None:
+    """One answer turn for a checkpointed question."""
+    _stream(graph, user_id, config, answer_input(question_id, chosen_index), tally)
 
 
 def _values(graph: _Graph, config: RunnableConfig) -> _State:
@@ -220,6 +271,37 @@ def _lesson_and_check() -> tuple[AIMessage, ...]:
         tool_call(GENERATE_QUIZ, "call-quiz", theme=_THEME.slug, n=1),
         final_message(_FINAL_TEXT),
     )
+
+
+def _quiz_only() -> tuple[AIMessage, ...]:
+    """A turn that only asks one quiz question."""
+    return (tool_call(GENERATE_QUIZ, "call-quiz", theme=_THEME.slug, n=1), final_message(_FINAL_TEXT))
+
+
+def _quiz(user_id: UserId, config: RunnableConfig, content_model: FakeChatModel) -> Question:
+    """Run a one-question quiz turn and return the question it checkpointed."""
+    graph = _graph(_scripted(*_quiz_only()), content_model)
+    _turn(graph, user_id, config)
+    (question,) = _values(graph, config)["quiz_questions"]
+    assert isinstance(question, Question)
+    return question
+
+
+def _answer_graph(content_model: FakeChatModel) -> _Graph:
+    """A fresh graph for answer turns. Its planner has no script, so any planner call fails the test."""
+    return _graph(_scripted(), content_model)
+
+
+def _answer_rows(user_id: UserId) -> list[dict[str, object]]:
+    return _execute(_ANSWER_ROWS_SQL, user_id)
+
+
+def _mistakes(user_id: UserId) -> list[MistakeEpisode]:
+    return list_records(user_id, MistakeEpisode, get_store())
+
+
+def _mastery(user_id: UserId) -> TopicMastery | None:
+    return get(user_id, _THEME.slug, TopicMastery, get_store())
 
 
 def _forbidden_write() -> AIMessage:
@@ -463,3 +545,220 @@ class TestThreadPersistence:
         ]
         assert not any(isinstance(m, ToolMessage) for m in messages)
         assert "messages" not in _values(graph, config)
+
+
+@pytest.mark.usefixtures("corpus")
+class TestAnswerTurn:
+    """An answer turn scores a checkpointed question without the planner, logs it, and moves mastery."""
+
+    def test_next_turn_scores_the_question_the_quiz_turn_checkpointed(
+        self,
+        user_id: UserId,
+        config: RunnableConfig,
+        answer_content_model: FakeChatModel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from civica.graph.answers import AnswerResult
+
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        restarted = _answer_graph(content_model)
+
+        with caplog.at_level(logging.WARNING):
+            _answer(restarted, user_id, config, question.question_id, question.correct_index)
+            values = _values(restarted, config)
+
+        result = values["answer_result"]
+        assert isinstance(result, AnswerResult)
+        assert (result.question_id, result.chosen_index, result.is_correct) == (
+            question.question_id,
+            question.correct_index,
+            True,
+        )
+        assert values["answered"] == {question.question_id: result}
+        assert [r.message for r in caplog.records if r.name.startswith(_SERIALIZER_LOGGER)] == []
+
+    @pytest.mark.parametrize("is_correct", [True, False], ids=["right", "wrong"])
+    def test_answer_is_written_to_quiz_answers(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel, is_correct: bool
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        chosen = question.correct_index if is_correct else wrong_index(question)
+
+        _answer(_answer_graph(content_model), user_id, config, question.question_id, chosen)
+
+        assert _answer_rows(user_id) == [
+            {
+                "theme": _THEME.slug,
+                "question_id": question.question_id,
+                "chosen_index": chosen,
+                "correct_index": question.correct_index,
+                "is_correct": is_correct,
+            }
+        ]
+
+    def test_wrong_answer_writes_a_mistake_episode_with_the_question_sources(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+
+        _answer(_answer_graph(content_model), user_id, config, question.question_id, wrong_index(question))
+
+        assert _mistakes(user_id) == [
+            MistakeEpisode(theme=_THEME, question_id=question.question_id, sources=list(question.sources))
+        ]
+
+    def test_right_answer_writes_no_mistake_episode(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+
+        _answer(_answer_graph(content_model), user_id, config, question.question_id, question.correct_index)
+
+        assert _mistakes(user_id) == []
+
+    @pytest.mark.parametrize("is_correct", [True, False], ids=["right", "wrong"])
+    def test_answer_updates_topic_mastery_without_the_planner_recording_it(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel, is_correct: bool
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        trace_before = _trace(user_id, config)
+        chosen = question.correct_index if is_correct else wrong_index(question)
+
+        _answer(_answer_graph(content_model), user_id, config, question.question_id, chosen)
+
+        saved = _mastery(user_id)
+        assert saved is not None
+        # The shared corpus sets the exact share, so a right answer only needs to earn some of the theme.
+        if is_correct:
+            assert 0.0 < saved.mastery <= 1.0
+        else:
+            assert saved.mastery == 0.0
+        # The answer turn wrote no planner trace, so record_outcome never ran.
+        assert _trace(user_id, config) == trace_before
+        assert RECORD_OUTCOME not in [row["tool_name"] for row in trace_before]
+
+    @pytest.mark.parametrize("is_correct", [True, False], ids=["right", "wrong"])
+    def test_session_summary_describes_the_answer_not_the_quiz(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel, is_correct: bool
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        chosen = question.correct_index if is_correct else wrong_index(question)
+
+        _answer(_answer_graph(content_model), user_id, config, question.question_id, chosen)
+
+        assert _summary(user_id) == answer_recap(_THEME, is_correct)
+
+
+@pytest.mark.usefixtures("corpus")
+class TestAnswerThatIsNotScored:
+    """An expired or repeated answer is told so, and writes no row, no mistake, and no mastery."""
+
+    def test_answer_after_a_message_turn_cleared_the_quiz_has_expired(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        _turn(_graph(_scripted(final_message(_SECOND_FINAL_TEXT)), content_model), user_id, config)
+        graph = _answer_graph(content_model)
+
+        _answer(graph, user_id, config, question.question_id, wrong_index(question))
+
+        values = _values(graph, config)
+        assert values["reply"] == EXPIRED_REPLY
+        assert values["answer_result"] is None
+        self._assert_nothing_written(user_id)
+
+    def test_answer_for_an_unknown_question_has_expired(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        graph = _answer_graph(content_model)
+
+        _answer(graph, user_id, config, UNKNOWN_QUESTION_ID, wrong_index(question))
+
+        assert _values(graph, config)["reply"] == EXPIRED_REPLY
+        self._assert_nothing_written(user_id)
+
+    def test_second_answer_to_the_same_question_is_already_answered(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        graph = _answer_graph(content_model)
+        _answer(graph, user_id, config, question.question_id, wrong_index(question))
+        first = _values(graph, config)["answer_result"]
+
+        _answer(graph, user_id, config, question.question_id, question.correct_index)
+
+        values = _values(graph, config)
+        assert values["reply"] == ALREADY_ANSWERED_REPLY
+        assert values["answered"] == {question.question_id: first}
+        assert [row["is_correct"] for row in _answer_rows(user_id)] == [False]
+        assert len(_mistakes(user_id)) == 1
+        assert _mastery(user_id) == TopicMastery(theme=_THEME, mastery=0.0)
+
+    def test_a_message_turn_clears_the_answered_results(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        _answer(_answer_graph(content_model), user_id, config, question.question_id, question.correct_index)
+        graph = _graph(_scripted(final_message(_SECOND_FINAL_TEXT)), content_model)
+
+        _turn(graph, user_id, config, _SECOND_LEARNER_MESSAGE)
+
+        values = _values(graph, config)
+        assert values["answered"] == {}
+        assert values["quiz_questions"] == []
+
+    @staticmethod
+    def _assert_nothing_written(user_id: UserId) -> None:
+        assert _answer_rows(user_id) == []
+        assert _mistakes(user_id) == []
+        assert _mastery(user_id) is None
+
+
+@pytest.mark.usefixtures("corpus")
+class TestAnswerMakesNoModelCall:
+    """An answer turn is checked against the checkpointed question alone; its stored explanation needs no call."""
+
+    @pytest.mark.parametrize("is_correct", [True, False], ids=["right", "wrong"])
+    def test_answer_turn_calls_neither_the_content_model_nor_the_planner(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel, is_correct: bool
+    ) -> None:
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        planner_model = _scripted()
+        chosen = question.correct_index if is_correct else wrong_index(question)
+        graph = _graph(planner_model, content_model)
+
+        _answer(graph, user_id, config, question.question_id, chosen, UsageTally())
+
+        # The one content call is the quiz turn's.
+        assert content_model.invocation_count == 1
+        assert planner_model.received == []
+        assert _values(graph, config)["token_usage"].by_caller == {}
+
+    @pytest.mark.parametrize("is_correct", [True, False], ids=["right", "wrong"])
+    def test_answer_result_holds_the_score_and_the_theme(
+        self, user_id: UserId, config: RunnableConfig, answer_content_model: FakeChatModel, is_correct: bool
+    ) -> None:
+        from civica.graph.answers import AnswerResult
+
+        content_model = answer_content_model
+        question = _quiz(user_id, config, content_model)
+        graph = _answer_graph(content_model)
+        chosen = question.correct_index if is_correct else wrong_index(question)
+
+        _answer(graph, user_id, config, question.question_id, chosen)
+
+        assert _values(graph, config)["answer_result"] == AnswerResult(
+            question_id=question.question_id, theme=question.theme, chosen_index=chosen, is_correct=is_correct
+        )

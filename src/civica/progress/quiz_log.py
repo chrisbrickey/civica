@@ -15,6 +15,7 @@ import psycopg.rows
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from civica.db.session import run_on_connection
+from civica.domain.source_ref import SourceRef
 from civica.domain.themes import Theme
 from civica.domain.user import UserId
 
@@ -25,7 +26,6 @@ INSERT INTO quiz_answers (
 VALUES (%s, %s, %s, %s, %s, %s)
 """
 
-# Filter and ordering are served by quiz_answers_user_recent_idx (user_id, is_correct, answered_at DESC).
 # `id DESC` is a deterministic tiebreak:
 #   - answered_at defaults to NOW() - transaction start time - so answers persisted together could share a timestamp
 #   - the monotonic BIGSERIAL id persists an order of when the user selected an answer
@@ -35,6 +35,15 @@ FROM quiz_answers
 WHERE user_id = %s AND is_correct = false
 ORDER BY answered_at DESC, id DESC
 LIMIT %s
+"""
+
+# An answer whose question is not in generated_questions has no sources, so it is excluded.
+_THEME_ANSWERS_SQL = """
+SELECT a.is_correct, q.sources
+FROM quiz_answers a
+JOIN generated_questions q ON q.question_id = a.question_id
+WHERE a.user_id = %s AND a.theme = %s
+ORDER BY a.answered_at, a.id
 """
 
 
@@ -58,6 +67,15 @@ class QuizAnswerRow(BaseModel):  # type: ignore[explicit-any]
         if isinstance(value, str):
             return Theme.from_slug(value)
         return value
+
+
+class SourcedAnswer(BaseModel):  # type: ignore[explicit-any]
+    """Whether one answer was correct, with the corpus sections its question cites."""
+
+    model_config = ConfigDict(frozen=True)
+
+    is_correct: bool
+    sources: list[SourceRef]
 
 
 def _log_answer_on_connection(
@@ -125,5 +143,27 @@ def recent_mistakes(
     """
     return run_on_connection(
         lambda connection: _recent_mistakes_on_connection(user_id, limit, connection),
+        conn,
+    )
+
+
+def _theme_answers_on_connection(
+    user_id: UserId,
+    theme: Theme,
+    conn: psycopg.Connection[psycopg.rows.TupleRow],
+) -> list[SourcedAnswer]:
+    with conn.cursor(row_factory=psycopg.rows.class_row(SourcedAnswer)) as cursor:
+        cursor.execute(_THEME_ANSWERS_SQL, (user_id, theme.slug))
+        return cursor.fetchall()
+
+
+def theme_answers(
+    user_id: UserId,
+    theme: Theme,
+    conn: psycopg.Connection[psycopg.rows.TupleRow] | None = None,
+) -> list[SourcedAnswer]:
+    """Return the learner's answers on one theme, oldest first, each with its question's sources."""
+    return run_on_connection(
+        lambda connection: _theme_answers_on_connection(user_id, theme, connection),
         conn,
     )
