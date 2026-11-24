@@ -1741,11 +1741,14 @@ The formula, for each response drawn:
   - **Test:** extend `tests/integration/graph/test_graph.py`, which already covers `default_planner_deps`: `default_planner_deps()` returns deps with a critic, so coach quizzes and the mock exam (a subsequent step) both run it. Test deps keep `critic=None` unless a test needs it.
   - Extend `default_planner_deps()` to pass `critic=LlmCritic()`.
   - The critic is one more LLM call per quiz, plus a rewrite and another check for each round with rejections. Its tokens show under the critic caller in the developer panel (token usage step).
-
-- **README:**
-  - Remove "Quiz answers are practice only until answer scoring ships" from the web app usage text.
   
-- **Check In:** Stop and ask the user to confirm if the implementation is satisfactory. Instruct them how to test the changes manually in the UI.
+- **Check In:** Stop and ask the user to confirm if the implementation is satisfactory. Instruct them to test the app manually:
+     1. Run uv run python -m civica.ui.app --dev and sign in.
+     2. Press Quiz me. The card should have no "practice" label, and Submit stays disabled until you pick an option.
+     3. Answer one question wrongly. You should see "Answered question 1", then the "Not quite…" line and the explanation, with that question locked. The developer panel's Learner state should show that theme's new mastery.
+     4. Reload the page. The answered question should still be locked with its result, and the other questions should still be answerable. 
+     5. The developer panel should now show token usage under the critic for each new quiz.
+     NB: Observing an expired question is difficult to catch from the UI. It's primarily handled on the backend.
 
 
 **Part C: Mastery dashboard in UI.**
@@ -1770,6 +1773,7 @@ The formula, for each response drawn:
   - When this step is completed, prefix the header with `✅` and add below notes on any deviations from the plan.
     - Tokens consumed by the critic were distinguished from the tokens consumed by generation of quiz questions so that those processes can be compared. That means that a new caller tag and profile for the critic (with same 8192 max token cap) was added.
     - A previous version of the plan included an `explain_answer` node making one grounded model call per incorrect answer, with a `sources` filter on `search`. This is no longer relevant because, as of Step 13, the app generates one explanation per question (why the correct option is right) at the same time that it generates the question. No extra model call is required and it would be very undesirable (increased cost and latency).
+    - Added an `answer_scored` log line in the graph. Answer turns now get their own `turn_id`, so they log start and end lines like other turns.
     - Mastery algorithm was updated substantially. This significantly impacted the mastery code.
       - old: The initial plan calculated mastery as the correct share of the last 20 answers given by the learner. That results in a score that is completely independent from the multiple sections per theme.
       - new: The updated algorithm measures progress against the theme's corpus sections. So 100% requires credit in every section. Rules...

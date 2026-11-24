@@ -1,5 +1,7 @@
 """The full learner graph: routes each turn by input kind and ends every path at memory_writer."""
 
+import logging
+import uuid
 from enum import StrEnum
 from typing import Final, NotRequired, Protocol, TypedDict
 
@@ -34,10 +36,21 @@ from civica.memory.checkpointer import get_saver
 from civica.memory.records import SessionSummary
 from civica.memory.writer import put
 
+logger = logging.getLogger(__name__)
+
 PLANNER: Final = "planner"
 SCORE_ANSWER: Final = "score_answer"
 UPDATE_MASTERY: Final = "update_mastery"
 MEMORY_WRITER: Final = "memory_writer"
+
+
+class AnswerOutcome(StrEnum):
+    """Whether an answer counted."""
+
+    RIGHT = "right"
+    WRONG = "wrong"
+    EXPIRED = "expired"
+    ALREADY_ANSWERED = "already_answered"
 
 
 class InputKind(StrEnum):
@@ -57,6 +70,7 @@ class GraphInput(TypedDict):
 
 class GraphState(GraphInput):
     reply: str
+    turn_id: str # set by the node that opens the turn
     lesson: Explanation | None
     quiz_questions: list[Question]
     quiz_grounding: QuizGrounding | None
@@ -101,15 +115,20 @@ def _recap(state: GraphState) -> str:
 def _make_score_answer(deps: PlannerDeps) -> Node:
     def score_answer(state: GraphState, runtime: Runtime[PlannerContext]) -> dict[str, object]:
         """Score and log the submitted choice, unless its question expired or was already answered."""
-        question_id = state["question_id"]
+        user_id, question_id = runtime.context.user_id, state["question_id"]
         answered = state.get("answered", {})
         question = find_question(state.get("quiz_questions", []), question_id)
+        update: dict[str, object] = {"turn_id": str(uuid.uuid4()), "answer_result": None}
         if question is None:
-            return {"answer_result": None, "reply": EXPIRED_REPLY}
-        if question_id in answered:
-            return {"answer_result": None, "reply": ALREADY_ANSWERED_REPLY}
-        result = score_choice(deps, runtime.context.user_id, question, state["chosen_index"])
-        return {"answer_result": result, "answered": {**answered, question_id: result}, "reply": ""}
+            outcome, update["reply"] = AnswerOutcome.EXPIRED, EXPIRED_REPLY
+        elif question_id in answered:
+            outcome, update["reply"] = AnswerOutcome.ALREADY_ANSWERED, ALREADY_ANSWERED_REPLY
+        else:
+            result = score_choice(deps, user_id, question, state["chosen_index"])
+            outcome = AnswerOutcome.RIGHT if result.is_correct else AnswerOutcome.WRONG
+            update |= {"answer_result": result, "answered": {**answered, question_id: result}, "reply": ""}
+        logger.info("answer_scored user_id=%s question_id=%s outcome=%s", user_id, question_id, outcome.value)
+        return update
 
     return score_answer
 

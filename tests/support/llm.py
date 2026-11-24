@@ -91,7 +91,7 @@ class FakeChatModelBase(BaseChatModel):  # type: ignore[explicit-any]
 
     @abstractmethod
     def _reply_for(self, call_index: int) -> AIMessage:
-        """The reply to the call at `call_index` (0-based)."""
+        """The reply to the call at `call_index` (0-indexed)."""
 
     def _generate(
         self,
