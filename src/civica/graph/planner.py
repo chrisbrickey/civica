@@ -30,6 +30,7 @@ from civica.domain.themes import EXAM_QUESTION_COUNTS, Theme, ThemeSlug
 from civica.domain.user import UserId
 from civica.explanation.engine import MINIMUM_SIMILARITY, RETRIEVAL_K, Explanation, explain
 from civica.explanation.prompts import DEFAULT_WORD_LIMITS, WordLimits
+from civica.graph.mastery import ThemeAnswers
 from civica.graph.router import suggest_review_theme as review_heuristic
 from civica.graph.tool_names import PlannerTool
 from civica.graph.trace import (
@@ -43,8 +44,9 @@ from civica.llm.usage import UsageTally
 from civica.memory.records import LearnerProfile, MistakeEpisode, SessionSummary, TopicMastery
 from civica.memory.store import get_store
 from civica.memory.writer import get, list_records, put_planner
-from civica.progress.quiz_log import log_answer
+from civica.progress.quiz_log import log_answer, theme_answers
 from civica.retrieval.content import ContentChunk, SearchFn, search
+from civica.retrieval.sections import ThemeSections, theme_sections
 
 MAX_PLANNER_STEPS = 6
 
@@ -106,6 +108,8 @@ class PlannerDeps:
     retriever: SearchFn | None = None
     critic: CritiqueFn | None = None
     word_limits: WordLimits = DEFAULT_WORD_LIMITS
+    theme_answers: ThemeAnswers = theme_answers
+    theme_sections: ThemeSections = theme_sections
 
 
 @dataclass(frozen=True)
@@ -128,16 +132,22 @@ def default_planner_deps() -> PlannerDeps:
     )
 
 
-def read_learner_state(user_id: UserId, store: BaseStore) -> LearnerState:
-    """Mastery for recorded themes.
-
-     Includes the stated goal, mistake episodes, and the last session."""
-
+def read_mastery(user_id: UserId, store: BaseStore) -> dict[Theme, float]:
+    """Saved mastery for each theme that has any, in theme registry order."""
     mastery: dict[Theme, float] = {}
     for theme in EXAM_QUESTION_COUNTS:
         record = get(user_id, theme.slug, TopicMastery, store)
         if record is not None:
             mastery[theme] = record.mastery
+    return mastery
+
+
+def read_learner_state(user_id: UserId, store: BaseStore) -> LearnerState:
+    """Mastery for recorded themes.
+
+     Includes the stated goal, mistake episodes, and the last session."""
+
+    mastery = read_mastery(user_id, store)
     profile = get(user_id, PROFILE_KEY, LearnerProfile, store)
     summary = get(user_id, SUMMARY_KEY, SessionSummary, store)
 

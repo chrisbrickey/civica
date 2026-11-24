@@ -40,6 +40,7 @@ from civica.domain.user import UserId
 from civica.llm.client import QUIZ_PROFILE, get_chat_model
 from civica.progress.quiz_log import log_answer
 from civica.retrieval.content import ContentChunk, SearchFn, search
+from civica.retrieval.sections import OBJECTIVE_SECTION_IDS
 
 __all__ = [
     "MAX_REFINE_ATTEMPTS",
@@ -55,9 +56,6 @@ MINIMUM_SIMILARITY = 0.3
 
 # Regenerations allowed for questions the critic rejects, after the first generation.
 MAX_REFINE_ATTEMPTS = 2
-
-# Course-objective intros carry no civic facts to test.
-_OBJECTIVE_SECTION_IDS = frozenset({"objectif-de-la-fiche", "objectifs-de-la-fiche"})
 
 SectionKey = tuple[str, str]
 
@@ -290,7 +288,7 @@ def _generate_themed(
     results = [retriever(query, theme) for query in queries]
     retrieved = sum(map(len, results))
     ranked = _interleave([_sections(result) for result in results])
-    chunks = [c for c in ranked if c.chunk.section_id not in _OBJECTIVE_SECTION_IDS]
+    chunks = [c for c in ranked if c.chunk.section_id not in OBJECTIVE_SECTION_IDS]
     if not chunks:
         raise InsufficientMaterialError(theme, queries)
 

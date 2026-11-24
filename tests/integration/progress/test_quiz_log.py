@@ -14,10 +14,14 @@ import psycopg
 import psycopg.rows
 import pytest
 
+from civica.assessment.store import PostgresQuestionStore
+from civica.domain.question import Question
+from civica.domain.source_ref import SourceRef
 from civica.domain.themes import DROITS_ET_DEVOIRS, HISTOIRE_GEOGRAPHIE_ET_CULTURE, Theme
 from civica.domain.user import UserId
 from civica.progress.quiz_log import log_answer, recent_mistakes
 from civica.users.service import register
+from tests.support.assessment import make_question
 from tests.support.users import TEST_BCRYPT_ROUNDS
 
 # ---------------------------------------------------------------------------
@@ -49,6 +53,9 @@ _ANSWER_SEQUENCE: list[tuple[str, bool]] = [
 _MISTAKE_LIMIT = 3
 # The three most recent incorrect answers, most recent first.
 _EXPECTED_RECENT_MISTAKE_IDS = ["question-005", "question-004", "question-003"]
+_PROMPT_VERSION = "sample-prompt-version"
+_SOURCE_A = SourceRef(page_slug="sample-page", section_id="section-a")
+_SOURCE_B = SourceRef(page_slug="sample-page", section_id="section-b")
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +126,49 @@ class TestRecentMistakes:
         db_schema: psycopg.Connection[psycopg.rows.TupleRow],
     ) -> None:
         assert recent_mistakes(user_id, conn=db_schema) == []
+
+
+class TestThemeAnswers:
+    """theme_answers returns one theme's answers with their question's sources, oldest first."""
+
+    @staticmethod
+    def _save(db_schema: psycopg.Connection[psycopg.rows.TupleRow], *questions: Question) -> None:
+        PostgresQuestionStore().save(questions, _PROMPT_VERSION, conn=db_schema)
+
+    def test_returns_the_themes_answers_oldest_first_with_their_sources(
+        self,
+        user_id: UserId,
+        log_one: Callable[..., None],
+        db_schema: psycopg.Connection[psycopg.rows.TupleRow],
+    ) -> None:
+        from civica.progress.quiz_log import SourcedAnswer, theme_answers
+
+        first = make_question(text="sample-question-1", sources=(_SOURCE_A,))
+        second = make_question(text="sample-question-2", sources=(_SOURCE_A, _SOURCE_B))
+        other = make_question(text="sample-question-3", theme=_OTHER_THEME)
+        self._save(db_schema, first, second, other)
+        log_one(user_id=user_id, question_id=first.question_id, is_correct=True)
+        log_one(user_id=user_id, theme=_OTHER_THEME, question_id=other.question_id, is_correct=True)
+        log_one(user_id=user_id, question_id=second.question_id, is_correct=False)
+
+        assert theme_answers(user_id, _THEME, conn=db_schema) == [
+            SourcedAnswer(is_correct=True, sources=[_SOURCE_A]),
+            SourcedAnswer(is_correct=False, sources=[_SOURCE_A, _SOURCE_B]),
+        ]
+
+    def test_empty_list_for_a_theme_with_no_answers(
+        self,
+        user_id: UserId,
+        log_one: Callable[..., None],
+        db_schema: psycopg.Connection[psycopg.rows.TupleRow],
+    ) -> None:
+        from civica.progress.quiz_log import theme_answers
+
+        other = make_question(theme=_OTHER_THEME)
+        self._save(db_schema, other)
+        log_one(user_id=user_id, theme=_OTHER_THEME, question_id=other.question_id, is_correct=True)
+
+        assert theme_answers(user_id, _THEME, conn=db_schema) == []
 
 
 class TestFieldFidelity:
