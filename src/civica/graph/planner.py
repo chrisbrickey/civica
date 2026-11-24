@@ -16,7 +16,7 @@ from langgraph.store.base import BaseStore
 from langgraph.types import Command
 from pydantic import BaseModel
 
-from civica.assessment.critic import CritiqueFn
+from civica.assessment.critic import CritiqueFn, LlmCritic
 from civica.assessment.engine import generate_quiz
 from civica.assessment.errors import InsufficientMaterialError, QuestionGenerationError
 from civica.assessment.scoring import AnswerLogger, Quiz
@@ -127,6 +127,7 @@ def default_planner_deps() -> PlannerDeps:
         store=get_store(),
         question_store=PostgresQuestionStore(),
         answer_logger=log_answer,
+        critic=LlmCritic(),
         rejection_store=PostgresRejectionStore(),
         trace=PostgresTraceWriter(),
     )

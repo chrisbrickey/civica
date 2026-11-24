@@ -7,12 +7,15 @@ from typing import Final
 
 import pytest
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from nicegui import ElementFilter, ui
 from nicegui.elements.mixins.text_element import TextElement
 from nicegui.testing import User, UserInteraction
 
 from civica.domain.user import UserId
-from civica.ui.turns import TurnRunner
+from civica.graph.graph import build_graph
+from civica.memory.checkpointer import state_serializer
+from civica.ui.turns import CoachGraph, TurnRunner
 from tests.support.assessment import (
     SAMPLE_OPTIONS,
     FakeChatModel,
@@ -28,8 +31,10 @@ from tests.support.planner import (
     SUGGEST_THEME,
     TEACH,
     ControlledPlannerModel,
+    PlannerFakes,
     final_message,
     parallel_tool_calls,
+    scoring_deps,
     tool_call,
 )
 from tests.support.ui import (
@@ -38,6 +43,7 @@ from tests.support.ui import (
     PROMPT_INPUT_MARKER,
     QUIZ_CHECK_MARKER,
     QUIZ_MARKER,
+    QUIZ_ME_MARKER,
     QUIZ_RESULT_MARKER,
     SUBMIT_MARKER,
 )
@@ -155,6 +161,11 @@ def script_failure(planner_model: ControlledPlannerModel) -> None:
     planner_model.fail_at_call = 1
 
 
+def scoring_graph(fakes: PlannerFakes, planner_model: ControlledPlannerModel) -> CoachGraph:
+    """The real graph on the production allow-list of state types, with mastery read from the fake answer log."""
+    return build_graph(scoring_deps(fakes, planner_model), checkpointer=InMemorySaver(serde=state_serializer()))
+
+
 def question_texts(call_index: int, question_count: int) -> tuple[str, ...]:
     return tuple(generated_item_text(call_index, index) for index in range(question_count))
 
@@ -258,7 +269,7 @@ def marked(user: User, marker: str) -> list[ui.element]:
         return list(ElementFilter(marker=marker))
 
 
-def _texts(elements: Iterable[ui.element]) -> list[str]:
+def element_texts(elements: Iterable[ui.element]) -> list[str]:
     """The text of each element and of each radio option, so assertions do not depend on layout."""
     texts: list[str] = []
     for element in elements:
@@ -277,12 +288,12 @@ def labelled(marker: str, text: str) -> re.Pattern[str]:
 
 def quiz_text(user: User) -> str:
     """Every piece of text inside the quiz card, in page order."""
-    return "\n".join(_texts(the(user, QUIZ_MARKER).descendants()))
+    return "\n".join(element_texts(the(user, QUIZ_MARKER).descendants()))
 
 
 def result_text(user: User) -> str:
     """The text of every shown check result, in page order."""
-    return "\n".join(text for found in marked(user, QUIZ_RESULT_MARKER) for text in _texts(found.descendants(include_self=True)))
+    return "\n".join(text for found in marked(user, QUIZ_RESULT_MARKER) for text in element_texts(found.descendants(include_self=True)))
 
 
 def quiz_radios(user: User) -> list[ui.radio]:
@@ -302,7 +313,7 @@ def choose_option(user: User, question: int, option: int) -> None:
     radios = quiz_radios(user)
     assert question < len(radios), f"expected an answer radio for question {question + 1}, found {len(radios)} radios"
     radio = radios[question]
-    labels = _texts([radio])
+    labels = element_texts([radio])
     matching = [label for label in labels if SAMPLE_OPTIONS[option] in label]
     assert len(matching) == 1, f"expected one radio option holding {SAMPLE_OPTIONS[option]!r}, found {labels}"
     UserInteraction(user, {radio}, matching[0]).click()
@@ -334,7 +345,7 @@ async def see_dev_panel(user: User) -> None:
 
 def panel_text(panel: ui.element) -> str:
     """Every piece of text inside one developer panel, in page order."""
-    return "\n".join(_texts(panel.descendants()))
+    return "\n".join(element_texts(panel.descendants()))
 
 
 def panel_texts(user: User) -> list[str]:
@@ -351,3 +362,36 @@ def panel_beside(user: User, marker: str) -> ui.element:
     panels = [panel for panel in dev_panels(user) if panel in holding[0]]
     assert len(panels) == 1, f"expected one panel beside {marker!r}, found {len(panels)}"
     return panels[0]
+
+
+# ---------------------------------------------------------------------------
+# Answering
+# ---------------------------------------------------------------------------
+
+
+async def finish_quiz_me(user: User, turn_runner: TurnRunner, user_id: UserId, question_count: int = 1) -> None:
+    """Press Quiz me and wait until its questions are on the page and the prompt is open again."""
+    click_marked(user, QUIZ_ME_MARKER)
+    wait_for_turn_end(turn_runner, user_id)
+    await prompt_is_open(user)
+    await see(user, *question_texts(QUIZ_ONLY_CALL, question_count))
+
+
+def is_locked(user: User, question: int) -> bool:
+    """Whether the question at index `question` is drawn with its radio and submit button disabled."""
+    cards = marked(user, QUIZ_MARKER)
+    buttons = [element for element in marked(user, QUIZ_CHECK_MARKER) if isinstance(element, ui.button)]
+    if len(cards) != 1 or question >= len(buttons):
+        return False
+    radios = [element for element in cards[0].descendants() if isinstance(element, ui.radio)]
+    return not buttons[question].enabled and not radios[question].enabled
+
+
+async def answer_question(user: User, turn_runner: TurnRunner, user_id: UserId, question: int, option: int) -> None:
+    """Select an option, submit it, and wait until its answer turn ends and the question is drawn locked."""
+    choose_option(user, question, option)
+    await wait_until(lambda: check_buttons(user)[question].enabled)
+    click_check(user, question)
+    wait_for_turn_end(turn_runner, user_id)
+    await prompt_is_open(user)
+    await wait_until(lambda: is_locked(user, question))

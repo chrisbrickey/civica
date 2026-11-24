@@ -5,14 +5,14 @@ from typing import Final
 from civica.domain.themes import Theme
 from civica.graph.graph import InputKind
 
-EXPIRED_REPLY: Final = "That question has expired."
+EXPIRED_REPLY: Final = "That question has expired. Ask me anything or press 'Quiz me' for new questions."
 ALREADY_ANSWERED_REPLY: Final = "You have already answered that question."
 UNKNOWN_QUESTION_ID: Final = "sample-unknown-question-id"
 VIA_ANSWER: Final = "answer"
 
 
 def answer_message(number: int) -> str:
-    """The display message of an answer turn for the 1-based question `number`."""
+    """The display message of an answer turn for a given question `number` (1-indexed)."""
     return f"Answered question {number}"
 
 

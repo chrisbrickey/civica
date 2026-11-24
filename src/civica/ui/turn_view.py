@@ -8,6 +8,8 @@ from typing import Final
 
 from langgraph.types import StateSnapshot
 
+from civica.graph.answers import AnswerResult
+from civica.graph.graph import InputKind
 from civica.graph.planner import HaltReason
 from civica.ingestion.chunker import CHUNK_SIZE, OVERLAP
 from civica.retrieval.content import ContentChunk
@@ -54,12 +56,11 @@ class QuizItemView:
 
 
 @dataclass(frozen=True)
-class CheckResult:
-    """The outcome of a practice check: the correct option's text and why it is correct."""
+class AnswerView:
+    """A scored answer as shown under its question."""
 
-    correct: bool
-    correct_option: str
-    explanation: str
+    chosen_index: int
+    is_correct: bool
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,8 @@ class TurnView:
     quiz_items: tuple[QuizItemView, ...]
     is_fallback: bool
     notice: str | None
+    # Answered questions by question id; empty until the learner answers.
+    answers: Mapping[str, AnswerView]
 
 
 def is_fallback_reason(halt_reason: HaltReason) -> bool:
@@ -83,7 +86,7 @@ def is_fallback_reason(halt_reason: HaltReason) -> bool:
 def _unfinished(learner_message: str) -> TurnView:
     return TurnView(
         learner_message=learner_message, reply="", lesson_text=None, sources=(), quiz_items=(),
-        is_fallback=False, notice=UNFINISHED_TEXT,
+        is_fallback=False, notice=UNFINISHED_TEXT, answers={},
     )
 
 
@@ -137,13 +140,8 @@ def group_by_page(sources: Iterable[SourceView]) -> tuple[SourcePage, ...]:
     )
 
 
-def check_choice(item: QuizItemView, choice: int) -> CheckResult:
-    """Whether the chosen option index is the right one, with the right option and its explanation."""
-    return CheckResult(
-        correct=choice == item.correct_index,
-        correct_option=item.options[item.correct_index],
-        explanation=item.explanation,
-    )
+def _answer_view(result: AnswerResult) -> AnswerView:
+    return AnswerView(chosen_index=result.chosen_index, is_correct=result.is_correct)
 
 
 def build_turn_view(snapshot: StateSnapshot) -> TurnView | None:  # type: ignore[explicit-any]
@@ -162,10 +160,13 @@ def build_turn_view(snapshot: StateSnapshot) -> TurnView | None:  # type: ignore
     quiz_questions = values["quiz_questions"]
     is_fallback = is_fallback_reason(values["halt_reason"])
     chunks = lesson.context_chunks if lesson is not None else ()
+    shows_content = lesson is not None or quiz_questions
+    is_answer_turn = InputKind(values["kind"]) is InputKind.ANSWER
     return TurnView(
         learner_message=values["learner_message"],
-        # The lesson and quiz are shown on their own, so the planner reply is hidden then.
-        reply="" if lesson is not None or quiz_questions else reply,
+        # The lesson and quiz are shown on their own. So the planner reply is hidden then.
+        # An answer turn's reply is the expired or already-answered notice.
+        reply="" if shows_content and not is_answer_turn else reply,
         lesson_text=lesson.text if lesson is not None else None,
         sources=_sources(chunks),
         quiz_items=tuple(
@@ -173,4 +174,5 @@ def build_turn_view(snapshot: StateSnapshot) -> TurnView | None:  # type: ignore
         ),
         is_fallback=is_fallback,
         notice=None,
+        answers={qid: _answer_view(result) for qid, result in values.get("answered", {}).items()},
     )

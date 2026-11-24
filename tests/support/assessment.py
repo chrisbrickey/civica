@@ -65,7 +65,7 @@ def explanation_for(text: str) -> str:
 
 
 def generated_item(text: str, group: int) -> dict[str, object]:
-    """One well-formed question as the model returns it, naming its 1-based passage group."""
+    """One well-formed question as the model returns it, naming its 1-indexed (not 0-indexed) passage group."""
     return {
         "text": text,
         "options": list(SAMPLE_OPTIONS),

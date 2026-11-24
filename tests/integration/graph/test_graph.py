@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 
+from civica.assessment.critic import LlmCritic
 from civica.db.pool import get_pool
 from civica.domain.question import Question
 from civica.domain.themes import DROITS_ET_DEVOIRS, VIVRE_DANS_LA_SOCIETE_FRANCAISE
@@ -49,6 +50,7 @@ from tests.support.answers import (
 )
 from tests.support.assessment import FakeChatModel, explanation_for, grouped_generation_reply, wrong_index
 from tests.support.llm import CONTENT_USAGE, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE
+from tests.support.logs import lines_from, only
 from tests.support.memory import FULL_MASTERY
 from tests.support.planner import (
     GENERATE_QUIZ,
@@ -90,6 +92,12 @@ _EMPTY_THEME = VIVRE_DANS_LA_SOCIETE_FRANCAISE
 _VECTOR = [1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 1)
 
 _SERIALIZER_LOGGER = "langgraph.checkpoint.serde"
+_GRAPH_LOGGER = "civica.graph.graph"
+_ANSWER_SCORED = "answer_scored"
+_RIGHT = "right"
+_WRONG = "wrong"
+_EXPIRED = "expired"
+_ALREADY_ANSWERED = "already_answered"
 
 _TRACE_ROWS_SQL = """
 SELECT tool_name, halt_reason, step_index FROM planner_trace
@@ -333,6 +341,11 @@ def _trace(user_id: UserId, config: RunnableConfig) -> list[dict[str, object]]:
 
 def test_default_graph_compiles_on_postgres(config: RunnableConfig) -> None:
     assert _values(build_graph(), config) == {}
+
+
+def test_default_planner_deps_run_the_question_critic() -> None:
+    # Answers move mastery, so production quizzes must pass the critic before a learner sees them.
+    assert isinstance(default_planner_deps().critic, LlmCritic)
 
 
 @pytest.mark.usefixtures("corpus")
@@ -725,6 +738,63 @@ class TestAnswerThatIsNotScored:
         assert _answer_rows(user_id) == []
         assert _mistakes(user_id) == []
         assert _mastery(user_id) is None
+
+
+@pytest.mark.usefixtures("corpus")
+class TestAnswerScoredLine:
+    """Each answer turn logs one answer_scored line saying whether the answer counted, with ids only."""
+
+    @pytest.mark.parametrize(("is_correct", "outcome"), [(True, _RIGHT), (False, _WRONG)], ids=["right", "wrong"])
+    def test_scored_answer_logs_whether_it_was_right(
+        self,
+        user_id: UserId,
+        config: RunnableConfig,
+        answer_content_model: FakeChatModel,
+        caplog: pytest.LogCaptureFixture,
+        is_correct: bool,
+        outcome: str,
+    ) -> None:
+        question = _quiz(user_id, config, answer_content_model)
+        chosen = question.correct_index if is_correct else wrong_index(question)
+
+        with caplog.at_level(logging.INFO, logger=_GRAPH_LOGGER):
+            _answer(_answer_graph(answer_content_model), user_id, config, question.question_id, chosen)
+
+        assert only(lines_from(caplog.records, _GRAPH_LOGGER), _ANSWER_SCORED) == {
+            "user_id": str(user_id), "question_id": question.question_id, "outcome": outcome,
+        }
+
+    def test_expired_answer_logs_expired(
+        self,
+        user_id: UserId,
+        config: RunnableConfig,
+        answer_content_model: FakeChatModel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _quiz(user_id, config, answer_content_model)
+
+        with caplog.at_level(logging.INFO, logger=_GRAPH_LOGGER):
+            _answer(_answer_graph(answer_content_model), user_id, config, UNKNOWN_QUESTION_ID, 0)
+
+        assert only(lines_from(caplog.records, _GRAPH_LOGGER), _ANSWER_SCORED) == {
+            "user_id": str(user_id), "question_id": UNKNOWN_QUESTION_ID, "outcome": _EXPIRED,
+        }
+
+    def test_repeated_answer_logs_already_answered(
+        self,
+        user_id: UserId,
+        config: RunnableConfig,
+        answer_content_model: FakeChatModel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        question = _quiz(user_id, config, answer_content_model)
+        graph = _answer_graph(answer_content_model)
+        _answer(graph, user_id, config, question.question_id, question.correct_index)
+
+        with caplog.at_level(logging.INFO, logger=_GRAPH_LOGGER):
+            _answer(graph, user_id, config, question.question_id, question.correct_index)
+
+        assert only(lines_from(caplog.records, _GRAPH_LOGGER), _ANSWER_SCORED)["outcome"] == _ALREADY_ANSWERED
 
 
 @pytest.mark.usefixtures("corpus")

@@ -2,7 +2,7 @@
 
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Final
 
 from langchain_core.language_models import LanguageModelInput
@@ -21,10 +21,13 @@ from pydantic import PrivateAttr
 
 from civica.assessment.critic import CritiqueFn
 from civica.assessment.prompts import QUIZ_PROMPTS
-from civica.domain.themes import DROITS_ET_DEVOIRS
+from civica.domain.source_ref import SourceRef
+from civica.domain.themes import DROITS_ET_DEVOIRS, Theme
+from civica.domain.user import UserId
 from civica.graph.planner import PlannerDeps
 from civica.graph.trace import RetrievalGap, TraceStep
 from civica.memory.records import MistakeEpisode
+from civica.progress.quiz_log import SourcedAnswer
 
 from tests.support.assessment import (
     FakeAnswerLogger,
@@ -252,4 +255,32 @@ def planner_deps(
         critic=critic,
         rejection_store=fakes.rejection_store,
         trace=fakes.trace,
+    )
+
+
+def _fake_theme_answers(fakes: PlannerFakes) -> Callable[[UserId, Theme], list[SourcedAnswer]]:
+    """Answers read from the fake answer log, oldest first, each with its saved question's sources."""
+
+    def theme_answers(user_id: UserId, theme: Theme) -> list[SourcedAnswer]:
+        sources = {q.question_id: list(q.sources) for q in fakes.question_store.saved_questions}
+        return [
+            SourcedAnswer(is_correct=call.is_correct, sources=sources.get(call.question_id, []))
+            for call in fakes.answer_logger.calls
+            if call.user_id == user_id and call.theme == theme
+        ]
+
+    return theme_answers
+
+
+def _fake_theme_sections(fakes: PlannerFakes) -> Callable[[Theme], dict[SourceRef, int]]:
+    """Every fake corpus section on the theme, each the same size."""
+    return lambda theme: {ref: 1 for ref in fakes.retriever.content_source_refs(theme)}
+
+
+def scoring_deps(fakes: PlannerFakes, planner_model: FakePlannerModel) -> PlannerDeps:
+    """planner_deps whose mastery reads come from the fakes instead of Postgres."""
+    return replace(
+        planner_deps(fakes, planner_model),
+        theme_answers=_fake_theme_answers(fakes),
+        theme_sections=_fake_theme_sections(fakes),
     )

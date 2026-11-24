@@ -13,7 +13,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import StreamMode
 
 from civica.domain.user import UserId
-from civica.graph.graph import GraphInput, GraphState
+from civica.graph.graph import SCORE_ANSWER, GraphInput, GraphState
 from civica.graph.nodes import START_TURN, PlannerContext
 from civica.llm.usage import UsageTally
 
@@ -24,6 +24,8 @@ CoachGraph = CompiledStateGraph[GraphState, PlannerContext, GraphInput, GraphSta
 _UNKNOWN: Final = "unknown"
 _NO_HALT_REASON: Final = "none"
 _STREAM_MODES: Final[list[StreamMode]] = ["updates"]
+# The nodes that open a turn and set its id: start_turn for a message, score_answer for an answer.
+_TURN_OPENERS: Final = frozenset({START_TURN, SCORE_ANSWER})
 
 
 def coach_config(user_id: UserId) -> RunnableConfig:
@@ -79,7 +81,7 @@ class ActiveTurn:
         updates = [values] if isinstance(values, Mapping) else values
         with self._lock:
             for update in updates:
-                if node == START_TURN:
+                if node in _TURN_OPENERS:
                     self._turn_id = str(update["turn_id"])
                 if update.get("halt_reason") is not None:
                     self._halt_reason = str(update["halt_reason"])
@@ -127,7 +129,7 @@ class TurnRunner:
                 assert isinstance(update, dict)
                 for node, values in update.items():
                     turn.apply(node, values)
-                    if node == START_TURN:
+                    if node in _TURN_OPENERS:
                         logger.info("turn_start user_id=%s turn_id=%s", user_id, turn.snapshot().turn_id)
         except Exception as error:
             logger.exception(

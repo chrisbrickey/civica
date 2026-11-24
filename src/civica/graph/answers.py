@@ -14,7 +14,7 @@ from civica.graph.planner import PlannerDeps
 from civica.memory.records import MistakeEpisode, TopicMastery
 from civica.memory.writer import put
 
-EXPIRED_REPLY: Final = "That question has expired."
+EXPIRED_REPLY: Final = "That question has expired. Ask me anything or press 'Quiz me' for new questions."
 ALREADY_ANSWERED_REPLY: Final = "You have already answered that question."
 
 
@@ -26,6 +26,11 @@ class AnswerResult:
     theme: Theme
     chosen_index: int
     is_correct: bool
+
+
+def answer_message(number: int) -> str:
+    """The learner message shown for an answer where `number` is 1-indexed (not 0-indexed)."""
+    return f"Answered question {number}"
 
 
 def answer_recap(result: AnswerResult) -> str:

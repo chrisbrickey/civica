@@ -11,7 +11,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
-from civica.graph.graph import MEMORY_WRITER, PLANNER, InputKind
+from civica.graph.graph import MEMORY_WRITER, PLANNER, SCORE_ANSWER, InputKind
 from civica.graph.nodes import PLANNER_MODEL, PLANNER_TOOLS, START_TURN, PlannerContext
 from civica.graph.planner import HaltReason, ToolCall
 from civica.llm.usage import UsageTally
@@ -87,6 +87,11 @@ _PLANNER_DONE: Final = _update(
     PLANNER, {"tool_calls": [_READ_CALL, _TEACH_CALL], "halt_reason": HaltReason.FINAL_MESSAGE}, namespace=()
 )
 _WRITER_DONE: Final = _update(MEMORY_WRITER, None, namespace=())
+# An answer turn skips the planner. score_answer opens it with its own turn id.
+_ANSWER_TURN: Final = (
+    _update(SCORE_ANSWER, {"turn_id": _TURN_ID, "answer_result": None, "reply": ""}, namespace=()),
+    _WRITER_DONE,
+)
 
 _FULL_TURN: Final = (
     _START,
@@ -475,6 +480,17 @@ def test_turn_start_is_logged_when_start_turn_arrives_not_when_the_turn_begins(
     graph.resume.set()
     assert turn.wait(_WAIT_TIMEOUT_SECONDS), "the turn never ended"
     assert only(_turn_lines(turn_logs), _TURN_START)["turn_id"] == _TURN_ID
+
+
+def test_answer_turn_logs_its_start_and_end_with_its_own_turn_id(
+    make_graph: _GraphFactory, turn_logs: pytest.LogCaptureFixture
+) -> None:
+    turn = _run_to_end(TurnRunner(make_graph(*_ANSWER_TURN)))
+
+    lines = _turn_lines(turn_logs)
+    assert events(lines) == [_TURN_START, _TURN_END]
+    assert [fields["turn_id"] for _event, fields in lines] == [_TURN_ID, _TURN_ID]
+    assert turn.snapshot().turn_id == _TURN_ID
 
 
 @pytest.mark.parametrize(

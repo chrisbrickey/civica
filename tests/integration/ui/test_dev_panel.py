@@ -9,8 +9,8 @@ from civica.graph.planner import PROFILE_KEY
 from civica.memory.records import LearnerProfile
 from civica.memory.writer import put
 from civica.ui.dev_panel import GROUNDING, LEARNER_STATE, CODE_PATH, TOKEN_COUNTS, TOOLS_CALLED, TURN
-from civica.ui.turns import TurnRunner, coach_config
-from tests.support.assessment import FakeChatModel
+from civica.ui.turns import CoachGraph, TurnRunner, coach_config
+from tests.support.assessment import OPTION_COUNT, SAMPLE_CORRECT_INDEX, FakeChatModel
 from tests.support.llm import CONTENT_USAGE, EXPLANATION_TAG, PLANNER_TAG, PLANNER_USAGE
 from tests.support.coach import (
     COACH_LOGGER,
@@ -25,7 +25,9 @@ from tests.support.coach import (
     QUIZ_ONLY_CALL,
     REPLY,
     UNFINISHED_TEXT,
+    answer_question,
     dev_panels,
+    finish_quiz_me,
     held_turn_is_shown,
     marked,
     panel_beside,
@@ -38,6 +40,7 @@ from tests.support.coach import (
     script_lesson_with_quiz,
     script_quiz_only,
     script_reply,
+    scoring_graph,
     see,
     see_dev_panel,
     submit,
@@ -387,3 +390,35 @@ async def test_drawing_panels_logs_no_tool_name_or_tool_argument(
     assert messages, "the coach page wrote no log lines, so the scan proves nothing"
     for tool_text in (READ_STATE, TEACH, FOCUS, DEFAULT_THEME.slug):
         assert not [message for message in messages if tool_text in message]
+
+
+# ---------------------------------------------------------------------------
+# After an answer
+# ---------------------------------------------------------------------------
+
+
+class TestAfterAnAnswer:
+    """The Learner state line shows the mastery an answer turn just wrote."""
+
+    @pytest.fixture()
+    def coach_graph(self, planner_fakes: PlannerFakes, planner_model: ControlledPlannerModel) -> CoachGraph:
+        return scoring_graph(planner_fakes, planner_model)
+
+    async def test_learner_state_shows_the_answered_themes_new_mastery(
+        self,
+        signed_in_user: User,
+        planner_model: ControlledPlannerModel,
+        planner_fakes: PlannerFakes,
+        turn_runner: TurnRunner,
+        learner_id: UserId,
+    ) -> None:
+        seed_mastery(planner_fakes.store, learner_id, {DEFAULT_THEME: HALF_MASTERY})
+        script_quiz_only(planner_model)
+        await finish_quiz_me(signed_in_user, turn_runner, learner_id)
+
+        await answer_question(signed_in_user, turn_runner, learner_id, 0, (SAMPLE_CORRECT_INDEX + 1) % OPTION_COUNT)
+
+        await see_dev_panel(signed_in_user)
+        text = panel_text(panel_beside(signed_in_user, QUIZ_MARKER))
+        assert f"{DEFAULT_THEME.slug}={_two_decimals(0.0)}" in text
+        assert f"{DEFAULT_THEME.slug}={_two_decimals(HALF_MASTERY)}" not in text

@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from civica.domain.chunk import Chunk
-from civica.domain.question import Question
 from civica.embeddings.embedder import Embedder
 from civica.explanation.engine import Explanation
 from civica.graph.graph import PLANNER, InputKind
@@ -15,22 +14,18 @@ from civica.ingestion.chunker import CHUNK_SIZE
 from civica.retrieval.content import ContentChunk
 from civica.scripts.ingest_corpus import collect_pending_chunks
 from civica.ui.turn_view import (
-    CheckResult,
     QuizItemView,
     SourcePage,
     SourceView,
     TurnView,
     build_turn_view,
-    check_choice,
     group_by_page,
 )
 from tests.support.assessment import (
     SAMPLE_CORRECT_INDEX,
-    SAMPLE_EXPLANATION,
     SAMPLE_OPTIONS,
     make_content_chunk,
     make_question,
-    wrong_index,
 )
 from tests.support.planner import (
     DEFAULT_THEME,
@@ -87,10 +82,6 @@ def _view(**overrides: object) -> TurnView:
     view = build_turn_view(_snapshot(_state(**overrides)))
     assert view is not None
     return view
-
-
-def _quiz_item(question: Question) -> QuizItemView:
-    return _view(quiz_questions=[question]).quiz_items[0]
 
 
 # ---------------------------------------------------------------------------
@@ -156,36 +147,6 @@ def test_quiz_questions_map_to_items_in_order_with_their_answers_and_explanation
         )
         for question in questions
     )
-
-
-# ---------------------------------------------------------------------------
-# Practice checks
-# ---------------------------------------------------------------------------
-
-
-def test_checking_the_correct_option_reports_correct() -> None:
-    question = make_question(correct_index=SAMPLE_CORRECT_INDEX)
-
-    assert check_choice(_quiz_item(question), SAMPLE_CORRECT_INDEX).correct
-
-
-def test_checking_a_wrong_option_reports_the_correct_option_and_the_explanation() -> None:
-    question = make_question(correct_index=SAMPLE_CORRECT_INDEX)
-
-    result = check_choice(_quiz_item(question), wrong_index(question))
-
-    assert result == CheckResult(
-        correct=False, correct_option=SAMPLE_OPTIONS[SAMPLE_CORRECT_INDEX], explanation=SAMPLE_EXPLANATION
-    )
-
-
-@pytest.mark.parametrize("correct_index", range(len(SAMPLE_OPTIONS)))
-def test_only_the_correct_option_checks_as_correct(correct_index: int) -> None:
-    item = _quiz_item(make_question(correct_index=correct_index))
-
-    assert [check_choice(item, choice).correct for choice in range(len(SAMPLE_OPTIONS))] == [
-        choice == correct_index for choice in range(len(SAMPLE_OPTIONS))
-    ]
 
 
 @pytest.mark.parametrize("halt_reason", [HaltReason.MAX_STEPS, HaltReason.FORBIDDEN_WRITE])
