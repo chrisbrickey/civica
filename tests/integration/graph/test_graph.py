@@ -17,7 +17,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 
-from civica.db.migrate import apply_schema
 from civica.db.pool import get_pool
 from civica.domain.question import Question
 from civica.domain.themes import DROITS_ET_DEVOIRS, VIVRE_DANS_LA_SOCIETE_FRANCAISE
@@ -79,6 +78,9 @@ _LESSON_TEXT = "sample-lesson-text"
 _QUESTION_TEXT = "sample-graph-question-text"
 _CHUNK_HASH = "sample-graph-chunk-hash"
 
+# One worker for this file: user_id cleans up retrieval_gaps by id range, which would delete other workers' rows.
+pytestmark = pytest.mark.xdist_group("public_graph")
+
 _THEME = DROITS_ET_DEVOIRS
 # Never seeded, so retrieval on this theme comes back empty.
 _EMPTY_THEME = VIVRE_DANS_LA_SOCIETE_FRANCAISE
@@ -130,9 +132,8 @@ def _fake_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture()
-def user_id() -> Generator[UserId, None, None]:
+def user_id(public_schema: None) -> Generator[UserId, None, None]:
     """A user in the public schema, removed with everything its turns wrote."""
-    apply_schema()
     new_user = register(f"test-{uuid.uuid4().hex[:16]}", _SECRET, rounds=TEST_BCRYPT_ROUNDS)
     (last_gap,) = _execute("SELECT COALESCE(MAX(id), 0) AS id FROM retrieval_gaps")
     try:
@@ -159,9 +160,10 @@ def config() -> Generator[RunnableConfig, None, None]:
 
 
 @pytest.fixture()
-def corpus(make_chunk_row: Callable[..., EmbeddedChunk]) -> Generator[None, None, None]:
+def corpus(
+    public_schema: None, make_chunk_row: Callable[..., EmbeddedChunk]
+) -> Generator[None, None, None]:
     """One chunk for _THEME in the public corpus, removed with the question built from it."""
-    apply_schema()
     # A hash per test, so parallel workers do not delete each other's chunk.
     chunk_hash = f"{_CHUNK_HASH}-{uuid.uuid4().hex}"
     upsert_chunks([make_chunk_row(theme=_THEME, embedding=_VECTOR, content_hash=chunk_hash)])
