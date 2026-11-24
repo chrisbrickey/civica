@@ -24,7 +24,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
-addopts = "-m 'not external' -p nicegui.testing.plugin -n 8"
+addopts = "-m 'not external' -p nicegui.testing.plugin -n 8 --dist loadgroup"
 asyncio_mode = "auto"
 main_file = ""
 markers = [

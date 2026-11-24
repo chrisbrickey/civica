@@ -53,6 +53,12 @@ def _require_reachable_test_db() -> None:
         )
 
 
+@pytest.fixture(scope="session")
+def public_schema() -> None:
+    """Apply the schema to the shared public schema once per worker."""
+    apply_schema()
+
+
 @pytest.fixture()
 def db_schema() -> Generator[psycopg.Connection[psycopg.rows.TupleRow], None, None]:
     """Yield a connection scoped to a fresh, isolated Postgres schema for each test.
