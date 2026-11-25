@@ -64,6 +64,8 @@ _UNKNOWN_ERROR: Final = "unknown"
 _COMPACT_PROPS: Final = "dense dense-toggle switch-toggle-side"
 _POLL_SECONDS: Final = 0.1
 _VERB_SECONDS: Final = 3.0
+# Lets a list directly after a paragraph line render as a list; keeps NiceGUI's default extras.
+_LESSON_MARKDOWN_EXTRAS: Final = [*ui.markdown.default_extras, "cuddled-lists"]
 
 # Lesson lines stay readable and headings near body size; the sources sit as a quiet footer in the lesson bubble.
 _LESSON_CSS: Final = """
@@ -151,7 +153,7 @@ def _draw_sources(sources: tuple[SourceView, ...]) -> None:
 def _draw_lesson(view: TurnView, lesson_text: str) -> None:
     # One column, so the lesson and its sources share a single bubble.
     with ui.chat_message().mark("coach-lesson"), ui.column().classes("w-full gap-0 civica-lesson-body"):
-        ui.markdown(lesson_text).classes("civica-lesson")
+        ui.markdown(lesson_text, extras=_LESSON_MARKDOWN_EXTRAS).classes("civica-lesson")
         if view.sources:
             _draw_sources(view.sources)
 

@@ -1,6 +1,7 @@
 """Integration tests for asking the coach for a lesson."""
 
 import logging
+import re
 from collections.abc import Callable
 from string import ascii_uppercase
 
@@ -31,6 +32,7 @@ from tests.support.coach import (
     click_submit,
     coach_lines,
     labelled,
+    lesson_script,
     held_turn_is_shown,
     marked,
     press_enter,
@@ -100,6 +102,12 @@ _SCANNED_LEARNER_MESSAGE = "scanned-sample-learner-message"
 _QUESTION_TEXT = question_texts(QUIZ_AFTER_LESSON_CALL, 1)[0]
 _QUIZ_TITLE = "Check your comprehension"
 
+# A list straight after a paragraph line with no blank line, as the explanation model writes it.
+_BULLETS = ("sample-bullet-001", "sample-bullet-002", "sample-bullet-003")
+_LESSON_INTRO = "sample-lesson-intro:"
+_LIST_LESSON_TEXT = "\n".join((_LESSON_INTRO, *(f"- {bullet}" for bullet in _BULLETS)))
+_LIST_ITEM = re.compile(r"<li>(.*?)</li>", re.DOTALL)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -116,6 +124,15 @@ def _label_text(user: User, marker: str) -> str:
 async def _see_lesson(user: User, turn_runner: TurnRunner, learner_id: UserId) -> None:
     wait_for_turn_end(turn_runner, learner_id)
     await see(user, LESSON_TEXT)
+
+
+def _lesson_list_items(user: User) -> list[str]:
+    """The text of each list item the lesson bubble renders."""
+    lesson = the(user, LESSON_MARKER)
+    html = "".join(
+        str(element.props.get("innerHTML", "")) for element in lesson.descendants() if isinstance(element, ui.markdown)
+    )
+    return [item.strip() for item in _LIST_ITEM.findall(html)]
 
 
 def _turn_lines(caplog: pytest.LogCaptureFixture) -> list[LogLine]:
@@ -149,6 +166,23 @@ async def test_submitting_a_prompt_renders_the_lesson_once_without_repeating_it_
     await see(signed_in_user, PROMPT)
     await signed_in_user.should_not_see(content=REPLY)
     assert len(signed_in_user.find(content=LESSON_TEXT).elements) == 1
+
+
+async def test_a_list_right_after_a_paragraph_line_shows_each_bullet_as_its_own_item(
+    signed_in_user: User,
+    planner_model: ControlledPlannerModel,
+    content_model: FakeChatModel,
+    turn_runner: TurnRunner,
+    learner_id: UserId,
+) -> None:
+    planner_model.script = lesson_script()
+    content_model.replies = (_LIST_LESSON_TEXT,)
+
+    submit(signed_in_user)
+    wait_for_turn_end(turn_runner, learner_id)
+    await see(signed_in_user, _LESSON_INTRO)
+
+    assert _lesson_list_items(signed_in_user) == list(_BULLETS)
 
 
 async def test_the_prompt_input_clears_after_sending(
